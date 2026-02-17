@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Holded Dashboard | Local Insights</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+
+<body>
+    <div class="dashboard-container">
+        <aside class="sidebar">
+            <div class="logo">HOLDED <span>Local</span></div>
+            <nav>
+                <div class="nav-item active" data-view="overview">Overview</div>
+                <div class="nav-item" data-view="contacts">Contacts</div>
+                <div class="nav-item" data-view="products">Inventory</div>
+                <div class="nav-item" data-view="invoices">Invoices</div>
+                <div class="nav-item" data-view="purchases">Expenses</div>
+                <div class="nav-item" data-view="estimates">Estimates</div>
+            </nav>
+            <div class="safe-mode-badge" id="safeModeBadge">SAFE MODE ACTIVE</div>
+        </aside>
+
+        <main class="content">
+            <!-- SETUP VIEW -->
+            <div id="view-setup" class="view-container">
+                <div class="setup-box card">
+                    <div class="logo">HOLDED <span>Local</span></div>
+
+                    <!-- STEP 1: HOLDED KEY -->
+                    <div id="setup-step-1" class="setup-step active">
+                        <h2>Connect to Holded</h2>
+                        <p>To start analyzing your data, please provide your <strong>Holded API Key</strong>.</p>
+                        <div class="setup-form">
+                            <input type="password" id="setupApiKey" placeholder="Enter your Holded API Key...">
+                            <button class="sync-btn" id="finishSetupBtn">Finish Setup</button>
+                            <p class="error-msg" id="setupError1"></p>
+                        </div>
+                    </div>
+
+
+                    <div class="setup-help">
+                        <p>Settings can be changed later in the app's configuration.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- OVERVIEW VIEW -->
+            <div id="view-overview" class="view-container active">
+                <header>
+                    <h1>Dashboard Summary</h1>
+                    <div class="filter-controls">
+                        <input type="date" id="startDate">
+                        <input type="date" id="endDate">
+                        <button class="sync-btn" id="filterBtn">Apply Range</button>
+                        <button class="sync-btn" id="syncBtn">Sync Now</button>
+                        <button class="action-btn btn-secondary" id="exportExcelBtn">Export Excel</button>
+                    </div>
+                </header>
+
+                <section class="stats-grid">
+                    <div class="stat-card income">
+                        <h3>Total Income</h3>
+                        <p id="totalIncome">0 €</p>
+                    </div>
+                    <div class="stat-card expenses">
+                        <h3>Total Expenses</h3>
+                        <p id="totalExpenses">0 €</p>
+                    </div>
+                    <div class="stat-card balance">
+                        <h3>Net Balance</h3>
+                        <p id="netBalance">0 €</p>
+                    </div>
+                </section>
+
+                <section class="charts-container">
+                    <div class="chart-wrapper">
+                        <h2>Monthly Performance</h2>
+                        <canvas id="performanceChart"></canvas>
+                    </div>
+                    <div class="chart-wrapper">
+                        <h2>Top Items Distribution</h2>
+                        <canvas id="distributionChart"></canvas>
+                    </div>
+                </section>
+
+                <section class="activity-section">
+                    <div class="card recent-activity">
+                        <h2>Recent Activity</h2>
+                        <table id="recentTable">
+                            <thead>
+                                <tr>
+                                    <th>Type</th>
+                                    <th>Contact</th>
+                                    <th>Date</th>
+                                    <th>Amount</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="recentBody">
+                                <!-- Data injected via JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            </div>
+
+            <!-- ENTITY VIEW (DYNAMIC) -->
+            <div id="view-entity" class="view-container">
+                <header>
+                    <h1 id="entityViewTitle">Entity Details</h1>
+                    <div class="filter-controls">
+                        <div class="date-filter-group" id="entityDateFilters">
+                            <input type="date" id="entityStartDate">
+                            <input type="date" id="entityEndDate">
+                        </div>
+                        <input type="text" id="entitySearch" placeholder="Search...">
+                        <button class="sync-btn" onclick="showView('overview')">Back to Dashboard</button>
+                    </div>
+                </header>
+                <div class="card table-container">
+                    <table id="entityTable">
+                        <thead id="entityThead"></thead>
+                        <tbody id="entityTbody"></tbody>
+                    </table>
+                </div>
+            </div>
+
+        </main>
+    </div>
+    <div id="detailsModal" class="modal-overlay">
+        <div class="modal-content">
+            <header>
+                <h2 id="modalTitle">Document Details</h2>
+                <button class="close-btn" onclick="closeModal()">&times;</button>
+            </header>
+            <div class="table-container">
+                <table>
+                    <thead id="modalThead"></thead>
+                    <tbody id="modalTbody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    <!-- PDF Viewer Modal -->
+    <div id="pdfModal" class="modal-overlay">
+        <div class="modal-content pdf-modal-content">
+            <header>
+                <h2 id="pdfModalTitle">View Document</h2>
+                <div class="modal-actions">
+                    <button class="action-btn share-btn" id="pdfShareBtn" title="Share Document">
+                        📤 Share
+                    </button>
+                    <button class="close-btn" onclick="closePdfModal()">&times;</button>
+                </div>
+            </header>
+            <div class="pdf-container">
+                <iframe id="pdfFrame" src="about:blank"></iframe>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+
+</html>

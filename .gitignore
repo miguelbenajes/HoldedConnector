@@ -1,0 +1,32 @@
+# Environment
+.env
+
+# Database
+*.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# Uploads and reports
+uploads/
+reports/
+
+# Generated PDFs
+ai_report_*.pdf
+ai_analysis.pdf
+
+# Logs
+server.log
+
+# macOS
+.DS_Store
+
+# Claude
+.claude/

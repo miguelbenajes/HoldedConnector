@@ -1,0 +1,2617 @@
+openapi: 3.0.3
+info:
+  title: Holded API
+  version: 1.0.0
+  description: Complete Holded API specification for Invoice, CRM, Projects, Team, and Accounting operations
+servers:
+  - url: https://api.holded.com/api/invoicing/v1
+    description: Invoice API
+  - url: https://api.holded.com/api/crm/v1
+    description: CRM API
+  - url: https://api.holded.com/api/projects/v1
+    description: Projects API
+  - url: https://api.holded.com/api/team/v1
+    description: Team API
+  - url: https://api.holded.com/api/accounting/v1
+    description: Accounting API
+components:
+  securitySchemes:
+    holdedKey:
+      type: apiKey
+      in: header
+      name: key
+security:
+  - holdedKey: []
+tags:
+  # Invoice API
+  - name: Treasury
+  - name: Contacts
+  - name: ExpensesAccounts
+  - name: NumberingSeries
+  - name: Products
+  - name: SalesChannels
+  - name: Warehouses
+  - name: Payments
+  - name: Taxes
+  - name: Documents
+  - name: ContactGroups
+  - name: Remittances
+  - name: Services
+  # CRM API
+  - name: Funnels
+  - name: Leads
+  - name: Events
+  - name: Bookings
+  # Projects API
+  - name: Projects
+  - name: Tasks
+  - name: TimeTracking
+  # Team API
+  - name: Employees
+  - name: EmployeeTime
+  # Accounting API
+  - name: Ledger
+  - name: ChartOfAccounts
+
+paths:
+  # ==================== INVOICE API ====================
+
+  # TREASURIES
+  /api/invoicing/v1/treasury:
+    get:
+      tags: [Treasury]
+      summary: List Treasury Accounts
+      operationId: listTreasuries
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+          required: false
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+    post:
+      tags: [Treasury]
+      summary: Create Treasury Account
+      operationId: createTreasury
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/treasury/{id}:
+    get:
+      tags: [Treasury]
+      summary: Get Treasury Account
+      operationId: getTreasury
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  # CONTACTS
+  /api/invoicing/v1/contacts:
+    get:
+      tags: [Contacts]
+      summary: List Contacts
+      operationId: listContacts
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+          required: false
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+    post:
+      tags: [Contacts]
+      summary: Create Contact
+      operationId: createContact
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/contacts/{id}:
+    get:
+      tags: [Contacts]
+      summary: Get Contact Details
+      operationId: getContact
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    put:
+      tags: [Contacts]
+      summary: Update Contact
+      operationId: updateContact
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    delete:
+      tags: [Contacts]
+      summary: Delete Contact
+      operationId: deleteContact
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/contacts/{id}/attachments:
+    get:
+      tags: [Contacts]
+      summary: List Contact Attachments
+      operationId: listContactAttachments
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/attachments/{id}:
+    get:
+      tags: [Contacts]
+      summary: Get Attachment
+      operationId: getAttachment
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "401": { description: Unauthorized }
+
+  # EXPENSES ACCOUNTS
+  /api/invoicing/v1/expenses-accounts:
+    get:
+      tags: [ExpensesAccounts]
+      summary: List Expense Accounts
+      operationId: listExpensesAccounts
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+          required: false
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+    post:
+      tags: [ExpensesAccounts]
+      summary: Create Expense Account
+      operationId: createExpenseAccount
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/expenses-accounts/{id}:
+    get:
+      tags: [ExpensesAccounts]
+      summary: Get Expense Account
+      operationId: getExpenseAccount
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    put:
+      tags: [ExpensesAccounts]
+      summary: Update Expense Account
+      operationId: updateExpenseAccount
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    delete:
+      tags: [ExpensesAccounts]
+      summary: Delete Expense Account
+      operationId: deleteExpenseAccount
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+        "401": { description: Unauthorized }
+
+  # NUMBERING SERIES
+  /api/invoicing/v1/numbering-series:
+    get:
+      tags: [NumberingSeries]
+      summary: List Numbering Series
+      operationId: listNumberingSeries
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+          required: false
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+    post:
+      tags: [NumberingSeries]
+      summary: Create Numbering Series
+      operationId: createNumberingSeries
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/numbering-series/{id}:
+    get:
+      tags: [NumberingSeries]
+      summary: Get Numbering Series
+      operationId: getNumberingSeries
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    put:
+      tags: [NumberingSeries]
+      summary: Update Numbering Series
+      operationId: updateNumberingSeries
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    delete:
+      tags: [NumberingSeries]
+      summary: Delete Numbering Series
+      operationId: deleteNumberingSeries
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+        "401": { description: Unauthorized }
+
+  # PRODUCTS
+  /api/invoicing/v1/products:
+    get:
+      tags: [Products]
+      summary: List Products
+      operationId: listProducts
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+          required: false
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+    post:
+      tags: [Products]
+      summary: Create Product
+      operationId: createProduct
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/products/{id}:
+    get:
+      tags: [Products]
+      summary: Get Product
+      operationId: getProduct
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    put:
+      tags: [Products]
+      summary: Update Product
+      operationId: updateProduct
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    delete:
+      tags: [Products]
+      summary: Delete Product
+      operationId: deleteProduct
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/products/{id}/image:
+    get:
+      tags: [Products]
+      summary: Get Product Main Image
+      operationId: getProductImage
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            image/*:
+              schema: { type: string, format: binary }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/products/{id}/images:
+    get:
+      tags: [Products]
+      summary: List Product Images
+      operationId: listProductImages
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/products/{id}/image/{filename}:
+    get:
+      tags: [Products]
+      summary: Get Product Secondary Image
+      operationId: getProductSecondaryImage
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: path
+          name: filename
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            image/*:
+              schema: { type: string, format: binary }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/products/{id}/stock:
+    put:
+      tags: [Products]
+      summary: Update Product Stock
+      operationId: updateProductStock
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  # SALES CHANNELS
+  /api/invoicing/v1/sales-channels:
+    get:
+      tags: [SalesChannels]
+      summary: List Sales Channels
+      operationId: listSalesChannels
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+          required: false
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+    post:
+      tags: [SalesChannels]
+      summary: Create Sales Channel
+      operationId: createSalesChannel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/sales-channels/{id}:
+    get:
+      tags: [SalesChannels]
+      summary: Get Sales Channel
+      operationId: getSalesChannel
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    put:
+      tags: [SalesChannels]
+      summary: Update Sales Channel
+      operationId: updateSalesChannel
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    delete:
+      tags: [SalesChannels]
+      summary: Delete Sales Channel
+      operationId: deleteSalesChannel
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+        "401": { description: Unauthorized }
+
+  # WAREHOUSES
+  /api/invoicing/v1/warehouses:
+    get:
+      tags: [Warehouses]
+      summary: List Warehouses
+      operationId: listWarehouses
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+          required: false
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+    post:
+      tags: [Warehouses]
+      summary: Create Warehouse
+      operationId: createWarehouse
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/warehouses/{id}:
+    get:
+      tags: [Warehouses]
+      summary: Get Warehouse
+      operationId: getWarehouse
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    put:
+      tags: [Warehouses]
+      summary: Update Warehouse
+      operationId: updateWarehouse
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    delete:
+      tags: [Warehouses]
+      summary: Delete Warehouse
+      operationId: deleteWarehouse
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/warehouses/stock:
+    get:
+      tags: [Warehouses]
+      summary: List Products Stock
+      operationId: listWarehousesStock
+      description: List stock for all products across warehouses
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+
+  # PAYMENTS
+  /api/invoicing/v1/payments:
+    get:
+      tags: [Payments]
+      summary: List Payments
+      operationId: listPayments
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+          required: false
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+    post:
+      tags: [Payments]
+      summary: Create Payment
+      operationId: createPayment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/payments/{id}:
+    get:
+      tags: [Payments]
+      summary: Get Payment
+      operationId: getPayment
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    put:
+      tags: [Payments]
+      summary: Update Payment
+      operationId: updatePayment
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    delete:
+      tags: [Payments]
+      summary: Delete Payment
+      operationId: deletePayment
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+        "401": { description: Unauthorized }
+
+  # TAXES
+  /api/invoicing/v1/taxes:
+    get:
+      tags: [Taxes]
+      summary: List Taxes
+      operationId: listTaxes
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+          required: false
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/taxes/{id}:
+    get:
+      tags: [Taxes]
+      summary: Get Tax
+      operationId: getTax
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  # DOCUMENTS
+  /api/invoicing/v1/documents:
+    get:
+      tags: [Documents]
+      summary: List Documents
+      operationId: listDocuments
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+          required: false
+        - in: query
+          name: docType
+          schema: { type: string }
+          required: false
+          description: Filter by document type (invoice, quote, order, etc.)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/documents/{docType}:
+    post:
+      tags: [Documents]
+      summary: Create Document
+      operationId: createDocument
+      parameters:
+        - in: path
+          name: docType
+          required: true
+          schema: { type: string }
+          description: Document type (invoice, quote, order, proforma, purchaseorder, receipt, ticket, creditnote, estimate, waybill)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/documents/{docType}/{id}:
+    get:
+      tags: [Documents]
+      summary: Get Document
+      operationId: getDocument
+      parameters:
+        - in: path
+          name: docType
+          required: true
+          schema: { type: string }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    put:
+      tags: [Documents]
+      summary: Update Document
+      operationId: updateDocument
+      parameters:
+        - in: path
+          name: docType
+          required: true
+          schema: { type: string }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    delete:
+      tags: [Documents]
+      summary: Delete Document
+      operationId: deleteDocument
+      parameters:
+        - in: path
+          name: docType
+          required: true
+          schema: { type: string }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/documents/{docType}/{id}/pay:
+    post:
+      tags: [Documents]
+      summary: Record Document Payment
+      operationId: payDocument
+      parameters:
+        - in: path
+          name: docType
+          required: true
+          schema: { type: string }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Payment recorded
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/documents/{docType}/{id}/send:
+    post:
+      tags: [Documents]
+      summary: Send Document
+      operationId: sendDocument
+      parameters:
+        - in: path
+          name: docType
+          required: true
+          schema: { type: string }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Document sent
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/documents/{docType}/{id}/pdf:
+    get:
+      tags: [Documents]
+      summary: Export Document as PDF
+      operationId: getDocumentPDF
+      parameters:
+        - in: path
+          name: docType
+          required: true
+          schema: { type: string }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: PDF file
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/documents/{docType}/{id}/ship-all:
+    post:
+      tags: [Documents]
+      summary: Ship All Document Items
+      operationId: shipAllDocumentItems
+      parameters:
+        - in: path
+          name: docType
+          required: true
+          schema: { type: string }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Items shipped
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/documents/{docType}/{id}/attachments:
+    post:
+      tags: [Documents]
+      summary: Attach File to Document
+      operationId: attachFileToDocument
+      parameters:
+        - in: path
+          name: docType
+          required: true
+          schema: { type: string }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "201":
+          description: Attachment created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/documents/{docType}/{id}/ship-items:
+    post:
+      tags: [Documents]
+      summary: Ship Items by Line
+      operationId: shipDocumentItems
+      parameters:
+        - in: path
+          name: docType
+          required: true
+          schema: { type: string }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Items shipped
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/documents/{docType}/{id}/shipped-units:
+    get:
+      tags: [Documents]
+      summary: Get Shipped Units by Item
+      operationId: getDocumentShippedUnits
+      parameters:
+        - in: path
+          name: docType
+          required: true
+          schema: { type: string }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Shipped units information
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/documents/{docType}/{id}/tracking:
+    post:
+      tags: [Documents]
+      summary: Update Tracking Info
+      operationId: updateDocumentTracking
+      parameters:
+        - in: path
+          name: docType
+          required: true
+          schema: { type: string }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Tracking updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/documents/{docType}/{id}/pipeline:
+    post:
+      tags: [Documents]
+      summary: Update Pipeline
+      operationId: updateDocumentPipeline
+      parameters:
+        - in: path
+          name: docType
+          required: true
+          schema: { type: string }
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Pipeline updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/documents/payment-methods:
+    get:
+      tags: [Documents]
+      summary: List Payment Methods
+      operationId: listPaymentMethods
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+
+  # CONTACT GROUPS
+  /api/invoicing/v1/contact-groups:
+    get:
+      tags: [ContactGroups]
+      summary: List Contact Groups
+      operationId: listContactGroups
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+          required: false
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+    post:
+      tags: [ContactGroups]
+      summary: Create Contact Group
+      operationId: createContactGroup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/contact-groups/{id}:
+    get:
+      tags: [ContactGroups]
+      summary: Get Contact Group
+      operationId: getContactGroup
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    put:
+      tags: [ContactGroups]
+      summary: Update Contact Group
+      operationId: updateContactGroup
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    delete:
+      tags: [ContactGroups]
+      summary: Delete Contact Group
+      operationId: deleteContactGroup
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+        "401": { description: Unauthorized }
+
+  # REMITTANCES
+  /api/invoicing/v1/remittances:
+    get:
+      tags: [Remittances]
+      summary: List Remittances
+      operationId: listRemittances
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+          required: false
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/remittances/{id}:
+    get:
+      tags: [Remittances]
+      summary: Get Remittance
+      operationId: getRemittance
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  # SERVICES
+  /api/invoicing/v1/services:
+    get:
+      tags: [Services]
+      summary: List Services
+      operationId: listServices
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+          required: false
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+    post:
+      tags: [Services]
+      summary: Create Service
+      operationId: createService
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/invoicing/v1/services/{id}:
+    get:
+      tags: [Services]
+      summary: Get Service
+      operationId: getService
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    put:
+      tags: [Services]
+      summary: Update Service
+      operationId: updateService
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    delete:
+      tags: [Services]
+      summary: Delete Service
+      operationId: deleteService
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+        "401": { description: Unauthorized }
+
+  # ==================== CRM API ====================
+
+  # FUNNELS
+  /api/crm/v1/funnels:
+    get:
+      tags: [Funnels]
+      summary: List Funnels
+      operationId: listFunnels
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+          required: false
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+    post:
+      tags: [Funnels]
+      summary: Create Funnel
+      operationId: createFunnel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/crm/v1/funnels/{id}:
+    get:
+      tags: [Funnels]
+      summary: Get Funnel
+      operationId: getFunnel
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    put:
+      tags: [Funnels]
+      summary: Update Funnel
+      operationId: updateFunnel
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    delete:
+      tags: [Funnels]
+      summary: Delete Funnel
+      operationId: deleteFunnel
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+        "401": { description: Unauthorized }
+
+  # LEADS
+  /api/crm/v1/leads:
+    get:
+      tags: [Leads]
+      summary: List Leads
+      operationId: listLeads
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+          required: false
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+    post:
+      tags: [Leads]
+      summary: Create Lead
+      operationId: createLead
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/crm/v1/leads/{id}:
+    get:
+      tags: [Leads]
+      summary: Get Lead
+      operationId: getLead
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    put:
+      tags: [Leads]
+      summary: Update Lead
+      operationId: updateLead
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    delete:
+      tags: [Leads]
+      summary: Delete Lead
+      operationId: deleteLead
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+        "401": { description: Unauthorized }
+
+  /api/crm/v1/leads/{id}/notes:
+    post:
+      tags: [Leads]
+      summary: Add Note to Lead
+      operationId: addLeadNote
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Note created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    put:
+      tags: [Leads]
+      summary: Update Lead Note
+      operationId: updateLeadNote
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Note updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/crm/v1/leads/{id}/tasks:
+    post:
+      tags: [Leads]
+      summary: Create Task for Lead
+      operationId: createLeadTask
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Task created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    put:
+      tags: [Leads]
+      summary: Update Lead Task
+      operationId: updateLeadTask
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Task updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    delete:
+      tags: [Leads]
+      summary: Delete Lead Task
+      operationId: deleteLeadTask
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+        "401": { description: Unauthorized }
+
+  /api/crm/v1/leads/{id}/dates:
+    put:
+      tags: [Leads]
+      summary: Update Lead Creation Date
+      operationId: updateLeadDates
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Dates updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/crm/v1/leads/{id}/stages:
+    put:
+      tags: [Leads]
+      summary: Update Lead Stage
+      operationId: updateLeadStage
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Stage updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  # EVENTS
+  /api/crm/v1/events:
+    get:
+      tags: [Events]
+      summary: List Events
+      operationId: listEvents
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+          required: false
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+    post:
+      tags: [Events]
+      summary: Create Event
+      operationId: createEvent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/crm/v1/events/{id}:
+    get:
+      tags: [Events]
+      summary: Get Event
+      operationId: getEvent
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    put:
+      tags: [Events]
+      summary: Update Event
+      operationId: updateEvent
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    delete:
+      tags: [Events]
+      summary: Delete Event
+      operationId: deleteEvent
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+        "401": { description: Unauthorized }
+
+  # BOOKINGS
+  /api/crm/v1/bookings/locations:
+    get:
+      tags: [Bookings]
+      summary: List Booking Locations
+      operationId: listBookingLocations
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+
+  /api/crm/v1/bookings/locations/{id}/slots:
+    get:
+      tags: [Bookings]
+      summary: Get Available Booking Slots
+      operationId: getBookingSlots
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: date
+          required: false
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+
+  /api/crm/v1/bookings:
+    get:
+      tags: [Bookings]
+      summary: List Bookings
+      operationId: listBookings
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+          required: false
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+    post:
+      tags: [Bookings]
+      summary: Create Booking
+      operationId: createBooking
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/crm/v1/bookings/{id}:
+    get:
+      tags: [Bookings]
+      summary: Get Booking
+      operationId: getBooking
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    put:
+      tags: [Bookings]
+      summary: Update Booking
+      operationId: updateBooking
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    delete:
+      tags: [Bookings]
+      summary: Cancel Booking
+      operationId: cancelBooking
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+        "401": { description: Unauthorized }
+
+  # ==================== PROJECTS API ====================
+
+  # PROJECTS
+  /api/projects/v1/projects:
+    get:
+      tags: [Projects]
+      summary: List Projects
+      operationId: listProjects
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+          required: false
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+    post:
+      tags: [Projects]
+      summary: Create Project
+      operationId: createProject
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/projects/v1/projects/{id}:
+    get:
+      tags: [Projects]
+      summary: Get Project Details
+      operationId: getProject
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    put:
+      tags: [Projects]
+      summary: Update Project
+      operationId: updateProject
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    delete:
+      tags: [Projects]
+      summary: Delete Project
+      operationId: deleteProject
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+        "401": { description: Unauthorized }
+
+  /api/projects/v1/projects/{id}/summary:
+    get:
+      tags: [Projects]
+      summary: Get Project Summary
+      operationId: getProjectSummary
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  # TASKS
+  /api/projects/v1/tasks:
+    get:
+      tags: [Tasks]
+      summary: List Tasks
+      operationId: listTasks
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+          required: false
+        - in: query
+          name: projectId
+          schema: { type: string }
+          required: false
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+    post:
+      tags: [Tasks]
+      summary: Create Task
+      operationId: createTask
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/projects/v1/tasks/{id}:
+    get:
+      tags: [Tasks]
+      summary: Get Task
+      operationId: getTask
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    delete:
+      tags: [Tasks]
+      summary: Delete Task
+      operationId: deleteTask
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+        "401": { description: Unauthorized }
+
+  # TIME TRACKING
+  /api/projects/v1/projects/{id}/times:
+    get:
+      tags: [TimeTracking]
+      summary: List Project Time Entries
+      operationId: listProjectTimes
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+    post:
+      tags: [TimeTracking]
+      summary: Create Project Time Entry
+      operationId: createProjectTime
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/projects/v1/projects/{id}/times/{timeId}:
+    put:
+      tags: [TimeTracking]
+      summary: Update Project Time Entry
+      operationId: updateProjectTime
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: path
+          name: timeId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    delete:
+      tags: [TimeTracking]
+      summary: Delete Project Time Entry
+      operationId: deleteProjectTime
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: path
+          name: timeId
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+        "401": { description: Unauthorized }
+
+  /api/projects/v1/projects/times:
+    get:
+      tags: [TimeTracking]
+      summary: List All Times
+      operationId: listAllProjectTimes
+      description: List all time entries across all projects
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+          required: false
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+
+  # ==================== TEAM API ====================
+
+  # EMPLOYEES
+  /api/team/v1/employees:
+    get:
+      tags: [Employees]
+      summary: List Employees
+      operationId: listEmployees
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+          required: false
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+    post:
+      tags: [Employees]
+      summary: Create Employee
+      operationId: createEmployee
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/team/v1/employees/{id}:
+    get:
+      tags: [Employees]
+      summary: Get Employee
+      operationId: getEmployee
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    put:
+      tags: [Employees]
+      summary: Update Employee
+      operationId: updateEmployee
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    delete:
+      tags: [Employees]
+      summary: Delete Employee
+      operationId: deleteEmployee
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+        "401": { description: Unauthorized }
+
+  # EMPLOYEE TIME TRACKING
+  /api/team/v1/times:
+    get:
+      tags: [EmployeeTime]
+      summary: List All Time-Trackings
+      operationId: listAllEmployeeTimes
+      description: List all employee time trackings
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+          required: false
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+
+  /api/team/v1/times/{id}:
+    get:
+      tags: [EmployeeTime]
+      summary: Get Time-Tracking
+      operationId: getEmployeeTime
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    put:
+      tags: [EmployeeTime]
+      summary: Update Time-Tracking
+      operationId: updateEmployeeTime
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+    delete:
+      tags: [EmployeeTime]
+      summary: Delete Time-Tracking
+      operationId: deleteEmployeeTime
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+        "401": { description: Unauthorized }
+
+  /api/team/v1/employees/{id}/times:
+    get:
+      tags: [EmployeeTime]
+      summary: List Employee Time Entries
+      operationId: listEmployeeTimes
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+    post:
+      tags: [EmployeeTime]
+      summary: Log Employee Time
+      operationId: logEmployeeTime
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/team/v1/employees/{id}/clock-in:
+    post:
+      tags: [EmployeeTime]
+      summary: Clock In Employee
+      operationId: clockInEmployee
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Clocked in
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/team/v1/employees/{id}/clock-out:
+    post:
+      tags: [EmployeeTime]
+      summary: Clock Out Employee
+      operationId: clockOutEmployee
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Clocked out
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/team/v1/employees/{id}/pause:
+    post:
+      tags: [EmployeeTime]
+      summary: Employee Pause
+      operationId: pauseEmployee
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Paused
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  /api/team/v1/employees/{id}/unpause:
+    post:
+      tags: [EmployeeTime]
+      summary: Employee Unpause
+      operationId: unpauseEmployee
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "200":
+          description: Unpaused
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  # ==================== ACCOUNTING API ====================
+
+  # DAILY LEDGER
+  /api/accounting/v1/daily-ledger:
+    get:
+      tags: [Ledger]
+      summary: List Ledger Entries
+      operationId: listLedgerEntries
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+          required: false
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+    post:
+      tags: [Ledger]
+      summary: Create Ledger Entry
+      operationId: createLedgerEntry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
+
+  # CHART OF ACCOUNTS
+  /api/accounting/v1/accounts:
+    get:
+      tags: [ChartOfAccounts]
+      summary: List Accounts
+      operationId: listAccounts
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, minimum: 1 }
+          required: false
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { type: object, additionalProperties: true } }
+        "401": { description: Unauthorized }
+    post:
+      tags: [ChartOfAccounts]
+      summary: Create Account
+      operationId: createAccount
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "401": { description: Unauthorized }
