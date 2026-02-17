@@ -836,3 +836,250 @@ async function init() {
 }
 
 init();
+
+// ─── AI Chat ────────────────────────────────────────────────────────
+
+let chatOpen = false;
+let chatConversationId = null;
+let pendingStateId = null;
+let chatSending = false;
+
+function toggleChat() {
+    chatOpen = !chatOpen;
+    document.getElementById('chatPanel').classList.toggle('open', chatOpen);
+    if (chatOpen && !chatConversationId) {
+        chatConversationId = crypto.randomUUID();
+        checkAiConfig();
+    }
+    if (chatOpen) {
+        document.getElementById('chatInput').focus();
+    }
+}
+
+async function checkAiConfig() {
+    try {
+        const res = await fetch('/api/ai/config');
+        const cfg = await res.json();
+        if (!cfg.hasKey) {
+            document.getElementById('aiSetupModal').style.display = 'flex';
+        }
+    } catch (e) {
+        console.error('AI config check failed:', e);
+    }
+}
+
+async function saveClaudeKey() {
+    const key = document.getElementById('claudeApiKeyInput').value.trim();
+    const errorEl = document.getElementById('aiSetupError');
+    if (!key) { errorEl.textContent = 'Please enter a key.'; return; }
+    try {
+        const res = await fetch('/api/ai/config', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ claudeApiKey: key })
+        });
+        const data = await res.json();
+        if (data.status === 'success') {
+            closeAiSetup();
+        } else {
+            errorEl.textContent = data.message || 'Error saving key.';
+        }
+    } catch (e) {
+        errorEl.textContent = 'Connection error.';
+    }
+}
+
+function closeAiSetup() {
+    document.getElementById('aiSetupModal').style.display = 'none';
+}
+
+function sendSuggestion(text) {
+    document.getElementById('chatInput').value = text;
+    sendMessage();
+}
+
+async function sendMessage() {
+    if (chatSending) return;
+    const input = document.getElementById('chatInput');
+    const message = input.value.trim();
+    if (!message) return;
+
+    input.value = '';
+    autoResizeInput(input);
+    hideWelcome();
+    appendChatMessage('user', message);
+    showThinking();
+    chatSending = true;
+    document.getElementById('chatSendBtn').disabled = true;
+
+    try {
+        const res = await fetch('/api/ai/chat', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ message, conversation_id: chatConversationId })
+        });
+        const data = await res.json();
+        hideThinking();
+
+        if (data.type === 'confirmation_needed') {
+            pendingStateId = data.pending_state_id;
+            chatConversationId = data.conversation_id || chatConversationId;
+            showConfirmation(data.action);
+        } else if (data.type === 'error') {
+            if (data.content && data.content.includes('API key not configured')) {
+                document.getElementById('aiSetupModal').style.display = 'flex';
+            }
+            appendChatMessage('error', data.content);
+        } else {
+            chatConversationId = data.conversation_id || chatConversationId;
+            appendChatMessage('assistant', data.content, data.tool_calls_summary);
+        }
+    } catch (e) {
+        hideThinking();
+        appendChatMessage('error', 'Connection error. Is the server running?');
+    } finally {
+        chatSending = false;
+        document.getElementById('chatSendBtn').disabled = false;
+    }
+}
+
+function hideWelcome() {
+    const w = document.getElementById('chatWelcome');
+    if (w) w.style.display = 'none';
+}
+
+function appendChatMessage(role, content, toolCalls) {
+    const container = document.getElementById('chatMessages');
+    const div = document.createElement('div');
+    div.className = `chat-message chat-${role}`;
+
+    if (role === 'assistant') {
+        div.innerHTML = renderChatMarkdown(escapeHtml(content));
+        if (toolCalls && toolCalls.length > 0) {
+            const summary = document.createElement('div');
+            summary.className = 'chat-tool-summary';
+            summary.textContent = toolCalls.map(t => t.tool.replace(/_/g, ' ')).join(' → ');
+            div.appendChild(summary);
+        }
+        // Check for download links in content
+        const downloadMatch = content.match(/\/api\/reports\/download\/[^\s)]+/);
+        if (downloadMatch) {
+            const link = document.createElement('a');
+            link.href = downloadMatch[0];
+            link.className = 'chat-download-link';
+            link.textContent = 'Download Report';
+            link.target = '_blank';
+            div.appendChild(link);
+        }
+    } else if (role === 'error') {
+        div.textContent = content;
+    } else {
+        div.textContent = content;
+    }
+
+    container.appendChild(div);
+    container.scrollTop = container.scrollHeight;
+}
+
+function renderChatMarkdown(text) {
+    return text
+        .replace(/^### (.+)$/gm, '<strong style="font-size:1em">$1</strong>')
+        .replace(/^## (.+)$/gm, '<strong style="font-size:1.05em">$1</strong>')
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*(.+?)\*/g, '<em>$1</em>')
+        .replace(/`(.+?)`/g, '<code>$1</code>')
+        .replace(/^[-•] (.+)$/gm, '<span style="display:block;padding-left:1em">• $1</span>')
+        .replace(/^\d+\. (.+)$/gm, '<span style="display:block;padding-left:1em">$&</span>')
+        .replace(/\n/g, '<br>');
+}
+
+function showThinking() {
+    const container = document.getElementById('chatMessages');
+    const div = document.createElement('div');
+    div.className = 'chat-thinking';
+    div.id = 'chatThinking';
+    div.innerHTML = 'Analyzing <span class="dots"><span>.</span><span>.</span><span>.</span></span>';
+    container.appendChild(div);
+    container.scrollTop = container.scrollHeight;
+}
+
+function hideThinking() {
+    const el = document.getElementById('chatThinking');
+    if (el) el.remove();
+}
+
+function showConfirmation(action) {
+    const panel = document.getElementById('chatConfirmation');
+    document.getElementById('confirmText').textContent = action.description;
+    const details = action.details || {};
+    let detailText = '';
+    if (details.items) {
+        detailText = details.items.map(i =>
+            `${i.name}: ${i.units} x ${(i.price || 0).toFixed(2)} EUR`
+        ).join('\n');
+        const total = details.items.reduce((s, i) => s + (i.units || 1) * (i.price || 0), 0);
+        detailText += `\n\nTotal: ${total.toFixed(2)} EUR`;
+    } else {
+        detailText = JSON.stringify(details, null, 2);
+    }
+    document.getElementById('confirmDetails').textContent = detailText;
+    panel.style.display = 'block';
+}
+
+async function handleConfirm(confirmed) {
+    document.getElementById('chatConfirmation').style.display = 'none';
+    if (!pendingStateId) return;
+
+    showThinking();
+    try {
+        const res = await fetch('/api/ai/confirm', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ pending_state_id: pendingStateId, confirmed })
+        });
+        const data = await res.json();
+        hideThinking();
+
+        if (data.type === 'error') {
+            appendChatMessage('error', data.content);
+        } else {
+            appendChatMessage('assistant', data.content, data.tool_calls_summary);
+        }
+    } catch (e) {
+        hideThinking();
+        appendChatMessage('error', 'Connection error.');
+    }
+    pendingStateId = null;
+}
+
+function clearChat() {
+    chatConversationId = crypto.randomUUID();
+    document.getElementById('chatMessages').innerHTML = '';
+    document.getElementById('chatConfirmation').style.display = 'none';
+    pendingStateId = null;
+    const container = document.getElementById('chatMessages');
+    const welcome = document.createElement('div');
+    welcome.className = 'chat-welcome';
+    welcome.id = 'chatWelcome';
+    welcome.innerHTML = `
+        <p>I can analyze your financial data, check prices, create estimates, and send documents.</p>
+        <div class="chat-suggestions">
+            <button onclick="sendSuggestion('What is my revenue this month?')">Revenue this month</button>
+            <button onclick="sendSuggestion('Show me my top 5 clients')">Top clients</button>
+            <button onclick="sendSuggestion('Analyze my profit margins')">Profit margins</button>
+        </div>
+    `;
+    container.appendChild(welcome);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const input = document.getElementById('chatInput');
+    if (input) {
+        input.addEventListener('input', () => autoResizeInput(input));
+    }
+});
+
+function autoResizeInput(el) {
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+}

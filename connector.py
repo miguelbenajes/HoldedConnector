@@ -479,6 +479,23 @@ def create_contact(contact_data):
         return result.get('id')
     return None
 
+def create_estimate(estimate_data):
+    logger.info(f"Creating estimate for contact {estimate_data.get('contact')}...")
+    result = post_data("/invoicing/v1/documents/estimate", estimate_data)
+    if result and result.get('status') == 1:
+        logger.info(f"Estimate created successfully: {result.get('id')}")
+        return result.get('id')
+    return result.get('id') if result else None
+
+def send_document(doc_type, doc_id, send_data=None):
+    logger.info(f"Sending {doc_type} {doc_id}...")
+    payload = send_data or {}
+    result = post_data(f"/invoicing/v1/documents/{doc_type}/{doc_id}/send", payload)
+    if result:
+        logger.info(f"Document {doc_id} sent successfully.")
+        return True
+    return False
+
 def create_product(product_data):
     logger.info(f"Creating product {product_data.get('name')}...")
     result = post_data("/invoicing/v1/products", product_data)

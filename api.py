@@ -14,6 +14,7 @@ import pandas as pd
 from datetime import datetime
 import connector
 import reports
+import ai_agent
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -386,6 +387,51 @@ def get_document_pdf(doc_type: str, doc_id: str):
         return Response(content=response.content, media_type="application/pdf")
     else:
         return Response(content=f"Error fetching PDF: {response.status_code}", status_code=response.status_code)
+
+# ─── AI Chat Endpoints ───────────────────────────────────────────────
+
+class ChatRequest(BaseModel):
+    message: str
+    conversation_id: Optional[str] = None
+
+class ConfirmRequest(BaseModel):
+    pending_state_id: str
+    confirmed: bool
+
+@app.post("/api/ai/chat")
+async def ai_chat(body: ChatRequest):
+    if not ai_agent.check_rate_limit():
+        return {"type": "error", "content": "Rate limit exceeded. Please wait a moment."}
+    result = ai_agent.chat(body.message, body.conversation_id)
+    return result
+
+@app.post("/api/ai/confirm")
+async def ai_confirm(body: ConfirmRequest):
+    result = ai_agent.confirm_action(body.pending_state_id, body.confirmed)
+    return result
+
+@app.get("/api/ai/history")
+async def ai_history(conversation_id: Optional[str] = None):
+    return ai_agent.get_history(conversation_id)
+
+@app.delete("/api/ai/history")
+async def ai_clear_history(conversation_id: Optional[str] = None):
+    ai_agent.clear_history(conversation_id)
+    return {"status": "success"}
+
+@app.get("/api/ai/config")
+async def ai_config():
+    has_key = bool(ai_agent._get_api_key())
+    return {"hasKey": has_key, "model": ai_agent._get_model(), "safeMode": connector.SAFE_MODE}
+
+class AIConfigUpdate(BaseModel):
+    claudeApiKey: Optional[str] = None
+
+@app.post("/api/ai/config")
+async def ai_config_update(body: AIConfigUpdate):
+    if body.claudeApiKey:
+        connector.save_setting("claude_api_key", body.claudeApiKey)
+    return {"status": "success"}
 
 # Serve static files (mount at the end to avoid intercepting /api)
 app.mount("/static", StaticFiles(directory="static"), name="static")
