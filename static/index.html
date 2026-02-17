@@ -176,17 +176,28 @@
         <div class="chat-header">
             <h3>Financial Assistant</h3>
             <div class="chat-header-actions">
+                <button class="chat-action-btn" onclick="toggleHistoryDrawer()" title="History">📋</button>
                 <button class="chat-action-btn" onclick="clearChat()" title="New conversation">New</button>
                 <button class="close-btn" onclick="toggleChat()">&times;</button>
             </div>
         </div>
+        <!-- History/Favorites Drawer -->
+        <div id="chatDrawer" class="chat-drawer" style="display:none">
+            <div class="drawer-tabs">
+                <button class="drawer-tab active" onclick="switchDrawerTab('history')">History</button>
+                <button class="drawer-tab" onclick="switchDrawerTab('favorites')">Favorites</button>
+            </div>
+            <div id="drawerHistory" class="drawer-content"></div>
+            <div id="drawerFavorites" class="drawer-content" style="display:none"></div>
+        </div>
         <div class="chat-messages" id="chatMessages">
             <div class="chat-welcome" id="chatWelcome">
-                <p>I can analyze your financial data, check prices, create estimates, and send documents.</p>
+                <p>I can analyze your financial data, check prices, create estimates, send documents, and show visual charts.</p>
                 <div class="chat-suggestions">
                     <button onclick="sendSuggestion('What is my revenue this month?')">Revenue this month</button>
                     <button onclick="sendSuggestion('Show me my top 5 clients')">Top clients</button>
-                    <button onclick="sendSuggestion('Analyze my profit margins')">Profit margins</button>
+                    <button onclick="sendSuggestion('Show me a chart of monthly income vs expenses')">Income vs Expenses chart</button>
+                    <button onclick="sendSuggestion('Do I have overdue invoices?')">Overdue invoices</button>
                 </div>
             </div>
         </div>

@@ -838,11 +838,15 @@ async function init() {
 init();
 
 // ─── AI Chat ────────────────────────────────────────────────────────
+// Note: innerHTML usage below is safe because all user/API content
+// is first passed through escapeHtml() before rendering.
 
 let chatOpen = false;
 let chatConversationId = null;
 let pendingStateId = null;
 let chatSending = false;
+let chatDrawerOpen = false;
+let chatChartCounter = 0;
 
 function toggleChat() {
     chatOpen = !chatOpen;
@@ -898,6 +902,8 @@ function sendSuggestion(text) {
     sendMessage();
 }
 
+// ─── Streaming Chat ─────────────────────────────────────────────────
+
 async function sendMessage() {
     if (chatSending) return;
     const input = document.getElementById('chatInput');
@@ -913,27 +919,117 @@ async function sendMessage() {
     document.getElementById('chatSendBtn').disabled = true;
 
     try {
-        const res = await fetch('/api/ai/chat', {
+        const res = await fetch('/api/ai/chat/stream', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({ message, conversation_id: chatConversationId })
         });
-        const data = await res.json();
+
         hideThinking();
 
-        if (data.type === 'confirmation_needed') {
-            pendingStateId = data.pending_state_id;
-            chatConversationId = data.conversation_id || chatConversationId;
-            showConfirmation(data.action);
-        } else if (data.type === 'error') {
-            if (data.content && data.content.includes('API key not configured')) {
-                document.getElementById('aiSetupModal').style.display = 'flex';
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let streamDiv = null;
+        let streamText = '';
+        let toolsSummary = [];
+        let chartsData = [];
+        let currentEvent = null;
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop();
+
+            for (const line of lines) {
+                if (line.startsWith('event: ')) {
+                    currentEvent = line.slice(7).trim();
+                } else if (line.startsWith('data: ') && currentEvent) {
+                    const data = JSON.parse(line.slice(6));
+
+                    switch (currentEvent) {
+                        case 'tool_start':
+                            updateThinking('Using ' + data.tool.replace(/_/g, ' ') + '...');
+                            break;
+
+                        case 'tools_used':
+                            toolsSummary = data;
+                            break;
+
+                        case 'charts':
+                            chartsData = data;
+                            break;
+
+                        case 'text_delta':
+                            if (!streamDiv) {
+                                streamDiv = document.createElement('div');
+                                streamDiv.className = 'chat-message chat-assistant';
+                                document.getElementById('chatMessages').appendChild(streamDiv);
+                            }
+                            streamText += data.text;
+                            streamDiv.innerHTML = renderChatMarkdown(escapeHtml(streamText));
+                            document.getElementById('chatMessages').scrollTop = document.getElementById('chatMessages').scrollHeight;
+                            break;
+
+                        case 'confirmation_needed':
+                            pendingStateId = data.pending_state_id;
+                            chatConversationId = data.conversation_id || chatConversationId;
+                            showConfirmation(data.action);
+                            break;
+
+                        case 'error':
+                            if (data.content && data.content.includes('API key not configured')) {
+                                document.getElementById('aiSetupModal').style.display = 'flex';
+                            }
+                            appendChatMessage('error', data.content);
+                            break;
+
+                        case 'done':
+                            chatConversationId = data.conversation_id || chatConversationId;
+                            break;
+                    }
+                    currentEvent = null;
+                }
             }
-            appendChatMessage('error', data.content);
-        } else {
-            chatConversationId = data.conversation_id || chatConversationId;
-            appendChatMessage('assistant', data.content, data.tool_calls_summary);
         }
+
+        // Add tool summary after streaming completes
+        if (streamDiv && toolsSummary.length > 0) {
+            const summary = document.createElement('div');
+            summary.className = 'chat-tool-summary';
+            summary.textContent = toolsSummary.map(t => t.tool.replace(/_/g, ' ')).join(' \u2192 ');
+            streamDiv.appendChild(summary);
+        }
+
+        // Add favorite button to assistant messages
+        if (streamDiv && streamText) {
+            const favBtn = document.createElement('button');
+            favBtn.className = 'chat-fav-btn';
+            favBtn.title = 'Save this query as favorite';
+            favBtn.textContent = '\u2B50';
+            favBtn.onclick = function() { addFavorite(message); };
+            streamDiv.appendChild(favBtn);
+
+            // Check for download links
+            const downloadMatch = streamText.match(/\/api\/reports\/download\/[^\s)]+/);
+            if (downloadMatch) {
+                const link = document.createElement('a');
+                link.href = downloadMatch[0];
+                link.className = 'chat-download-link';
+                link.textContent = 'Download Report';
+                link.target = '_blank';
+                streamDiv.appendChild(link);
+            }
+        }
+
+        // Render inline charts
+        if (chartsData.length > 0) {
+            chartsData.forEach(function(chart) { renderInlineChart(chart); });
+        }
+
     } catch (e) {
         hideThinking();
         appendChatMessage('error', 'Connection error. Is the server running?');
@@ -943,6 +1039,203 @@ async function sendMessage() {
     }
 }
 
+// ─── Inline Chart Rendering ─────────────────────────────────────────
+
+function renderInlineChart(chartData) {
+    const container = document.getElementById('chatMessages');
+    const wrapper = document.createElement('div');
+    wrapper.className = 'chat-message chat-assistant chat-chart-wrapper';
+
+    const title = document.createElement('div');
+    title.className = 'chat-chart-title';
+    title.textContent = chartData.title;
+    wrapper.appendChild(title);
+
+    const canvasContainer = document.createElement('div');
+    canvasContainer.className = 'chat-chart-container';
+    const canvas = document.createElement('canvas');
+    const chartId = 'chatChart_' + (chatChartCounter++);
+    canvas.id = chartId;
+    canvasContainer.appendChild(canvas);
+    wrapper.appendChild(canvasContainer);
+    container.appendChild(wrapper);
+    container.scrollTop = container.scrollHeight;
+
+    const colors = ['#10b981', '#3b82f6', '#f59e0b', '#8b5cf6', '#f43f5e', '#06b6d4', '#ec4899', '#84cc16'];
+    const datasets = chartData.datasets.map(function(ds, i) {
+        const color = colors[i % colors.length];
+        const config = { label: ds.label, data: ds.data, borderColor: color, backgroundColor: color + '33', borderWidth: 2 };
+        if (chartData.chart_type === 'doughnut' || chartData.chart_type === 'pie') {
+            config.backgroundColor = chartData.labels.map(function(_, j) { return colors[j % colors.length] + 'cc'; });
+            config.borderColor = '#0f172a';
+            config.borderWidth = 3;
+        } else if (chartData.chart_type === 'bar') {
+            config.backgroundColor = color + '99';
+        }
+        return config;
+    });
+
+    new Chart(canvas.getContext('2d'), {
+        type: chartData.chart_type,
+        data: { labels: chartData.labels, datasets: datasets },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { position: 'bottom', labels: { color: '#94a3b8', font: { size: 11 } } },
+                tooltip: { backgroundColor: '#1e293b', titleColor: '#f8fafc', bodyColor: '#94a3b8', padding: 10, borderRadius: 8 }
+            },
+            scales: (chartData.chart_type === 'doughnut' || chartData.chart_type === 'pie') ? {} : {
+                y: { grid: { color: 'rgba(255,255,255,0.03)' }, ticks: { color: '#94a3b8' } },
+                x: { grid: { display: false }, ticks: { color: '#94a3b8' } }
+            }
+        }
+    });
+}
+
+// ─── History & Favorites Drawer ─────────────────────────────────────
+
+function toggleHistoryDrawer() {
+    chatDrawerOpen = !chatDrawerOpen;
+    document.getElementById('chatDrawer').style.display = chatDrawerOpen ? 'block' : 'none';
+    if (chatDrawerOpen) {
+        loadConversations();
+        loadFavorites();
+    }
+}
+
+function switchDrawerTab(tab) {
+    document.querySelectorAll('.drawer-tab').forEach(function(t) { t.classList.remove('active'); });
+    if (tab === 'history') {
+        document.querySelectorAll('.drawer-tab')[0].classList.add('active');
+    } else {
+        document.querySelectorAll('.drawer-tab')[1].classList.add('active');
+    }
+    document.getElementById('drawerHistory').style.display = tab === 'history' ? 'block' : 'none';
+    document.getElementById('drawerFavorites').style.display = tab === 'favorites' ? 'block' : 'none';
+}
+
+async function loadConversations() {
+    try {
+        const res = await fetch('/api/ai/conversations');
+        const convos = await res.json();
+        const el = document.getElementById('drawerHistory');
+        if (convos.length === 0) {
+            el.textContent = '';
+            const empty = document.createElement('div');
+            empty.className = 'drawer-empty';
+            empty.textContent = 'No conversations yet';
+            el.appendChild(empty);
+            return;
+        }
+        el.textContent = '';
+        convos.forEach(function(c) {
+            const item = document.createElement('div');
+            item.className = 'drawer-item' + (c.conversation_id === chatConversationId ? ' active' : '');
+            item.onclick = function() { loadConversation(c.conversation_id); };
+
+            const titleDiv = document.createElement('div');
+            titleDiv.className = 'drawer-item-title';
+            titleDiv.textContent = (c.first_message || 'Untitled').substring(0, 40);
+            item.appendChild(titleDiv);
+
+            const metaDiv = document.createElement('div');
+            metaDiv.className = 'drawer-item-meta';
+            metaDiv.textContent = c.msg_count + ' msgs \u00B7 ' + (c.last_msg || '');
+            item.appendChild(metaDiv);
+
+            el.appendChild(item);
+        });
+    } catch (e) {
+        console.error('Failed to load conversations:', e);
+    }
+}
+
+async function loadConversation(convId) {
+    chatConversationId = convId;
+    document.getElementById('chatMessages').textContent = '';
+    hideWelcome();
+    toggleHistoryDrawer();
+
+    try {
+        const res = await fetch('/api/ai/history?conversation_id=' + encodeURIComponent(convId));
+        const messages = await res.json();
+        messages.forEach(function(msg) {
+            appendChatMessage(msg.role, msg.content);
+        });
+    } catch (e) {
+        appendChatMessage('error', 'Failed to load conversation.');
+    }
+}
+
+async function loadFavorites() {
+    try {
+        const res = await fetch('/api/ai/favorites');
+        const favs = await res.json();
+        const el = document.getElementById('drawerFavorites');
+        el.textContent = '';
+        if (favs.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'drawer-empty';
+            empty.textContent = 'No favorites yet. Click \u2B50 on a response to save.';
+            el.appendChild(empty);
+            return;
+        }
+        favs.forEach(function(f) {
+            const item = document.createElement('div');
+            item.className = 'drawer-item';
+
+            const titleDiv = document.createElement('div');
+            titleDiv.className = 'drawer-item-title';
+            titleDiv.style.cursor = 'pointer';
+            titleDiv.style.flex = '1';
+            titleDiv.textContent = '\u2B50 ' + (f.label || f.query.substring(0, 40));
+            titleDiv.onclick = function() { sendSuggestion(f.query); };
+            item.appendChild(titleDiv);
+
+            const delBtn = document.createElement('button');
+            delBtn.className = 'drawer-delete-btn';
+            delBtn.title = 'Remove';
+            delBtn.textContent = '\u00D7';
+            delBtn.onclick = function(e) { e.stopPropagation(); removeFavorite(f.id); };
+            item.appendChild(delBtn);
+
+            el.appendChild(item);
+        });
+    } catch (e) {
+        console.error('Failed to load favorites:', e);
+    }
+}
+
+async function addFavorite(query) {
+    try {
+        await fetch('/api/ai/favorites', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ query: query, label: query.substring(0, 50) })
+        });
+        const container = document.getElementById('chatMessages');
+        const toast = document.createElement('div');
+        toast.className = 'chat-toast';
+        toast.textContent = '\u2B50 Saved to favorites';
+        container.appendChild(toast);
+        setTimeout(function() { toast.remove(); }, 2000);
+    } catch (e) {
+        console.error('Failed to add favorite:', e);
+    }
+}
+
+async function removeFavorite(id) {
+    try {
+        await fetch('/api/ai/favorites/' + id, { method: 'DELETE' });
+        loadFavorites();
+    } catch (e) {
+        console.error('Failed to remove favorite:', e);
+    }
+}
+
+// ─── Chat UI Helpers ────────────────────────────────────────────────
+
 function hideWelcome() {
     const w = document.getElementById('chatWelcome');
     if (w) w.style.display = 'none';
@@ -951,17 +1244,17 @@ function hideWelcome() {
 function appendChatMessage(role, content, toolCalls) {
     const container = document.getElementById('chatMessages');
     const div = document.createElement('div');
-    div.className = `chat-message chat-${role}`;
+    div.className = 'chat-message chat-' + role;
 
     if (role === 'assistant') {
+        // Content is escaped via escapeHtml before rendering as HTML
         div.innerHTML = renderChatMarkdown(escapeHtml(content));
         if (toolCalls && toolCalls.length > 0) {
             const summary = document.createElement('div');
             summary.className = 'chat-tool-summary';
-            summary.textContent = toolCalls.map(t => t.tool.replace(/_/g, ' ')).join(' → ');
+            summary.textContent = toolCalls.map(function(t) { return t.tool.replace(/_/g, ' '); }).join(' \u2192 ');
             div.appendChild(summary);
         }
-        // Check for download links in content
         const downloadMatch = content.match(/\/api\/reports\/download\/[^\s)]+/);
         if (downloadMatch) {
             const link = document.createElement('a');
@@ -982,13 +1275,14 @@ function appendChatMessage(role, content, toolCalls) {
 }
 
 function renderChatMarkdown(text) {
+    // Note: text is already HTML-escaped before this function is called
     return text
         .replace(/^### (.+)$/gm, '<strong style="font-size:1em">$1</strong>')
         .replace(/^## (.+)$/gm, '<strong style="font-size:1.05em">$1</strong>')
         .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
         .replace(/\*(.+?)\*/g, '<em>$1</em>')
         .replace(/`(.+?)`/g, '<code>$1</code>')
-        .replace(/^[-•] (.+)$/gm, '<span style="display:block;padding-left:1em">• $1</span>')
+        .replace(/^[-\u2022] (.+)$/gm, '<span style="display:block;padding-left:1em">\u2022 $1</span>')
         .replace(/^\d+\. (.+)$/gm, '<span style="display:block;padding-left:1em">$&</span>')
         .replace(/\n/g, '<br>');
 }
@@ -998,9 +1292,34 @@ function showThinking() {
     const div = document.createElement('div');
     div.className = 'chat-thinking';
     div.id = 'chatThinking';
-    div.innerHTML = 'Analyzing <span class="dots"><span>.</span><span>.</span><span>.</span></span>';
+    div.textContent = 'Analyzing ';
+    const dots = document.createElement('span');
+    dots.className = 'dots';
+    for (let i = 0; i < 3; i++) {
+        const dot = document.createElement('span');
+        dot.textContent = '.';
+        dots.appendChild(dot);
+    }
+    div.appendChild(dots);
     container.appendChild(div);
     container.scrollTop = container.scrollHeight;
+}
+
+function updateThinking(text) {
+    let el = document.getElementById('chatThinking');
+    if (!el) {
+        showThinking();
+        el = document.getElementById('chatThinking');
+    }
+    el.textContent = text + ' ';
+    const dots = document.createElement('span');
+    dots.className = 'dots';
+    for (let i = 0; i < 3; i++) {
+        const dot = document.createElement('span');
+        dot.textContent = '.';
+        dots.appendChild(dot);
+    }
+    el.appendChild(dots);
 }
 
 function hideThinking() {
@@ -1014,11 +1333,11 @@ function showConfirmation(action) {
     const details = action.details || {};
     let detailText = '';
     if (details.items) {
-        detailText = details.items.map(i =>
-            `${i.name}: ${i.units} x ${(i.price || 0).toFixed(2)} EUR`
-        ).join('\n');
-        const total = details.items.reduce((s, i) => s + (i.units || 1) * (i.price || 0), 0);
-        detailText += `\n\nTotal: ${total.toFixed(2)} EUR`;
+        detailText = details.items.map(function(i) {
+            return i.name + ': ' + i.units + ' x ' + (i.price || 0).toFixed(2) + ' EUR';
+        }).join('\n');
+        const total = details.items.reduce(function(s, i) { return s + (i.units || 1) * (i.price || 0); }, 0);
+        detailText += '\n\nTotal: ' + total.toFixed(2) + ' EUR';
     } else {
         detailText = JSON.stringify(details, null, 2);
     }
@@ -1035,7 +1354,7 @@ async function handleConfirm(confirmed) {
         const res = await fetch('/api/ai/confirm', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ pending_state_id: pendingStateId, confirmed })
+            body: JSON.stringify({ pending_state_id: pendingStateId, confirmed: confirmed })
         });
         const data = await res.json();
         hideThinking();
@@ -1044,6 +1363,9 @@ async function handleConfirm(confirmed) {
             appendChatMessage('error', data.content);
         } else {
             appendChatMessage('assistant', data.content, data.tool_calls_summary);
+            if (data.charts && data.charts.length > 0) {
+                data.charts.forEach(function(chart) { renderInlineChart(chart); });
+            }
         }
     } catch (e) {
         hideThinking();
@@ -1054,28 +1376,41 @@ async function handleConfirm(confirmed) {
 
 function clearChat() {
     chatConversationId = crypto.randomUUID();
-    document.getElementById('chatMessages').innerHTML = '';
+    const container = document.getElementById('chatMessages');
+    container.textContent = '';
     document.getElementById('chatConfirmation').style.display = 'none';
     pendingStateId = null;
-    const container = document.getElementById('chatMessages');
+
     const welcome = document.createElement('div');
     welcome.className = 'chat-welcome';
     welcome.id = 'chatWelcome';
-    welcome.innerHTML = `
-        <p>I can analyze your financial data, check prices, create estimates, and send documents.</p>
-        <div class="chat-suggestions">
-            <button onclick="sendSuggestion('What is my revenue this month?')">Revenue this month</button>
-            <button onclick="sendSuggestion('Show me my top 5 clients')">Top clients</button>
-            <button onclick="sendSuggestion('Analyze my profit margins')">Profit margins</button>
-        </div>
-    `;
+
+    const p = document.createElement('p');
+    p.textContent = 'I can analyze your financial data, check prices, create estimates, send documents, and show visual charts.';
+    welcome.appendChild(p);
+
+    const suggestions = document.createElement('div');
+    suggestions.className = 'chat-suggestions';
+    var sugItems = [
+        { text: 'Revenue this month', query: 'What is my revenue this month?' },
+        { text: 'Top clients', query: 'Show me my top 5 clients' },
+        { text: 'Income vs Expenses chart', query: 'Show me a chart of monthly income vs expenses' },
+        { text: 'Overdue invoices', query: 'Do I have overdue invoices?' }
+    ];
+    sugItems.forEach(function(item) {
+        const btn = document.createElement('button');
+        btn.textContent = item.text;
+        btn.onclick = function() { sendSuggestion(item.query); };
+        suggestions.appendChild(btn);
+    });
+    welcome.appendChild(suggestions);
     container.appendChild(welcome);
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', function() {
     const input = document.getElementById('chatInput');
     if (input) {
-        input.addEventListener('input', () => autoResizeInput(input));
+        input.addEventListener('input', function() { autoResizeInput(input); });
     }
 });
 

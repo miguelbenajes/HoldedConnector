@@ -8,6 +8,7 @@ import sqlite3
 import os
 import time
 import logging
+import json
 import requests
 import io
 import pandas as pd
@@ -405,6 +406,21 @@ async def ai_chat(body: ChatRequest):
     result = ai_agent.chat(body.message, body.conversation_id)
     return result
 
+@app.post("/api/ai/chat/stream")
+async def ai_chat_stream(body: ChatRequest):
+    if not ai_agent.check_rate_limit():
+        async def error_gen():
+            yield f"event: error\ndata: {json.dumps({'content': 'Rate limit exceeded.'})}\n\n"
+        return StreamingResponse(error_gen(), media_type="text/event-stream")
+
+    def sse_generator():
+        for event in ai_agent.chat_stream(body.message, body.conversation_id):
+            evt = event.get("event", "message")
+            data = event.get("data", "{}")
+            yield f"event: {evt}\ndata: {data}\n\n"
+
+    return StreamingResponse(sse_generator(), media_type="text/event-stream")
+
 @app.post("/api/ai/confirm")
 async def ai_confirm(body: ConfirmRequest):
     result = ai_agent.confirm_action(body.pending_state_id, body.confirmed)
@@ -417,6 +433,28 @@ async def ai_history(conversation_id: Optional[str] = None):
 @app.delete("/api/ai/history")
 async def ai_clear_history(conversation_id: Optional[str] = None):
     ai_agent.clear_history(conversation_id)
+    return {"status": "success"}
+
+@app.get("/api/ai/conversations")
+async def ai_conversations():
+    return ai_agent.get_conversations()
+
+@app.get("/api/ai/favorites")
+async def ai_favorites():
+    return ai_agent.get_favorites()
+
+class FavoriteRequest(BaseModel):
+    query: str
+    label: Optional[str] = None
+
+@app.post("/api/ai/favorites")
+async def ai_add_favorite(body: FavoriteRequest):
+    fav_id = ai_agent.add_favorite(body.query, body.label)
+    return {"status": "success", "id": fav_id}
+
+@app.delete("/api/ai/favorites/{fav_id}")
+async def ai_remove_favorite(fav_id: int):
+    ai_agent.remove_favorite(fav_id)
     return {"status": "success"}
 
 @app.get("/api/ai/config")

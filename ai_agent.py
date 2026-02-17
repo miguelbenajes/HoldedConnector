@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 DB_NAME = "holded.db"
 
-WRITE_TOOLS = {"create_estimate", "create_invoice", "send_document", "create_contact"}
+WRITE_TOOLS = {"create_estimate", "create_invoice", "send_document", "create_contact", "update_invoice_status"}
 
 # Pending confirmations: { state_id: { messages, tool_block, conversation_id, expires_at } }
 pending_actions = {}
@@ -180,6 +180,80 @@ TOOL_DEFINITIONS = [
                 "code": {"type": "string"}
             },
             "required": ["name"]
+        }
+    },
+    {
+        "name": "get_overdue_invoices",
+        "description": "Get all overdue invoices (status=4) or invoices past their due date. Returns a list sorted by amount descending.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "type": {"type": "string", "enum": ["receivable", "payable", "both"], "description": "receivable=sales invoices, payable=purchase invoices, both=all. Default: both"},
+                "min_amount": {"type": "number", "description": "Minimum amount filter"}
+            }
+        }
+    },
+    {
+        "name": "get_upcoming_payments",
+        "description": "Get recent and upcoming payments, optionally filtered by date range. Shows payment method, amounts, and linked documents.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days_ahead": {"type": "integer", "description": "Number of days to look ahead from today (default: 30)"},
+                "type": {"type": "string", "enum": ["income", "expense", "both"], "description": "Filter by payment type. Default: both"}
+            }
+        }
+    },
+    {
+        "name": "compare_periods",
+        "description": "Compare financial performance between two time periods. Returns income, expenses, balance, and percentage changes for each period.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "period1_start": {"type": "string", "description": "Start date YYYY-MM-DD for first period"},
+                "period1_end": {"type": "string", "description": "End date YYYY-MM-DD for first period"},
+                "period2_start": {"type": "string", "description": "Start date YYYY-MM-DD for second period"},
+                "period2_end": {"type": "string", "description": "End date YYYY-MM-DD for second period"}
+            },
+            "required": ["period1_start", "period1_end", "period2_start", "period2_end"]
+        }
+    },
+    {
+        "name": "update_invoice_status",
+        "description": "Update the status of an invoice or purchase invoice in Holded (e.g., mark as paid). In safe mode, simulates without writing.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "doc_type": {"type": "string", "enum": ["invoice", "purchase"]},
+                "doc_id": {"type": "string", "description": "The document ID"},
+                "status": {"type": "integer", "description": "New status: 0=draft, 1=issued, 2=partial, 3=paid, 4=overdue, 5=cancelled"}
+            },
+            "required": ["doc_type", "doc_id", "status"]
+        }
+    },
+    {
+        "name": "render_chart",
+        "description": "Render an inline chart in the chat response. Use this when the user asks for visual data or graphs. The chart will be rendered using Chart.js in the chat panel.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "chart_type": {"type": "string", "enum": ["bar", "line", "doughnut", "pie"], "description": "Type of chart"},
+                "title": {"type": "string", "description": "Chart title"},
+                "labels": {"type": "array", "items": {"type": "string"}, "description": "Labels for each data point (x-axis or segments)"},
+                "datasets": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string"},
+                            "data": {"type": "array", "items": {"type": "number"}}
+                        },
+                        "required": ["label", "data"]
+                    },
+                    "description": "One or more data series"
+                }
+            },
+            "required": ["chart_type", "title", "labels", "datasets"]
         }
     }
 ]
@@ -468,6 +542,134 @@ def exec_create_contact(params):
     return {"success": False, "error": "Failed to create contact"}
 
 
+def exec_get_overdue_invoices(params):
+    inv_type = params.get("type", "both")
+    min_amount = params.get("min_amount", 0)
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    results = []
+    if inv_type in ("receivable", "both"):
+        cursor.execute(
+            "SELECT id, contact_name, amount, date, status FROM invoices WHERE status = 4 AND amount >= ? ORDER BY amount DESC",
+            (min_amount,))
+        results.extend([{**dict(r), "source": "receivable"} for r in cursor.fetchall()])
+
+    if inv_type in ("payable", "both"):
+        cursor.execute(
+            "SELECT id, contact_name, amount, date, status FROM purchase_invoices WHERE status = 4 AND amount >= ? ORDER BY amount DESC",
+            (min_amount,))
+        results.extend([{**dict(r), "source": "payable"} for r in cursor.fetchall()])
+
+    conn.close()
+    total = sum(r["amount"] or 0 for r in results)
+    return {"overdue": results, "count": len(results), "total_overdue": round(total, 2)}
+
+
+def exec_get_upcoming_payments(params):
+    days = params.get("days_ahead", 30)
+    ptype = params.get("type", "both")
+    now = int(time.time())
+    future = now + days * 86400
+
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    where_type = ""
+    if ptype == "income":
+        where_type = "AND type = 'income'"
+    elif ptype == "expense":
+        where_type = "AND type = 'expense'"
+
+    cursor.execute(f"""
+        SELECT id, document_id, amount, date, method, type
+        FROM payments
+        WHERE date >= ? AND date <= ? {where_type}
+        ORDER BY date ASC
+    """, (now - 30 * 86400, future))
+    payments = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+
+    total = sum(p["amount"] or 0 for p in payments)
+    return {"payments": payments, "count": len(payments), "total": round(total, 2)}
+
+
+def exec_compare_periods(params):
+    def _period_stats(cursor, start_str, end_str):
+        start_epoch = int(datetime.strptime(start_str, "%Y-%m-%d").timestamp())
+        end_epoch = int(datetime.strptime(end_str, "%Y-%m-%d").timestamp()) + 86399
+
+        cursor.execute("SELECT COALESCE(SUM(amount),0) as t FROM invoices WHERE date>=? AND date<=?", (start_epoch, end_epoch))
+        income = cursor.fetchone()["t"]
+        cursor.execute("SELECT COALESCE(SUM(amount),0) as t FROM purchase_invoices WHERE date>=? AND date<=?", (start_epoch, end_epoch))
+        expenses = cursor.fetchone()["t"]
+        cursor.execute("SELECT COUNT(*) as c FROM invoices WHERE date>=? AND date<=?", (start_epoch, end_epoch))
+        inv_count = cursor.fetchone()["c"]
+        cursor.execute("SELECT COUNT(*) as c FROM purchase_invoices WHERE date>=? AND date<=?", (start_epoch, end_epoch))
+        pur_count = cursor.fetchone()["c"]
+
+        return {
+            "period": f"{start_str} to {end_str}",
+            "income": round(income, 2),
+            "expenses": round(expenses, 2),
+            "balance": round(income - expenses, 2),
+            "invoice_count": inv_count,
+            "purchase_count": pur_count
+        }
+
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    p1 = _period_stats(cursor, params["period1_start"], params["period1_end"])
+    p2 = _period_stats(cursor, params["period2_start"], params["period2_end"])
+    conn.close()
+
+    def _pct(old, new):
+        if old == 0:
+            return None
+        return round((new - old) / abs(old) * 100, 2)
+
+    return {
+        "period1": p1,
+        "period2": p2,
+        "changes": {
+            "income_pct": _pct(p1["income"], p2["income"]),
+            "expenses_pct": _pct(p1["expenses"], p2["expenses"]),
+            "balance_pct": _pct(p1["balance"], p2["balance"])
+        }
+    }
+
+
+def exec_update_invoice_status(params):
+    doc_type = params["doc_type"]
+    doc_id = params["doc_id"]
+    status = params["status"]
+
+    type_map = {"invoice": "invoice", "purchase": "purchase"}
+    holded_type = type_map.get(doc_type)
+    if not holded_type:
+        return {"error": f"Unknown doc_type: {doc_type}"}
+
+    result = connector.put_data(f"/invoicing/v1/documents/{holded_type}/{doc_id}", {"status": status})
+    if result:
+        is_safe = connector.SAFE_MODE
+        return {"success": True, "safe_mode": is_safe,
+                "message": f"Status updated to {status} (dry run)" if is_safe else f"Status updated to {status}"}
+    return {"success": False, "error": "Failed to update status"}
+
+
+def exec_render_chart(params):
+    return {
+        "chart_type": params["chart_type"],
+        "title": params["title"],
+        "labels": params["labels"],
+        "datasets": params["datasets"]
+    }
+
+
 TOOL_EXECUTORS = {
     "query_database": exec_query_database,
     "get_contact_details": exec_get_contact_details,
@@ -479,6 +681,11 @@ TOOL_EXECUTORS = {
     "send_document": exec_send_document,
     "generate_report": exec_generate_report,
     "create_contact": exec_create_contact,
+    "get_overdue_invoices": exec_get_overdue_invoices,
+    "get_upcoming_payments": exec_get_upcoming_payments,
+    "compare_periods": exec_compare_periods,
+    "update_invoice_status": exec_update_invoice_status,
+    "render_chart": exec_render_chart,
 }
 
 # ─── System Prompt Builder ───────────────────────────────────────────
@@ -528,7 +735,10 @@ RULES:
 - For write operations, clearly describe what will be created before executing.
 - Match the user's language (Spanish if they write in Spanish).
 - Be concise but thorough in financial analysis.
-- When showing amounts, use EUR format with 2 decimals."""
+- When showing amounts, use EUR format with 2 decimals.
+- Use render_chart to show inline charts when the user asks for visual data, trends, or comparisons.
+- Use get_overdue_invoices to find overdue/unpaid invoices.
+- Use compare_periods for period-over-period analysis (e.g., this month vs last month)."""
 
 # ─── Conversation History ────────────────────────────────────────────
 
@@ -669,6 +879,7 @@ def chat(user_message, conversation_id=None):
     messages = history + [{"role": "user", "content": user_message}]
 
     tool_calls_summary = []
+    charts = []
 
     try:
         response = client.messages.create(
@@ -728,6 +939,8 @@ def chat(user_message, conversation_id=None):
                     else:
                         result = {"error": f"Unknown tool: {tool_name}"}
 
+                    if tool_name == "render_chart":
+                        charts.append(result)
                     tool_calls_summary.append({"tool": tool_name, "description": tool_input.get("explanation", tool_name)})
                     tool_results.append({
                         "type": "tool_result",
@@ -757,12 +970,15 @@ def chat(user_message, conversation_id=None):
         save_history(conversation_id, "user", user_message)
         save_history(conversation_id, "assistant", final_text, tool_calls_summary or None)
 
-        return {
+        result = {
             "type": "message",
             "content": final_text,
             "conversation_id": conversation_id,
             "tool_calls_summary": tool_calls_summary
         }
+        if charts:
+            result["charts"] = charts
+        return result
 
     except anthropic.APIError as e:
         logger.error(f"Claude API error: {e}")
@@ -770,6 +986,186 @@ def chat(user_message, conversation_id=None):
     except Exception as e:
         logger.error(f"Agent error: {e}", exc_info=True)
         return {"type": "error", "content": f"An error occurred: {str(e)}", "conversation_id": conversation_id}
+
+
+def chat_stream(user_message, conversation_id=None):
+    """Generator that yields SSE events for streaming responses."""
+    if not conversation_id:
+        conversation_id = str(uuid.uuid4())
+
+    api_key = _get_api_key()
+    if not api_key:
+        yield {"event": "error", "data": json.dumps({"content": "Claude API key not configured.", "conversation_id": conversation_id})}
+        return
+
+    client = anthropic.Anthropic(api_key=api_key)
+    model = _get_model()
+
+    history = load_history(conversation_id, limit=20)
+    system_prompt = build_system_prompt()
+    messages = history + [{"role": "user", "content": user_message}]
+    tool_calls_summary = []
+    charts = []
+
+    try:
+        max_iterations = 10
+        iteration = 0
+        needs_tool_loop = True
+
+        while needs_tool_loop and iteration < max_iterations:
+            needs_tool_loop = False
+            iteration += 1
+
+            # Use streaming for the final text response, non-streaming for tool loops
+            response = client.messages.create(
+                model=model,
+                max_tokens=4096,
+                system=system_prompt,
+                tools=TOOL_DEFINITIONS,
+                messages=messages
+            )
+
+            if response.stop_reason == "tool_use":
+                tool_results = []
+                for block in response.content:
+                    if block.type == "tool_use":
+                        tool_name = block.name
+                        tool_input = block.input
+                        logger.info(f"[stream] Agent calling tool: {tool_name}")
+                        yield {"event": "tool_start", "data": json.dumps({"tool": tool_name})}
+
+                        if tool_name in WRITE_TOOLS:
+                            state_id = str(uuid.uuid4())
+                            _cleanup_pending()
+                            desc = _describe_write_action(tool_name, tool_input)
+                            pending_actions[state_id] = {
+                                "messages": messages + [{"role": "assistant", "content": [b.model_dump() for b in response.content]}],
+                                "tool_block": block.model_dump(),
+                                "conversation_id": conversation_id,
+                                "expires_at": time.time() + 300,
+                                "model": model,
+                                "system_prompt": system_prompt,
+                                "user_message": user_message
+                            }
+                            yield {"event": "confirmation_needed", "data": json.dumps({
+                                "action": {"tool": tool_name, "description": desc, "details": tool_input},
+                                "pending_state_id": state_id,
+                                "conversation_id": conversation_id
+                            })}
+                            return
+
+                        executor = TOOL_EXECUTORS.get(tool_name)
+                        if executor:
+                            result = executor(tool_input)
+                        else:
+                            result = {"error": f"Unknown tool: {tool_name}"}
+
+                        if tool_name == "render_chart":
+                            charts.append(result)
+                        tool_calls_summary.append({"tool": tool_name, "description": tool_input.get("explanation", tool_name)})
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": json.dumps(result, default=str)
+                        })
+
+                messages.append({"role": "assistant", "content": [b.model_dump() for b in response.content]})
+                messages.append({"role": "user", "content": tool_results})
+                needs_tool_loop = True
+                continue
+
+            # Final response - stream it
+            # We already have the full response, extract text
+            final_text = ""
+            for block in response.content:
+                if hasattr(block, "text"):
+                    final_text += block.text
+
+            # Send meta info first
+            if tool_calls_summary:
+                yield {"event": "tools_used", "data": json.dumps(tool_calls_summary)}
+            if charts:
+                yield {"event": "charts", "data": json.dumps(charts)}
+
+            # Stream text in chunks
+            chunk_size = 20
+            for i in range(0, len(final_text), chunk_size):
+                chunk = final_text[i:i+chunk_size]
+                yield {"event": "text_delta", "data": json.dumps({"text": chunk})}
+
+            yield {"event": "done", "data": json.dumps({"conversation_id": conversation_id})}
+
+            save_history(conversation_id, "user", user_message)
+            save_history(conversation_id, "assistant", final_text, tool_calls_summary or None)
+
+    except anthropic.APIError as e:
+        logger.error(f"[stream] Claude API error: {e}")
+        yield {"event": "error", "data": json.dumps({"content": f"AI service error: {str(e)}"})}
+    except Exception as e:
+        logger.error(f"[stream] Agent error: {e}", exc_info=True)
+        yield {"event": "error", "data": json.dumps({"content": f"Error: {str(e)}"})}
+
+
+# ─── Favorites ──────────────────────────────────────────────────────
+
+def _ensure_favorites_schema():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""CREATE TABLE IF NOT EXISTS ai_favorites (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        query TEXT NOT NULL,
+        label TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )""")
+    conn.commit()
+    conn.close()
+
+def get_favorites():
+    _ensure_favorites_schema()
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, query, label, created_at FROM ai_favorites ORDER BY created_at DESC")
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return rows
+
+def add_favorite(query, label=None):
+    _ensure_favorites_schema()
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO ai_favorites (query, label) VALUES (?, ?)", (query, label or query[:50]))
+    conn.commit()
+    fav_id = cursor.lastrowid
+    conn.close()
+    return fav_id
+
+def remove_favorite(fav_id):
+    _ensure_favorites_schema()
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM ai_favorites WHERE id = ?", (fav_id,))
+    conn.commit()
+    conn.close()
+
+def get_conversations():
+    _ensure_ai_history_schema()
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT conversation_id, MIN(timestamp) as started, MAX(timestamp) as last_msg,
+               COUNT(*) as msg_count,
+               (SELECT content FROM ai_history h2 WHERE h2.conversation_id = ai_history.conversation_id AND h2.role = 'user' ORDER BY h2.timestamp ASC LIMIT 1) as first_message
+        FROM ai_history
+        WHERE conversation_id IS NOT NULL AND conversation_id != 'default'
+        GROUP BY conversation_id
+        ORDER BY last_msg DESC
+        LIMIT 20
+    """)
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return rows
 
 
 def confirm_action(state_id, confirmed):
@@ -848,4 +1244,8 @@ def _describe_write_action(tool_name, tool_input):
         return f"Send {tool_input['doc_type']} {tool_input['doc_id']} to {', '.join(emails)}"
     elif tool_name == "create_contact":
         return f"Create contact: {tool_input.get('name', 'Unknown')}"
+    elif tool_name == "update_invoice_status":
+        status_labels = {0: "draft", 1: "issued", 2: "partial", 3: "paid", 4: "overdue", 5: "cancelled"}
+        st = status_labels.get(tool_input.get("status"), str(tool_input.get("status")))
+        return f"Update {tool_input.get('doc_type')} {tool_input.get('doc_id')} status to {st}"
     return f"Execute {tool_name}"
