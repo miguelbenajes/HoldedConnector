@@ -38,6 +38,11 @@ UPLOADS_DIR = os.path.abspath("uploads")
 
 sync_status = {"running": False, "last_result": None, "last_time": None, "errors": []}
 
+@app.on_event("startup")
+def on_startup():
+    """Initialize DB schema on server start (creates tables if they don't exist)."""
+    connector.init_db()
+
 @contextmanager
 def get_db_connection():
     conn = sqlite3.connect(DB_NAME)
