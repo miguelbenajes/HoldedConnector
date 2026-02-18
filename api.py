@@ -503,6 +503,8 @@ async def set_file_config(body: DirectoryConfig):
 @app.post("/api/files/upload")
 async def upload_file(file: UploadFile = File(...)):
     """Upload a file for AI analysis (CSV/Excel only)."""
+    from fastapi import HTTPException
+
     uploads_dir = connector.get_uploads_dir()
     os.makedirs(uploads_dir, exist_ok=True)
 
@@ -511,15 +513,17 @@ async def upload_file(file: UploadFile = File(...)):
     file_ext = os.path.splitext(file.filename)[1].lower()
 
     if file_ext not in allowed_exts:
-        return {"error": f"File type not allowed: {file_ext}. Only CSV/Excel allowed."}
+        raise HTTPException(status_code=400, detail=f"File type not allowed: {file_ext}. Only CSV/Excel allowed.")
 
     # Validate file size (max 50MB)
     try:
         content = await file.read()
         if len(content) > 50 * 1024 * 1024:
-            return {"error": "File too large (max 50MB)"}
+            raise HTTPException(status_code=413, detail="File too large (max 50MB)")
+    except HTTPException:
+        raise
     except Exception as e:
-        return {"error": f"File read error: {str(e)}"}
+        raise HTTPException(status_code=400, detail=f"File read error: {str(e)}")
 
     # Save file with timestamp prefix (unique names)
     safe_name = f"{int(time.time())}_{os.path.basename(file.filename)}"
@@ -536,7 +540,7 @@ async def upload_file(file: UploadFile = File(...)):
             "size": len(content)
         }
     except Exception as e:
-        return {"error": f"Upload failed: {str(e)}"}
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 @app.get("/api/files/list")
 async def list_files(directory: str = "uploads", limit: int = 20):

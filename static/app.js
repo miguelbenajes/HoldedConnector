@@ -1435,17 +1435,26 @@ document.getElementById('fileUploadInput')?.addEventListener('change', async (e)
             method: 'POST',
             body: formData
         });
-        const data = await res.json();
+
+        let data = {};
+        try {
+            data = await res.json();
+        } catch (parseErr) {
+            // JSON parse error - response might be error HTML
+            data = { error: res.statusText || 'Unknown error' };
+        }
+
         hideThinking();
 
-        if (data.success) {
+        if (res.ok && data.success) {
             appendChatMessage('assistant', `✅ File uploaded: **${data.original_name}** (${(data.size / 1024).toFixed(1)} KB)`);
             // Auto-send message to AI to analyze
             const message = `I just uploaded "${data.filename}". Can you analyze it for me?`;
             document.getElementById('chatInput').value = message;
             sendMessage();
         } else {
-            appendChatMessage('error', `Upload failed: ${data.error}`);
+            const errorMsg = data.detail || data.error || res.statusText || 'Upload failed';
+            appendChatMessage('error', `Upload failed: ${errorMsg}`);
         }
     } catch (err) {
         hideThinking();
