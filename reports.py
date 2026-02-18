@@ -9,11 +9,14 @@ logger = logging.getLogger(__name__)
 def generate_excel_report(data_list, filename="report.xlsx"):
     """
     Generates an Excel file from a list of dictionaries.
+    Saves to the configured reports directory.
     """
     df = pd.DataFrame(data_list)
-    # Ensure directory exists (if using a specific path)
-    df.to_excel(filename, index=False)
-    return filename
+    reports_dir = connector.get_reports_dir()
+    os.makedirs(reports_dir, exist_ok=True)
+    filepath = os.path.join(reports_dir, os.path.basename(filename))
+    df.to_excel(filepath, index=False)
+    return filepath
 
 class PDF(FPDF):
     def header(self):
@@ -30,8 +33,9 @@ class PDF(FPDF):
 def generate_pdf_report(content, filename="analysis.pdf"):
     """
     Generates a PDF from a text string (AI output).
+    Saves to the configured reports directory.
     """
-    reports_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
+    reports_dir = connector.get_reports_dir()
     os.makedirs(reports_dir, exist_ok=True)
     filepath = os.path.join(reports_dir, os.path.basename(filename))
 

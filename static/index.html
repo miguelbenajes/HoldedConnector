@@ -177,6 +177,9 @@
             <h3>Financial Assistant</h3>
             <div class="chat-header-actions">
                 <button class="chat-action-btn" onclick="toggleHistoryDrawer()" title="History">📋</button>
+                <button class="chat-action-btn" onclick="document.getElementById('fileUploadInput').click()" title="Upload file">📎</button>
+                <input type="file" id="fileUploadInput" accept=".csv,.xlsx,.xls" style="display:none;">
+                <button class="chat-action-btn" onclick="openDirectoryConfig()" title="Settings">⚙️</button>
                 <button class="chat-action-btn" onclick="clearChat()" title="New conversation">New</button>
                 <button class="close-btn" onclick="toggleChat()">&times;</button>
             </div>
@@ -228,6 +231,30 @@
                 <input type="password" id="claudeApiKeyInput" placeholder="sk-ant-..." style="width:100%;padding:0.8rem;background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:8px;color:var(--text-white);margin-bottom:1rem">
                 <button class="sync-btn" onclick="saveClaudeKey()" style="width:100%">Save & Enable AI</button>
                 <p class="error-msg" id="aiSetupError"></p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Directory Configuration Modal -->
+    <div id="directoryConfigModal" class="modal-overlay" style="display:none">
+        <div class="modal-content" style="max-width:500px">
+            <header>
+                <h2>File Management Settings</h2>
+                <button class="close-btn" onclick="closeDirectoryConfig()">&times;</button>
+            </header>
+            <div style="padding:1rem">
+                <p style="margin-bottom:1rem;color:var(--text-muted)">Configure where uploaded files and reports are saved.</p>
+
+                <label style="display:block;margin-bottom:0.5rem;color:var(--text-white);font-weight:600">Uploads Directory</label>
+                <input type="text" id="uploadsDir" placeholder="/path/to/uploads" style="width:100%;padding:0.8rem;background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:8px;color:var(--text-white);margin-bottom:1rem;font-family:monospace;font-size:0.9rem">
+
+                <label style="display:block;margin-bottom:0.5rem;color:var(--text-white);font-weight:600">Reports Directory</label>
+                <input type="text" id="reportsDir" placeholder="/path/to/reports" style="width:100%;padding:0.8rem;background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:8px;color:var(--text-white);margin-bottom:1rem;font-family:monospace;font-size:0.9rem">
+
+                <button class="sync-btn" onclick="saveDirectoryConfig()" style="width:100%;margin-bottom:0.5rem">Save Configuration</button>
+                <p style="font-size:0.85rem;color:var(--text-muted)">Paths must be absolute. Leave blank to use defaults.</p>
+                <p class="error-msg" id="directoryConfigError"></p>
+                <p class="success-msg" id="directoryConfigSuccess" style="color:var(--accent-green);display:none"></p>
             </div>
         </div>
     </div>

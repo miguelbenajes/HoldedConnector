@@ -1418,3 +1418,106 @@ function autoResizeInput(el) {
     el.style.height = 'auto';
     el.style.height = Math.min(el.scrollHeight, 120) + 'px';
 }
+
+// ─── File Management ────────────────────────────────────────────────────
+
+// Handle file upload
+document.getElementById('fileUploadInput')?.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+        showThinking();
+        const res = await fetch('/api/files/upload', {
+            method: 'POST',
+            body: formData
+        });
+        const data = await res.json();
+        hideThinking();
+
+        if (data.success) {
+            appendChatMessage('assistant', `✅ File uploaded: **${data.original_name}** (${(data.size / 1024).toFixed(1)} KB)`);
+            // Auto-send message to AI to analyze
+            const message = `I just uploaded "${data.filename}". Can you analyze it for me?`;
+            document.getElementById('chatInput').value = message;
+            sendMessage();
+        } else {
+            appendChatMessage('error', `Upload failed: ${data.error}`);
+        }
+    } catch (err) {
+        hideThinking();
+        appendChatMessage('error', `Upload error: ${err.message}`);
+    }
+
+    // Reset file input
+    e.target.value = '';
+});
+
+async function openDirectoryConfig() {
+    const modal = document.getElementById('directoryConfigModal');
+    const errorEl = document.getElementById('directoryConfigError');
+    const successEl = document.getElementById('directoryConfigSuccess');
+    errorEl.textContent = '';
+    successEl.textContent = '';
+
+    // Load current config
+    try {
+        const res = await fetch('/api/files/config');
+        const config = await res.json();
+        document.getElementById('uploadsDir').value = config.uploads_dir || '';
+        document.getElementById('reportsDir').value = config.reports_dir || '';
+    } catch (e) {
+        console.error('Failed to load config:', e);
+    }
+
+    modal.style.display = 'flex';
+}
+
+function closeDirectoryConfig() {
+    document.getElementById('directoryConfigModal').style.display = 'none';
+}
+
+async function saveDirectoryConfig() {
+    const uploadsDir = document.getElementById('uploadsDir').value.trim();
+    const reportsDir = document.getElementById('reportsDir').value.trim();
+    const errorEl = document.getElementById('directoryConfigError');
+    const successEl = document.getElementById('directoryConfigSuccess');
+
+    errorEl.textContent = '';
+    successEl.style.display = 'none';
+
+    if (!uploadsDir && !reportsDir) {
+        errorEl.textContent = 'Please enter at least one path.';
+        return;
+    }
+
+    try {
+        const res = await fetch('/api/files/config', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                uploads_dir: uploadsDir || null,
+                reports_dir: reportsDir || null
+            })
+        });
+        const data = await res.json();
+
+        if (data.uploads && data.uploads.error) {
+            errorEl.textContent += `Uploads: ${data.uploads.error}\n`;
+        }
+        if (data.reports && data.reports.error) {
+            errorEl.textContent += `Reports: ${data.reports.error}\n`;
+        }
+
+        if (!errorEl.textContent) {
+            successEl.textContent = '✓ Configuration saved successfully';
+            successEl.style.display = 'block';
+            setTimeout(() => closeDirectoryConfig(), 2000);
+        }
+    } catch (e) {
+        errorEl.textContent = `Connection error: ${e.message}`;
+    }
+}

@@ -471,6 +471,99 @@ async def ai_config_update(body: AIConfigUpdate):
         connector.save_setting("claude_api_key", body.claudeApiKey)
     return {"status": "success"}
 
+# ────────────── File Management Endpoints ──────────────
+
+@app.get("/api/files/config")
+async def get_file_config():
+    """Get current uploads and reports directory configuration."""
+    return {
+        "uploads_dir": connector.get_uploads_dir(),
+        "reports_dir": connector.get_reports_dir()
+    }
+
+class DirectoryConfig(BaseModel):
+    uploads_dir: Optional[str] = None
+    reports_dir: Optional[str] = None
+
+@app.post("/api/files/config")
+async def set_file_config(body: DirectoryConfig):
+    """Update uploads/reports directory paths."""
+    results = {}
+
+    if body.uploads_dir:
+        result = connector.set_uploads_dir(body.uploads_dir)
+        results["uploads"] = result
+
+    if body.reports_dir:
+        result = connector.set_reports_dir(body.reports_dir)
+        results["reports"] = result
+
+    return results if results else {"error": "No paths provided"}
+
+@app.post("/api/files/upload")
+async def upload_file(file: UploadFile = File(...)):
+    """Upload a file for AI analysis (CSV/Excel only)."""
+    uploads_dir = connector.get_uploads_dir()
+    os.makedirs(uploads_dir, exist_ok=True)
+
+    # Validate file type
+    allowed_exts = {".csv", ".xlsx", ".xls"}
+    file_ext = os.path.splitext(file.filename)[1].lower()
+
+    if file_ext not in allowed_exts:
+        return {"error": f"File type not allowed: {file_ext}. Only CSV/Excel allowed."}
+
+    # Validate file size (max 50MB)
+    try:
+        content = await file.read()
+        if len(content) > 50 * 1024 * 1024:
+            return {"error": "File too large (max 50MB)"}
+    except Exception as e:
+        return {"error": f"File read error: {str(e)}"}
+
+    # Save file with timestamp prefix (unique names)
+    safe_name = f"{int(time.time())}_{os.path.basename(file.filename)}"
+    filepath = os.path.join(uploads_dir, safe_name)
+
+    try:
+        with open(filepath, "wb") as f:
+            f.write(content)
+
+        return {
+            "success": True,
+            "filename": safe_name,
+            "original_name": file.filename,
+            "size": len(content)
+        }
+    except Exception as e:
+        return {"error": f"Upload failed: {str(e)}"}
+
+@app.get("/api/files/list")
+async def list_files(directory: str = "uploads", limit: int = 20):
+    """List files in uploads or reports directory."""
+    try:
+        if directory == "uploads":
+            files = connector.list_uploaded_files(limit)
+        elif directory == "reports":
+            reports_dir = connector.get_reports_dir()
+            os.makedirs(reports_dir, exist_ok=True)
+            files = []
+            for f in os.listdir(reports_dir)[:limit]:
+                fpath = os.path.join(reports_dir, f)
+                if os.path.isfile(fpath):
+                    files.append({
+                        "name": f,
+                        "size": os.path.getsize(fpath),
+                        "type": f.split(".")[-1] if "." in f else "unknown"
+                    })
+            files = sorted(files, key=lambda x: x["name"], reverse=True)
+        else:
+            return {"error": "Invalid directory (must be 'uploads' or 'reports')"}
+
+        return {"files": files, "count": len(files)}
+    except Exception as e:
+        return {"error": f"Error listing files: {str(e)}"}
+
 # Serve static files (mount at the end to avoid intercepting /api)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 

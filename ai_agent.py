@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 DB_NAME = "holded.db"
 
-WRITE_TOOLS = {"create_estimate", "create_invoice", "send_document", "create_contact", "update_invoice_status"}
+WRITE_TOOLS = {"create_estimate", "create_invoice", "send_document", "create_contact", "update_invoice_status", "upload_file"}
 
 # Pending confirmations: { state_id: { messages, tool_block, conversation_id, expires_at } }
 pending_actions = {}
@@ -254,6 +254,42 @@ TOOL_DEFINITIONS = [
                 }
             },
             "required": ["chart_type", "title", "labels", "datasets"]
+        }
+    },
+    {
+        "name": "analyze_file",
+        "description": "Analyze an uploaded CSV or Excel file. Returns data summary, columns, data types, and statistical analysis.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string", "description": "Name of the uploaded file (e.g., 'sales.csv' or '1234567890_data.xlsx')"},
+                "analysis_type": {"type": "string", "enum": ["summary", "trends", "anomalies"], "description": "Type of analysis to perform", "default": "summary"}
+            },
+            "required": ["filename"]
+        }
+    },
+    {
+        "name": "list_files",
+        "description": "List recently uploaded files or generated reports. Useful for referencing files by name.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "directory": {"type": "string", "enum": ["uploads", "reports"], "description": "Which directory to list"},
+                "limit": {"type": "integer", "description": "Maximum files to return (default: 20)", "default": 20}
+            },
+            "required": ["directory"]
+        }
+    },
+    {
+        "name": "upload_file",
+        "description": "Register an uploaded file for processing. This is a write operation that requires user confirmation.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string", "description": "Name of the file that was uploaded"},
+                "description": {"type": "string", "description": "Optional description of file contents"}
+            },
+            "required": ["filename"]
         }
     }
 ]
@@ -669,6 +705,134 @@ def exec_render_chart(params):
         "datasets": params["datasets"]
     }
 
+def exec_analyze_file(params):
+    """Analyze an uploaded CSV or Excel file."""
+    import pandas as pd
+
+    filename = params.get("filename", "")
+    analysis_type = params.get("analysis_type", "summary")
+
+    # Path traversal prevention
+    safe_name = os.path.basename(filename)
+    uploads_dir = connector.get_uploads_dir()
+    filepath = os.path.join(uploads_dir, safe_name)
+
+    # Validate file exists and is within uploads dir
+    if not os.path.abspath(filepath).startswith(uploads_dir):
+        return {"error": f"Invalid filename: {filename}"}
+
+    if not os.path.exists(filepath):
+        return {"error": f"File not found: {filename}"}
+
+    # Parse file
+    try:
+        if filename.endswith((".csv", ".xlsx", ".xls")):
+            if filename.endswith(".csv"):
+                df = pd.read_csv(filepath)
+            else:
+                df = pd.read_excel(filepath)
+
+            analysis = {
+                "filename": filename,
+                "rows": df.shape[0],
+                "columns": df.shape[1],
+                "column_names": list(df.columns),
+                "dtypes": {col: str(dtype) for col, dtype in df.dtypes.items()}
+            }
+
+            if analysis_type in ["summary", "trends"]:
+                try:
+                    analysis["summary"] = df.describe().to_dict()
+                except:
+                    pass
+
+            if analysis_type == "anomalies":
+                # Simple anomaly detection for numeric columns
+                numeric_cols = df.select_dtypes(include=['number']).columns
+                anomalies = {}
+                for col in numeric_cols:
+                    q1 = df[col].quantile(0.25)
+                    q3 = df[col].quantile(0.75)
+                    iqr = q3 - q1
+                    lower = q1 - 1.5 * iqr
+                    upper = q3 + 1.5 * iqr
+                    count = len(df[(df[col] < lower) | (df[col] > upper)])
+                    if count > 0:
+                        anomalies[col] = count
+                analysis["anomalies"] = anomalies
+
+            return {"success": True, "analysis": analysis}
+        else:
+            return {"error": "Unsupported file type (only CSV/Excel)"}
+    except Exception as e:
+        return {"error": f"File parsing error: {str(e)}"}
+
+def exec_list_files(params):
+    """List files in uploads or reports directory."""
+    directory = params.get("directory", "uploads")
+    limit = params.get("limit", 20)
+
+    try:
+        if directory == "uploads":
+            files = connector.list_uploaded_files(limit)
+        elif directory == "reports":
+            reports_dir = connector.get_reports_dir()
+            os.makedirs(reports_dir, exist_ok=True)
+            files = []
+            for f in os.listdir(reports_dir)[:limit]:
+                fpath = os.path.join(reports_dir, f)
+                if os.path.isfile(fpath):
+                    files.append({
+                        "name": f,
+                        "size": os.path.getsize(fpath),
+                        "type": f.split(".")[-1] if "." in f else "unknown"
+                    })
+            files = sorted(files, key=lambda x: x["name"], reverse=True)
+        else:
+            return {"error": "Invalid directory (must be 'uploads' or 'reports')"}
+
+        return {"success": True, "files": files, "count": len(files)}
+    except Exception as e:
+        return {"error": f"Error listing files: {str(e)}"}
+
+def exec_upload_file(params):
+    """Register uploaded file (write operation - requires confirmation)."""
+    filename = params.get("filename", "")
+    description = params.get("description", "")
+
+    # Path traversal prevention
+    safe_name = os.path.basename(filename)
+    uploads_dir = connector.get_uploads_dir()
+    filepath = os.path.join(uploads_dir, safe_name)
+
+    if not os.path.exists(filepath):
+        return {"error": f"File not found in uploads: {filename}"}
+
+    try:
+        # Record in ai_history for audit trail
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO ai_history (role, content, conversation_id, tool_calls)
+            VALUES (?, ?, ?, ?)
+        """, ("system", f"File uploaded: {filename}", "default", json.dumps({
+            "tool": "upload_file",
+            "description": description,
+            "filename": filename,
+            "size": os.path.getsize(filepath)
+        })))
+        conn.commit()
+        conn.close()
+
+        return {
+            "success": True,
+            "filename": filename,
+            "size": os.path.getsize(filepath),
+            "message": f"File '{filename}' registered for processing"
+        }
+    except Exception as e:
+        return {"error": f"Failed to register file: {str(e)}"}
+
 
 TOOL_EXECUTORS = {
     "query_database": exec_query_database,
@@ -686,6 +850,9 @@ TOOL_EXECUTORS = {
     "compare_periods": exec_compare_periods,
     "update_invoice_status": exec_update_invoice_status,
     "render_chart": exec_render_chart,
+    "analyze_file": exec_analyze_file,
+    "list_files": exec_list_files,
+    "upload_file": exec_upload_file,
 }
 
 # ─── System Prompt Builder ───────────────────────────────────────────
