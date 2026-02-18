@@ -33,6 +33,7 @@
                 <div class="nav-item" data-view="purchases">Expenses</div>
                 <div class="nav-item" data-view="estimates">Estimates</div>
                 <div class="nav-item" data-view="amortizations">📊 Amortizaciones</div>
+                <div class="nav-item" data-view="analysis">🧠 Análisis Gastos</div>
             </nav>
             <div class="safe-mode-badge" id="safeModeBadge">SAFE MODE ACTIVE</div>
         </aside>
@@ -148,6 +149,7 @@
                     <h1>📊 Amortizaciones</h1>
                     <div class="filter-controls">
                         <button class="sync-btn" onclick="openAmortizationModal()">+ Añadir producto</button>
+                        <button class="action-btn btn-secondary" onclick="toggleAmortChart()">📈 Ver gráfico</button>
                         <button class="action-btn btn-secondary" onclick="loadAmortizations()">Actualizar</button>
                     </div>
                 </header>
@@ -175,6 +177,18 @@
                 <!-- Badges row -->
                 <div class="amort-badges" id="amortBadges"></div>
 
+                <!-- ROI Chart -->
+                <div class="card amort-chart-card" id="amortChartCard" style="display:none;margin-top:1.5rem">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+                        <h2 style="margin:0">ROI por Producto</h2>
+                        <button class="action-btn btn-secondary" style="padding:0.3rem 0.8rem;font-size:0.8rem"
+                            onclick="toggleAmortChart()">Ocultar gráfico</button>
+                    </div>
+                    <div style="position:relative;height:260px">
+                        <canvas id="amortChart"></canvas>
+                    </div>
+                </div>
+
                 <!-- Main table -->
                 <div class="card table-container" style="margin-top:1.5rem">
                     <table id="amortTable">
@@ -188,13 +202,88 @@
                                 <th>ROI %</th>
                                 <th>Estado</th>
                                 <th>Notas</th>
+                                <th>Alquileres</th>
                                 <th>Acciones</th>
                             </tr>
                         </thead>
                         <tbody id="amortBody">
-                            <tr><td colspan="9" style="text-align:center;color:var(--text-gray);padding:2rem">Cargando...</td></tr>
+                            <tr><td colspan="10" style="text-align:center;color:var(--text-gray);padding:2rem">Cargando...</td></tr>
                         </tbody>
                     </table>
+                </div>
+            </div>
+
+            <!-- ANALYSIS VIEW -->
+            <div id="view-analysis" class="view-container">
+                <header>
+                    <h1>🧠 Análisis Inteligente de Gastos</h1>
+                    <div class="filter-controls">
+                        <button class="sync-btn" onclick="runAnalysisJob()" id="analysisRunBtn">▶ Analizar 10 facturas</button>
+                        <button class="action-btn btn-secondary" onclick="loadAnalysisView()">Actualizar</button>
+                    </div>
+                </header>
+
+                <!-- Progress cards -->
+                <section class="stats-grid" id="analysisSummaryCards">
+                    <div class="stat-card">
+                        <h3>Total Facturas</h3>
+                        <p id="analysisTotalInvoices">—</p>
+                    </div>
+                    <div class="stat-card income">
+                        <h3>Analizadas</h3>
+                        <p id="analysisAnalyzed">—</p>
+                    </div>
+                    <div class="stat-card expenses">
+                        <h3>Pendientes</h3>
+                        <p id="analysisPending">—</p>
+                    </div>
+                    <div class="stat-card" style="border-top:3px solid var(--accent)">
+                        <h3>Progreso</h3>
+                        <p id="analysisPct">—</p>
+                    </div>
+                </section>
+
+                <!-- Progress bar -->
+                <div style="margin-top:1rem;background:rgba(255,255,255,0.05);border-radius:8px;height:8px;overflow:hidden">
+                    <div id="analysisProgressBar" style="height:100%;background:var(--primary);border-radius:8px;width:0%;transition:width 0.5s"></div>
+                </div>
+                <p id="analysisStatusMsg" style="margin-top:0.5rem;font-size:0.85rem;color:var(--text-gray)"></p>
+
+                <!-- Inventory matches panel -->
+                <div class="card" style="margin-top:1.5rem" id="matchesPanel">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+                        <h2 style="margin:0">🔍 Productos del inventario detectados en compras</h2>
+                        <span id="matchesBadge" class="amort-badge badge-pending" style="display:none"></span>
+                    </div>
+                    <p style="color:var(--text-gray);font-size:0.9rem;margin-bottom:1rem">
+                        Estos productos de tu inventario aparecen en facturas de compra. Confírmalos para añadirlos automáticamente a Amortizaciones con su precio real de compra.
+                    </p>
+                    <div class="table-container">
+                        <table id="matchesTable">
+                            <thead>
+                                <tr>
+                                    <th>Producto (inventario)</th>
+                                    <th>Encontrado en factura como</th>
+                                    <th>Proveedor</th>
+                                    <th>Precio compra</th>
+                                    <th>Fecha</th>
+                                    <th>Método</th>
+                                    <th>Acción</th>
+                                </tr>
+                            </thead>
+                            <tbody id="matchesBody">
+                                <tr><td colspan="7" style="text-align:center;color:var(--text-gray);padding:2rem">Ejecuta el análisis para buscar coincidencias.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Category breakdown -->
+                <div class="card" style="margin-top:1.5rem">
+                    <h2 style="margin-bottom:1rem">📂 Gastos por categoría</h2>
+                    <div id="categoryBreakdown">
+                        <p style="color:var(--text-gray);text-align:center;padding:1rem">Sin datos aún. Ejecuta el análisis para ver el desglose.</p>
+                    </div>
                 </div>
             </div>
 
@@ -230,6 +319,34 @@
 
                 <button class="sync-btn" onclick="saveAmortization()" style="width:100%;margin-bottom:0.5rem">Guardar</button>
                 <p class="error-msg" id="amortModalError" style="margin-top:0.5rem"></p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Amortization Rental History Modal -->
+    <div id="amortHistoryModal" class="modal-overlay" style="display:none">
+        <div class="modal-content" style="max-width:700px">
+            <header>
+                <h2 id="amortHistoryTitle">Histórico de alquileres</h2>
+                <button class="close-btn" onclick="closeAmortHistory()">&times;</button>
+            </header>
+            <div style="padding:1rem 1.5rem 1.5rem">
+                <div id="amortHistorySummary" style="margin-bottom:1rem;padding:0.75rem 1rem;background:var(--card-bg);border-radius:8px;border:1px solid var(--glass-border)"></div>
+                <div class="table-container" style="max-height:360px;overflow-y:auto">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Fecha</th>
+                                <th>Unidades</th>
+                                <th>Precio unit.</th>
+                                <th>Subtotal</th>
+                            </tr>
+                        </thead>
+                        <tbody id="amortHistoryBody">
+                            <tr><td colspan="4" style="text-align:center;padding:2rem;color:var(--text-gray)">Cargando...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
     </div>

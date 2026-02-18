@@ -261,7 +261,7 @@ function showView(viewName) {
     });
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
 
-    const specialViews = { 'overview': 'view-overview', 'setup': 'view-setup', 'amortizations': 'view-amortizations' };
+    const specialViews = { 'overview': 'view-overview', 'setup': 'view-setup', 'amortizations': 'view-amortizations', 'analysis': 'view-analysis' };
     const targetViewId = specialViews[viewName] || 'view-entity';
 
     const targetView = document.getElementById(targetViewId);
@@ -275,6 +275,8 @@ function showView(viewName) {
 
         if (viewName === 'amortizations') {
             loadAmortizations();
+        } else if (viewName === 'analysis') {
+            loadAnalysisView();
         } else if (!specialViews[viewName]) {
             loadEntityData(viewName);
         }
@@ -1538,6 +1540,8 @@ async function saveDirectoryConfig() {
 // ============================================================
 
 let _amortProducts = [];   // cached product list for select dropdown
+let _amortChartInstance = null;  // Chart.js instance (destroy before re-render)
+let _amortChartVisible = false;
 
 async function loadAmortizations() {
     try {
@@ -1570,7 +1574,8 @@ async function loadAmortizations() {
         // Render table
         const tbody = document.getElementById('amortBody');
         if (!rows.length) {
-            tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-gray);padding:2rem">Sin datos. Añade un producto para empezar a hacer seguimiento.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-gray);padding:2rem">Sin datos. Añade un producto para empezar a hacer seguimiento.</td></tr>';
+            document.getElementById('amortChartCard').style.display = 'none';
             return;
         }
 
@@ -1581,6 +1586,8 @@ async function loadAmortizations() {
             const statusBadge = isAmort
                 ? '<span class="badge badge-paid">✅ AMORTIZADO</span>'
                 : '<span class="badge badge-pending">⏳ EN CURSO</span>';
+            // Safely encode name for onclick attribute
+            const safeName = r.product_name.replace(/'/g, "\\'");
 
             return `<tr>
                 <td><strong>${escapeHtml(r.product_name)}</strong></td>
@@ -1593,16 +1600,25 @@ async function loadAmortizations() {
                 <td style="color:var(--text-gray);font-size:0.85rem">${escapeHtml(r.notes || '—')}</td>
                 <td>
                     <button class="action-btn btn-secondary" style="padding:0.3rem 0.6rem;font-size:0.8rem"
-                        onclick="openAmortizationModal(${r.id}, '${escapeHtml(r.product_name)}', ${r.purchase_price}, '${escapeHtml(r.purchase_date)}', '${escapeHtml(r.notes || '')}')">
+                        onclick="openAmortHistory('${escapeHtml(r.product_id)}', '${safeName}', ${r.purchase_price}, ${r.total_revenue})">
+                        📋 Ver
+                    </button>
+                </td>
+                <td>
+                    <button class="action-btn btn-secondary" style="padding:0.3rem 0.6rem;font-size:0.8rem"
+                        onclick="openAmortizationModal(${r.id}, '${safeName}', ${r.purchase_price}, '${escapeHtml(r.purchase_date)}', '${escapeHtml(r.notes || '')}')">
                         Editar
                     </button>
                     <button class="action-btn" style="padding:0.3rem 0.6rem;font-size:0.8rem;background:var(--danger);margin-left:4px"
-                        onclick="deleteAmortization(${r.id}, '${escapeHtml(r.product_name)}')">
+                        onclick="deleteAmortization(${r.id}, '${safeName}')">
                         Eliminar
                     </button>
                 </td>
             </tr>`;
         }).join('');
+
+        // Re-render chart if it was visible
+        if (_amortChartVisible) renderAmortChart(rows);
 
     } catch (e) {
         console.error('Error loading amortizations:', e);
@@ -1716,4 +1732,329 @@ async function deleteAmortization(id, name) {
 // Close amortization modal on click outside
 window.addEventListener('click', (e) => {
     if (e.target.id === 'amortModal') closeAmortizationModal();
+    if (e.target.id === 'amortHistoryModal') closeAmortHistory();
 });
+
+// ── Amortization ROI Chart ──────────────────────────────────────────
+
+function toggleAmortChart() {
+    const card = document.getElementById('amortChartCard');
+    _amortChartVisible = !_amortChartVisible;
+
+    if (_amortChartVisible) {
+        card.style.display = 'block';
+        // Fetch current rows and render
+        fetch('/api/amortizations')
+            .then(r => r.json())
+            .then(rows => renderAmortChart(rows))
+            .catch(() => {});
+    } else {
+        card.style.display = 'none';
+    }
+
+    // Update button text
+    document.querySelectorAll('[onclick="toggleAmortChart()"]').forEach(btn => {
+        btn.textContent = _amortChartVisible ? '📈 Ocultar gráfico' : '📈 Ver gráfico';
+    });
+}
+
+function renderAmortChart(rows) {
+    if (!rows.length) return;
+    const ctx = document.getElementById('amortChart').getContext('2d');
+
+    if (_amortChartInstance) {
+        _amortChartInstance.destroy();
+        _amortChartInstance = null;
+    }
+
+    const labels = rows.map(r => r.product_name);
+    const invested = rows.map(r => r.purchase_price);
+    const revenue = rows.map(r => r.total_revenue);
+    const profit = rows.map(r => r.profit);
+
+    _amortChartInstance = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels,
+            datasets: [
+                {
+                    label: 'Invertido',
+                    data: invested,
+                    backgroundColor: 'rgba(248, 113, 113, 0.7)',
+                    borderColor: '#f87171',
+                    borderWidth: 1,
+                    borderRadius: 4,
+                },
+                {
+                    label: 'Revenue',
+                    data: revenue,
+                    backgroundColor: 'rgba(16, 185, 129, 0.7)',
+                    borderColor: '#10b981',
+                    borderWidth: 1,
+                    borderRadius: 4,
+                },
+                {
+                    label: 'Profit',
+                    data: profit,
+                    backgroundColor: profit.map(p => p >= 0 ? 'rgba(59,130,246,0.7)' : 'rgba(244,63,94,0.5)'),
+                    borderColor: profit.map(p => p >= 0 ? '#3b82f6' : '#f43f5e'),
+                    borderWidth: 1,
+                    borderRadius: 4,
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: {
+                legend: { labels: { color: '#94a3b8' } },
+                tooltip: {
+                    callbacks: {
+                        label: ctx => ` ${ctx.dataset.label}: ${new Intl.NumberFormat('es-ES',{style:'currency',currency:'EUR'}).format(ctx.parsed.y)}`
+                    }
+                }
+            },
+            scales: {
+                x: { ticks: { color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+                y: {
+                    ticks: {
+                        color: '#94a3b8',
+                        callback: v => `${(v/1000).toFixed(0)}k €`
+                    },
+                    grid: { color: 'rgba(255,255,255,0.05)' }
+                }
+            }
+        }
+    });
+}
+
+// ── Rental History Modal ────────────────────────────────────────────
+
+async function openAmortHistory(productId, productName, purchasePrice, totalRevenue) {
+    document.getElementById('amortHistoryTitle').textContent = `📋 Alquileres: ${productName}`;
+    document.getElementById('amortHistoryModal').style.display = 'flex';
+    document.getElementById('amortHistoryBody').innerHTML =
+        '<tr><td colspan="4" style="text-align:center;padding:2rem;color:var(--text-gray)">Cargando...</td></tr>';
+
+    try {
+        const res = await fetch(`/api/entities/products/${productId}/history`);
+        const history = await res.json();
+
+        // Only income transactions (invoice_items)
+        const rentals = history.filter(h => h.type === 'income');
+
+        // Summary bar
+        const profit = totalRevenue - purchasePrice;
+        const roi = purchasePrice > 0 ? ((profit / purchasePrice) * 100).toFixed(1) : 0;
+        const profitColor = profit >= 0 ? 'var(--primary)' : 'var(--danger)';
+        document.getElementById('amortHistorySummary').innerHTML = `
+            <div style="display:flex;gap:2rem;flex-wrap:wrap;font-size:0.9rem">
+                <span>💰 <strong>Invertido:</strong> ${formatter.format(purchasePrice)}</span>
+                <span>📈 <strong>Revenue total:</strong> ${formatter.format(totalRevenue)}</span>
+                <span style="color:${profitColor}">✨ <strong>Profit:</strong> ${formatter.format(profit)}</span>
+                <span style="color:${profitColor}">📊 <strong>ROI:</strong> ${roi}%</span>
+                <span style="color:var(--text-gray)">🧾 <strong>${rentals.length}</strong> alquiler(es)</span>
+            </div>
+        `;
+
+        if (!rentals.length) {
+            document.getElementById('amortHistoryBody').innerHTML =
+                '<tr><td colspan="4" style="text-align:center;padding:2rem;color:var(--text-gray)">Sin alquileres registrados en facturas aún.</td></tr>';
+            return;
+        }
+
+        document.getElementById('amortHistoryBody').innerHTML = rentals.map(h => {
+            const date = h.date ? new Date(h.date * 1000).toLocaleDateString('es-ES') : '—';
+            return `<tr>
+                <td>${date}</td>
+                <td style="text-align:center">${h.units ?? '—'}</td>
+                <td>${formatter.format(h.price ?? 0)}</td>
+                <td style="font-weight:600;color:var(--primary)">${formatter.format(h.subtotal ?? 0)}</td>
+            </tr>`;
+        }).join('');
+
+    } catch (e) {
+        document.getElementById('amortHistoryBody').innerHTML =
+            `<tr><td colspan="4" style="text-align:center;color:var(--danger);padding:1rem">Error: ${e.message}</td></tr>`;
+    }
+}
+
+function closeAmortHistory() {
+    document.getElementById('amortHistoryModal').style.display = 'none';
+}
+
+// ============================================================
+//  INVOICE ANALYSIS
+// ============================================================
+
+let _analysisPolling = null;
+
+async function loadAnalysisView() {
+    try {
+        const [statusRes, matchesRes] = await Promise.all([
+            fetch('/api/analysis/status'),
+            fetch('/api/analysis/matches')
+        ]);
+        const status = await statusRes.json();
+        const matches = await matchesRes.json();
+
+        _renderAnalysisStatus(status);
+        _renderMatches(matches);
+        _renderCategoryBreakdown(status.by_category || []);
+    } catch (e) {
+        console.error('Error loading analysis view:', e);
+    }
+}
+
+function _renderAnalysisStatus(status) {
+    document.getElementById('analysisTotalInvoices').textContent = status.total ?? '—';
+    document.getElementById('analysisAnalyzed').textContent = status.analyzed ?? '—';
+    document.getElementById('analysisPending').textContent = status.pending ?? '—';
+    document.getElementById('analysisPct').textContent = `${status.pct ?? 0}%`;
+    document.getElementById('analysisProgressBar').style.width = `${status.pct ?? 0}%`;
+
+    const btn = document.getElementById('analysisRunBtn');
+    const msgEl = document.getElementById('analysisStatusMsg');
+
+    if (status.running) {
+        btn.textContent = '⏳ Analizando...';
+        btn.disabled = true;
+        msgEl.textContent = 'Job en curso — la página se actualizará al terminar.';
+        if (!_analysisPolling) {
+            _analysisPolling = setInterval(async () => {
+                const r = await fetch('/api/analysis/status');
+                const s = await r.json();
+                _renderAnalysisStatus(s);
+                if (!s.running) {
+                    clearInterval(_analysisPolling);
+                    _analysisPolling = null;
+                    loadAnalysisView(); // Full refresh when done
+                }
+            }, 3000);
+        }
+    } else {
+        btn.textContent = `▶ Analizar ${status.pending > 0 ? Math.min(status.pending, 10) : 10} facturas`;
+        btn.disabled = (status.pending === 0);
+        const lastRun = status.last_run ? new Date(status.last_run).toLocaleString('es-ES') : 'Nunca';
+        const pendingMatches = status.pending_matches || 0;
+        msgEl.innerHTML = `Último análisis: <strong>${lastRun}</strong>${pendingMatches ? ` · <span style="color:var(--warning)">⚠ ${pendingMatches} match(es) pendiente(s) de confirmar</span>` : ''}`;
+    }
+
+    // Matches badge
+    const badge = document.getElementById('matchesBadge');
+    const pm = status.pending_matches || 0;
+    if (pm > 0) {
+        badge.textContent = `${pm} pendiente${pm > 1 ? 's' : ''}`;
+        badge.style.display = 'inline';
+    } else {
+        badge.style.display = 'none';
+    }
+}
+
+function _renderMatches(matches) {
+    const tbody = document.getElementById('matchesBody');
+    if (!matches.length) {
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-gray);padding:2rem">No hay matches pendientes. Ejecuta el análisis para escanear tus facturas de compra.</td></tr>';
+        return;
+    }
+
+    const methodLabel = m => {
+        if (m === 'exact_id') return '<span class="badge badge-paid" style="font-size:0.75rem">✅ ID exacto</span>';
+        if (m && m.startsWith('fuzzy')) return `<span class="badge badge-pending" style="font-size:0.75rem">🔍 ${m.replace('fuzzy_','').replace('pct','%')} similitud</span>`;
+        return m || '—';
+    };
+
+    tbody.innerHTML = matches.map(m => `
+        <tr id="match-row-${m.id}">
+            <td><strong>${escapeHtml(m.product_name)}</strong></td>
+            <td style="color:var(--text-gray);font-size:0.85rem">${escapeHtml(m.item_name_in_invoice || m.product_name)}</td>
+            <td>${escapeHtml(m.supplier || '—')}</td>
+            <td style="font-weight:600;color:var(--primary)">${formatter.format(m.matched_price)}</td>
+            <td>${escapeHtml(m.matched_date || '—')}</td>
+            <td>${methodLabel(m.match_method)}</td>
+            <td style="white-space:nowrap">
+                <button class="action-btn" style="padding:0.3rem 0.7rem;font-size:0.8rem;margin-right:4px"
+                    onclick="confirmMatch(${m.id}, true)">✅ Confirmar</button>
+                <button class="action-btn" style="padding:0.3rem 0.7rem;font-size:0.8rem;background:var(--danger)"
+                    onclick="confirmMatch(${m.id}, false)">✕ Rechazar</button>
+            </td>
+        </tr>
+    `).join('');
+}
+
+function _renderCategoryBreakdown(categories) {
+    const el = document.getElementById('categoryBreakdown');
+    if (!categories.length) {
+        el.innerHTML = '<p style="color:var(--text-gray);text-align:center;padding:1rem">Sin datos aún. Ejecuta el análisis para ver el desglose.</p>';
+        return;
+    }
+    const maxAmount = Math.max(...categories.map(c => c.total_amount || 0));
+    el.innerHTML = `<div style="display:flex;flex-direction:column;gap:0.75rem">` +
+        categories.map(c => {
+            const pct = maxAmount > 0 ? Math.round((c.total_amount / maxAmount) * 100) : 0;
+            return `
+            <div>
+                <div style="display:flex;justify-content:space-between;margin-bottom:0.3rem;font-size:0.9rem">
+                    <span><strong>${escapeHtml(c.category)}</strong> <span style="color:var(--text-gray)">(${c.count} facturas)</span></span>
+                    <span style="color:var(--primary);font-weight:600">${formatter.format(c.total_amount || 0)}</span>
+                </div>
+                <div style="background:rgba(255,255,255,0.05);border-radius:4px;height:6px">
+                    <div style="width:${pct}%;height:100%;background:var(--primary);border-radius:4px;transition:width 0.5s"></div>
+                </div>
+            </div>`;
+        }).join('') + `</div>`;
+}
+
+async function runAnalysisJob() {
+    const btn = document.getElementById('analysisRunBtn');
+    btn.disabled = true;
+    btn.textContent = '⏳ Iniciando...';
+    try {
+        const res = await fetch('/api/analysis/run', { method: 'POST' });
+        const data = await res.json();
+        if (data.status === 'started' || data.status === 'already_running') {
+            // Start polling
+            loadAnalysisView();
+        }
+    } catch (e) {
+        btn.disabled = false;
+        btn.textContent = '▶ Analizar facturas';
+        alert(`Error: ${e.message}`);
+    }
+}
+
+async function confirmMatch(matchId, confirmed) {
+    const row = document.getElementById(`match-row-${matchId}`);
+    if (row) {
+        row.style.opacity = '0.5';
+        row.querySelectorAll('button').forEach(b => b.disabled = true);
+    }
+    try {
+        const res = await fetch(`/api/analysis/matches/${matchId}/confirm`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confirmed })
+        });
+        const data = await res.json();
+        if (res.ok) {
+            if (row) row.remove();
+            if (confirmed && data.added_to_amortizations) {
+                // Show toast-like feedback
+                const msg = document.getElementById('analysisStatusMsg');
+                const prev = msg.innerHTML;
+                msg.innerHTML = `<span style="color:var(--primary)">✅ Añadido a Amortizaciones correctamente</span>`;
+                setTimeout(() => { msg.innerHTML = prev; }, 3000);
+            }
+            // Refresh status counts
+            const r = await fetch('/api/analysis/status');
+            const s = await r.json();
+            _renderAnalysisStatus(s);
+        } else {
+            if (row) { row.style.opacity = '1'; row.querySelectorAll('button').forEach(b => b.disabled = false); }
+            alert(data.detail || 'Error al confirmar');
+        }
+    } catch (e) {
+        if (row) { row.style.opacity = '1'; row.querySelectorAll('button').forEach(b => b.disabled = false); }
+        alert(`Error: ${e.message}`);
+    }
+}

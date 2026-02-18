@@ -12,7 +12,8 @@ import json
 import requests
 import io
 import pandas as pd
-from datetime import datetime
+import threading
+from datetime import datetime, timedelta
 import connector
 import reports
 import ai_agent
@@ -38,10 +39,163 @@ UPLOADS_DIR = os.path.abspath("uploads")
 
 sync_status = {"running": False, "last_result": None, "last_time": None, "errors": []}
 
+# ── Invoice Analysis Job ─────────────────────────────────────────────
+analysis_status = {
+    "running": False,
+    "last_run": None,
+    "last_result": None,
+    "processed": 0,
+    "pending_matches": 0,
+}
+
+def run_analysis_job(batch_size: int = 10):
+    """
+    Core analysis job:
+    1. Categorize up to batch_size unanalyzed purchase invoices (rules → Claude fallback)
+    2. Scan ALL purchase_items for inventory matches and save pending ones
+    """
+    if analysis_status["running"]:
+        return {"error": "Already running"}
+
+    analysis_status["running"] = True
+    analysis_status["last_run"] = datetime.now().isoformat()
+    processed = 0
+    errors = []
+
+    try:
+        # ── Step 1: Categorize unanalyzed invoices ───────────────────
+        invoices = connector.get_unanalyzed_purchases(limit=batch_size)
+        logger.info(f"Analysis job: {len(invoices)} invoices to categorize")
+
+        for inv in invoices:
+            try:
+                result = connector.categorize_by_rules(
+                    inv.get('desc') or '',
+                    inv.get('contact_name') or '',
+                    inv.get('item_names') or []
+                )
+
+                if result is None:
+                    # Claude fallback for ambiguous invoices
+                    result = _claude_categorize(inv)
+
+                connector.save_purchase_analysis(
+                    purchase_id=inv['id'],
+                    category=result.get('category', 'Sin categoría'),
+                    subcategory=result.get('subcategory', ''),
+                    confidence=result.get('confidence', 'low'),
+                    method=result.get('method', 'unknown'),
+                    reasoning=result.get('reasoning', '')
+                )
+                processed += 1
+            except Exception as e:
+                logger.error(f"Error categorizing {inv['id']}: {e}")
+                errors.append(str(e))
+
+        # ── Step 2: Scan for inventory matches ───────────────────────
+        matches = connector.find_inventory_in_purchases()
+        logger.info(f"Analysis job: {len(matches)} inventory matches found")
+        for m in matches:
+            try:
+                connector.save_inventory_match(
+                    m['purchase_id'], m['purchase_item_id'], m['product_id'],
+                    m['product_name'], m['matched_price'], m['matched_date'],
+                    m['match_method']
+                )
+            except Exception as e:
+                logger.warning(f"Match save error: {e}")
+
+        pending = len(connector.get_pending_matches())
+        analysis_status["processed"] = processed
+        analysis_status["pending_matches"] = pending
+        analysis_status["last_result"] = "success" if not errors else "partial"
+        return {"processed": processed, "matches_found": len(matches), "pending": pending}
+
+    except Exception as e:
+        logger.error(f"Analysis job failed: {e}", exc_info=True)
+        analysis_status["last_result"] = "error"
+        return {"error": str(e)}
+    finally:
+        analysis_status["running"] = False
+
+
+def _claude_categorize(inv: dict) -> dict:
+    """
+    Use Claude to categorize a purchase invoice when rules don't match.
+    Keeps prompt minimal to save tokens.
+    """
+    try:
+        api_key = ai_agent._get_api_key()
+        if not api_key:
+            return {"category": "Sin categoría", "subcategory": "", "confidence": "low",
+                    "method": "no_key", "reasoning": "No Claude API key configured"}
+
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        item_list = ", ".join(inv.get('item_names') or []) or "—"
+        prompt = (
+            f"Clasifica esta factura de gasto empresarial en español.\n"
+            f"Proveedor: {inv.get('contact_name','')}\n"
+            f"Descripción: {inv.get('desc','')}\n"
+            f"Items: {item_list}\n"
+            f"Importe: {inv.get('amount',0)}€\n\n"
+            f"Responde SOLO con JSON: "
+            f'{{\"category\":\"...\",\"subcategory\":\"...\",\"reasoning\":\"...\"}}\n'
+            f"Categorías posibles: Transporte, Alojamiento, Alimentación, Equipamiento, "
+            f"Software, Comunicaciones, Servicios, Combustible, Formación, Otros"
+        )
+        msg = client.messages.create(
+            model=ai_agent._get_model(),
+            max_tokens=150,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        raw = msg.content[0].text.strip()
+        # Extract JSON even if Claude adds surrounding text
+        import re
+        m = re.search(r'\{.*\}', raw, re.DOTALL)
+        if m:
+            data = json.loads(m.group())
+            return {
+                "category": data.get("category", "Otros"),
+                "subcategory": data.get("subcategory", ""),
+                "confidence": "medium",
+                "method": "claude",
+                "reasoning": data.get("reasoning", "")
+            }
+    except Exception as e:
+        logger.warning(f"Claude categorization failed: {e}")
+
+    return {"category": "Sin categoría", "subcategory": "", "confidence": "low",
+            "method": "failed", "reasoning": "Categorization failed"}
+
+
+# Daily scheduler: runs analysis job automatically each day
+_scheduler_thread = None
+
+def _daily_scheduler():
+    """Background thread: runs analysis job once per day."""
+    while True:
+        now = datetime.now()
+        # Run at 3:00 AM
+        next_run = now.replace(hour=3, minute=0, second=0, microsecond=0)
+        if next_run <= now:
+            next_run += timedelta(days=1)
+        wait_secs = (next_run - now).total_seconds()
+        logger.info(f"Analysis scheduler: next run in {wait_secs/3600:.1f}h at {next_run.strftime('%H:%M')}")
+        time.sleep(wait_secs)
+        logger.info("Analysis scheduler: starting daily job")
+        run_analysis_job(batch_size=10)
+
+
 @app.on_event("startup")
 def on_startup():
     """Initialize DB schema on server start (creates tables if they don't exist)."""
     connector.init_db()
+    # Start daily analysis scheduler in background
+    global _scheduler_thread
+    _scheduler_thread = threading.Thread(target=_daily_scheduler, daemon=True)
+    _scheduler_thread.start()
+    logger.info("Daily analysis scheduler started")
 
 @contextmanager
 def get_db_connection():
@@ -638,6 +792,46 @@ def delete_amortization(amort_id: int):
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Amortization not found")
     return {"status": "success"}
+
+
+# ────────────── Invoice Analysis Endpoints ──────────────
+
+@app.get("/api/analysis/status")
+def get_analysis_status():
+    """Current state of the analysis job + overall progress stats."""
+    stats = connector.get_analysis_stats()
+    return {**analysis_status, **stats}
+
+@app.post("/api/analysis/run")
+async def trigger_analysis(background_tasks: BackgroundTasks, batch_size: int = 10):
+    """Manually trigger an analysis batch (runs in background)."""
+    if analysis_status["running"]:
+        return {"status": "already_running"}
+    background_tasks.add_task(run_analysis_job, batch_size)
+    return {"status": "started", "batch_size": batch_size}
+
+@app.get("/api/analysis/matches")
+def get_inventory_matches():
+    """Return all pending inventory→purchase matches awaiting confirmation."""
+    return connector.get_pending_matches()
+
+class MatchConfirm(BaseModel):
+    confirmed: bool
+
+@app.post("/api/analysis/matches/{match_id}/confirm")
+def confirm_match(match_id: int, body: MatchConfirm):
+    """Confirm or reject an inventory match. Confirmed ones go to amortizations."""
+    result = connector.confirm_inventory_match(match_id, body.confirmed)
+    if not result.get("ok"):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=result.get("error", "Unknown error"))
+    return result
+
+@app.get("/api/analysis/categories")
+def get_category_breakdown():
+    """Spending breakdown by category with totals."""
+    stats = connector.get_analysis_stats()
+    return stats.get("by_category", [])
 
 
 # Serve static files (mount at the end to avoid intercepting /api)

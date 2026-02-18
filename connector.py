@@ -249,6 +249,38 @@ def init_db():
         )
     ''')
 
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS purchase_analysis (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            purchase_id TEXT NOT NULL UNIQUE,
+            category TEXT,
+            subcategory TEXT,
+            confidence TEXT,
+            method TEXT,
+            reasoning TEXT,
+            analyzed_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (purchase_id) REFERENCES purchase_invoices(id)
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS inventory_matches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            purchase_id TEXT NOT NULL,
+            purchase_item_id INTEGER,
+            product_id TEXT NOT NULL,
+            product_name TEXT NOT NULL,
+            matched_price REAL NOT NULL,
+            matched_date TEXT NOT NULL,
+            match_method TEXT,
+            status TEXT DEFAULT 'pending',
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (purchase_id) REFERENCES purchase_invoices(id),
+            FOREIGN KEY (product_id) REFERENCES products(id),
+            UNIQUE(purchase_id, product_id)
+        )
+    ''')
+
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_invoices_contact ON invoices(contact_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_invoices_date ON invoices(date)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_purchases_contact ON purchase_invoices(contact_id)')
@@ -629,6 +661,285 @@ def list_uploaded_files(limit=50):
         logger.error(f"Error listing uploaded files: {str(e)}")
 
     return sorted(files, key=lambda x: x["uploaded_at"], reverse=True)
+
+# ============= Purchase Analysis Functions =============
+
+# Category keywords for rule-based classification.
+# Each entry: (category, subcategory, [keywords_to_match_in_desc_or_supplier])
+# Keywords are matched case-insensitively against: purchase desc + contact_name + item names
+CATEGORY_RULES = [
+    ("Transporte", "Taxi/VTC",      ["uber", "cabify", "taxi", "bolt", "free now"]),
+    ("Transporte", "Vuelo",         ["vuelo", "flight", "iberia", "ryanair", "vueling", "easyjet", "air", "aena"]),
+    ("Transporte", "Tren",          ["renfe", "ave", "tren", "cercanias", "feve"]),
+    ("Alojamiento", "Hotel",        ["hotel", "hostal", "booking", "airbnb", "alojamiento", "habitacion"]),
+    ("Alimentación", "Restaurante", ["restaurante", "cafeteria", "bar ", "comida", "cena", "almuerzo", "delivery", "glovo", "just eat"]),
+    ("Equipamiento", "Electrónica", ["amazon", "apple", "fnac", "mediamarkt", "pccomponentes", "camara", "objetivo", "lente", "monitor", "ordenador", "laptop"]),
+    ("Equipamiento", "Material",    ["leroy", "bauhaus", "ikea", "material", "herramienta"]),
+    ("Software", "Suscripción",     ["adobe", "google", "microsoft", "dropbox", "notion", "spotify", "netflix", "suscripcion", "subscription", "saas"]),
+    ("Comunicaciones", "Telefonía", ["movistar", "vodafone", "orange", "yoigo", "telefonica", "movil", "tarifa"]),
+    ("Servicios", "Profesional",    ["consultoria", "asesoria", "gestor", "abogado", "freelance", "servicio"]),
+    ("Combustible", "Gasolina",     ["gasolina", "diesel", "combustible", "repsol", "bp", "cepsa", "shell"]),
+    # Add your own rules here — you know your suppliers better than anyone
+]
+
+def categorize_by_rules(desc: str, contact_name: str, item_names: list):
+    """
+    Try to categorize a purchase invoice using keyword rules.
+    Returns dict with category/subcategory/confidence='high' or None if no match.
+
+    TODO: Add your own business-specific rules to CATEGORY_RULES above.
+    Think about: your regular suppliers, Spanish/English variants,
+    abbreviations your accountant uses, sector-specific terms.
+    """
+    text = " ".join(filter(None, [desc, contact_name] + item_names)).lower()
+    for category, subcategory, keywords in CATEGORY_RULES:
+        if any(kw in text for kw in keywords):
+            matched_kw = next(kw for kw in keywords if kw in text)
+            return {
+                "category": category,
+                "subcategory": subcategory,
+                "confidence": "high",
+                "method": "rules",
+                "reasoning": f"Keyword match: '{matched_kw}'"
+            }
+    return None
+
+
+def get_unanalyzed_purchases(limit: int = 10) -> list:
+    """Return up to `limit` purchase invoices not yet in purchase_analysis."""
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT pi.id, pi.contact_name, pi.desc, pi.date, pi.amount,
+                   GROUP_CONCAT(pit.name, '||') as item_names
+            FROM purchase_invoices pi
+            LEFT JOIN purchase_items pit ON pit.purchase_id = pi.id
+            LEFT JOIN purchase_analysis pa ON pa.purchase_id = pi.id
+            WHERE pa.id IS NULL
+            GROUP BY pi.id
+            ORDER BY pi.date DESC
+            LIMIT ?
+        ''', (limit,))
+        rows = cursor.fetchall()
+        result = []
+        for row in rows:
+            d = dict(row)
+            d['item_names'] = [n for n in (d['item_names'] or '').split('||') if n]
+            result.append(d)
+        return result
+    finally:
+        conn.close()
+
+
+def save_purchase_analysis(purchase_id: str, category: str, subcategory: str,
+                           confidence: str, method: str, reasoning: str):
+    """Persist the analysis result for a purchase invoice."""
+    conn = sqlite3.connect(DB_NAME)
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO purchase_analysis
+                (purchase_id, category, subcategory, confidence, method, reasoning)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (purchase_id, category, subcategory, confidence, method, reasoning))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_analysis_stats() -> dict:
+    """Summary of analysis progress."""
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) as total FROM purchase_invoices")
+        total = cursor.fetchone()["total"]
+        cursor.execute("SELECT COUNT(*) as analyzed FROM purchase_analysis")
+        analyzed = cursor.fetchone()["analyzed"]
+        cursor.execute('''
+            SELECT category, COUNT(*) as count, SUM(pi.amount) as total_amount
+            FROM purchase_analysis pa
+            JOIN purchase_invoices pi ON pi.id = pa.purchase_id
+            GROUP BY category ORDER BY total_amount DESC
+        ''')
+        by_category = [dict(r) for r in cursor.fetchall()]
+        return {
+            "total": total,
+            "analyzed": analyzed,
+            "pending": total - analyzed,
+            "pct": round(analyzed / total * 100, 1) if total > 0 else 0,
+            "by_category": by_category
+        }
+    finally:
+        conn.close()
+
+
+# ─── Inventory Matcher ───────────────────────────────────────────────
+
+def find_inventory_in_purchases() -> list:
+    """
+    Scan purchase_items for items that match products in the inventory.
+    Matching strategy:
+      1. Exact: purchase_item.product_id == products.id (Holded-linked)
+      2. Fuzzy: product name similarity >= 80% (handles naming variants)
+    Returns list of candidate matches not yet in inventory_matches table.
+    """
+    from difflib import SequenceMatcher
+
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.cursor()
+
+        # Get all products
+        cursor.execute("SELECT id, name FROM products")
+        products = [dict(r) for r in cursor.fetchall()]
+
+        # Get all purchase items not already matched
+        cursor.execute('''
+            SELECT pit.id as item_id, pit.purchase_id, pit.product_id,
+                   pit.name as item_name, pit.price, pit.subtotal, pit.units,
+                   pi.date, pi.contact_name
+            FROM purchase_items pit
+            JOIN purchase_invoices pi ON pi.id = pit.purchase_id
+            LEFT JOIN inventory_matches im ON im.purchase_id = pit.purchase_id
+                AND im.product_id = pit.product_id
+            WHERE im.id IS NULL AND pit.price > 0
+        ''')
+        purchase_items = [dict(r) for r in cursor.fetchall()]
+
+        matches = []
+        for item in purchase_items:
+            matched_product = None
+            match_method = None
+
+            # Strategy 1: exact product_id link
+            if item['product_id']:
+                exact = next((p for p in products if p['id'] == item['product_id']), None)
+                if exact:
+                    matched_product = exact
+                    match_method = 'exact_id'
+
+            # Strategy 2: fuzzy name match
+            if not matched_product and item['item_name']:
+                best_ratio = 0
+                best_product = None
+                for product in products:
+                    ratio = SequenceMatcher(
+                        None,
+                        item['item_name'].lower(),
+                        product['name'].lower()
+                    ).ratio()
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_product = product
+                if best_ratio >= 0.80:
+                    matched_product = best_product
+                    match_method = f'fuzzy_{int(best_ratio*100)}pct'
+
+            if matched_product:
+                # Use price per unit if units > 1, else subtotal
+                units = item['units'] or 1
+                price = item['price'] if item['price'] else (item['subtotal'] / units if units else item['subtotal'])
+                date_str = ''
+                if item['date']:
+                    from datetime import datetime
+                    date_str = datetime.fromtimestamp(item['date']).strftime('%Y-%m-%d')
+                matches.append({
+                    'purchase_id': item['purchase_id'],
+                    'purchase_item_id': item['item_id'],
+                    'product_id': matched_product['id'],
+                    'product_name': matched_product['name'],
+                    'item_name_in_invoice': item['item_name'],
+                    'matched_price': round(price, 2),
+                    'matched_date': date_str,
+                    'match_method': match_method,
+                    'supplier': item['contact_name'],
+                })
+        return matches
+    finally:
+        conn.close()
+
+
+def save_inventory_match(purchase_id, purchase_item_id, product_id,
+                         product_name, matched_price, matched_date, match_method):
+    """Persist a pending inventory match for user review."""
+    conn = sqlite3.connect(DB_NAME)
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR IGNORE INTO inventory_matches
+                (purchase_id, purchase_item_id, product_id, product_name,
+                 matched_price, matched_date, match_method, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+        ''', (purchase_id, purchase_item_id, product_id, product_name,
+              matched_price, matched_date, match_method))
+        conn.commit()
+        return cursor.lastrowid
+    finally:
+        conn.close()
+
+
+def get_pending_matches() -> list:
+    """Return all inventory matches awaiting user confirmation."""
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT im.*, pi.contact_name as supplier,
+                   datetime(pi.date, 'unixepoch') as invoice_date_full
+            FROM inventory_matches im
+            JOIN purchase_invoices pi ON pi.id = im.purchase_id
+            WHERE im.status = 'pending'
+            ORDER BY im.created_at DESC
+        ''')
+        return [dict(r) for r in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def confirm_inventory_match(match_id: int, confirmed: bool):
+    """
+    Confirm or reject a pending inventory match.
+    If confirmed: add to amortizations (if not already there).
+    If rejected: mark as rejected.
+    Returns dict with result.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM inventory_matches WHERE id=?", (match_id,))
+        match = cursor.fetchone()
+        if not match:
+            return {"ok": False, "error": "Match not found"}
+
+        if not confirmed:
+            cursor.execute("UPDATE inventory_matches SET status='rejected' WHERE id=?", (match_id,))
+            conn.commit()
+            return {"ok": True, "action": "rejected"}
+
+        # Mark as confirmed
+        cursor.execute("UPDATE inventory_matches SET status='confirmed' WHERE id=?", (match_id,))
+
+        # Add to amortizations (skip if product already tracked)
+        cursor.execute('''
+            INSERT OR IGNORE INTO amortizations
+                (product_id, product_name, purchase_price, purchase_date, notes)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (match['product_id'], match['product_name'],
+              match['matched_price'], match['matched_date'],
+              f"Auto-detected from purchase {match['purchase_id']} via {match['match_method']}"))
+        added = cursor.rowcount > 0
+        conn.commit()
+        return {"ok": True, "action": "confirmed", "added_to_amortizations": added}
+    finally:
+        conn.close()
+
 
 # ============= Amortization Functions =============
 
