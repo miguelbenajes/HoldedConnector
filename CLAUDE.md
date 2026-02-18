@@ -21,7 +21,7 @@ FastAPI + Vanilla JS financial dashboard that syncs data from Holded API and inc
 - **Dark theme** — Glassmorphic UI with Tailwind-like colors
 
 ### AI Agent
-- **Tool use (function calling)** — 15 tools total
+- **Tool use (function calling)** — 19 tools total
 - **Streaming responses** — SSE (`text/event-stream`)
 - **Write confirmation** — User approval for operations
 - **Safe Mode** — Dry-run write operations (env: `HOLDED_SAFE_MODE=true`)
@@ -44,6 +44,9 @@ FastAPI + Vanilla JS financial dashboard that syncs data from Holded API and inc
 - `ai_history` — Conversation messages (columns: id, role, content, timestamp, conversation_id, tool_calls)
 - `ai_favorites` — Saved queries (columns: id, query, label, created_at)
 - `settings` — Configuration (key TEXT PRIMARY KEY, value TEXT)
+
+### Custom Tables
+- `amortizations` — Rental ROI tracking (product_id UNIQUE, purchase_price, purchase_date, notes). Revenue calculated via JOIN to invoice_items — never stored directly.
 
 ---
 
@@ -95,6 +98,13 @@ FastAPI + Vanilla JS financial dashboard that syncs data from Holded API and inc
 - `GET /api/entities/<type>/<id>/pdf` — PDF proxy
 - `POST /api/sync` — Manual sync from Holded
 
+### Amortizations Endpoints
+- `GET /api/amortizations` — List all with calculated revenue/profit/ROI
+- `GET /api/amortizations/summary` — Global totals (invested, recovered, profit, ROI%)
+- `POST /api/amortizations` — Add product to tracking
+- `PUT /api/amortizations/{id}` — Update price/date/notes
+- `DELETE /api/amortizations/{id}` — Remove from tracking
+
 ---
 
 ## Frontend Features
@@ -116,6 +126,11 @@ FastAPI + Vanilla JS financial dashboard that syncs data from Holded API and inc
   - **History:** Past conversations, click to load
   - **Favorites:** Saved queries with ⭐, click to re-execute
 - **Data:** Fetched on drawer open, cached in JS
+
+### Frontend View Routing
+- `showView(name)` in app.js maps special views via `specialViews` dict — add new views there
+- Entity views (contacts, invoices, etc.) auto-route to `view-entity` + `loadEntityData()`
+- Custom views (overview, setup, amortizations) need explicit entry in `specialViews`
 
 ### Welcome Screen (New Chat)
 - Suggested queries: "Revenue this month", "Top clients", "Income vs Expenses chart", "Overdue invoices"
@@ -167,6 +182,11 @@ const reader = res.body.getReader();
 4. `POST /api/ai/confirm` with state_id + confirmed boolean
 5. If confirmed, tool executes and agent continues
 6. If cancelled, operation aborts
+
+### DB Schema Migrations
+- `init_db()` is called via `@app.on_event("startup")` in api.py — always runs on server start
+- All new tables must use `CREATE TABLE IF NOT EXISTS` in `init_db()` in connector.py
+- **Never** add a table and skip `init_db()` — it won't exist until next sync
 
 ### SQL Injection Prevention
 ```python
@@ -352,6 +372,7 @@ WantedBy=multi-user.target
 | SAFE_MODE not working | Verify `HOLDED_SAFE_MODE=true` in .env |
 | PWA not installable | Needs HTTPS in production (localhost works without) |
 | Upload "Not Found" | Restart server after code update |
+| New endpoint returns "Internal Server Error" | Table missing — check `init_db()` has `CREATE TABLE IF NOT EXISTS` for it, then restart server |
 
 ---
 
@@ -365,4 +386,4 @@ WantedBy=multi-user.target
 ---
 
 **Last Updated:** 2026-02-18
-**Latest Commit:** PWA + File Upload + Deployment Ready
+**Latest Commit:** Amortizaciones — ROI tracking + chart + rental history (`b54ebf6`)
