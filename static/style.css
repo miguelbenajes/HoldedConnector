@@ -1061,3 +1061,45 @@ td {
     body { padding-top: env(safe-area-inset-top); }
     .sidebar { padding-top: calc(1rem + env(safe-area-inset-top)); }
 }
+
+/* ─── Amortizations ─────────────────────────────────────────────── */
+
+.amort-badges {
+    display: flex;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-top: 1rem;
+}
+
+.amort-badge {
+    padding: 0.4rem 0.9rem;
+    border-radius: 999px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+
+.amort-label {
+    display: block;
+    margin-bottom: 0.5rem;
+    color: var(--text-white);
+    font-weight: 600;
+    font-size: 0.9rem;
+}
+
+/* Stats grid: 4-column when we have 4 cards (amortizations) */
+#amortSummaryCards {
+    grid-template-columns: repeat(4, 1fr);
+}
+
+@media (max-width: 1100px) {
+    #amortSummaryCards {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+@media (max-width: 600px) {
+    #amortSummaryCards {
+        grid-template-columns: 1fr;
+    }
+}

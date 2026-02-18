@@ -261,8 +261,8 @@ function showView(viewName) {
     });
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
 
-    const targetViewId = (viewName === 'overview') ? 'view-overview' :
-        (viewName === 'setup') ? 'view-setup' : 'view-entity';
+    const specialViews = { 'overview': 'view-overview', 'setup': 'view-setup', 'amortizations': 'view-amortizations' };
+    const targetViewId = specialViews[viewName] || 'view-entity';
 
     const targetView = document.getElementById(targetViewId);
     if (targetView) {
@@ -273,7 +273,9 @@ function showView(viewName) {
         const navItem = document.querySelector(`.nav-item[data-view="${viewName}"]`);
         if (navItem) navItem.classList.add('active');
 
-        if (viewName !== 'overview' && viewName !== 'setup') {
+        if (viewName === 'amortizations') {
+            loadAmortizations();
+        } else if (!specialViews[viewName]) {
             loadEntityData(viewName);
         }
     } else {
@@ -1530,3 +1532,188 @@ async function saveDirectoryConfig() {
         errorEl.textContent = `Connection error: ${e.message}`;
     }
 }
+
+// ============================================================
+//  AMORTIZATIONS
+// ============================================================
+
+let _amortProducts = [];   // cached product list for select dropdown
+
+async function loadAmortizations() {
+    try {
+        const [dataRes, summaryRes] = await Promise.all([
+            fetch('/api/amortizations'),
+            fetch('/api/amortizations/summary')
+        ]);
+        const rows = await dataRes.json();
+        const summary = await summaryRes.json();
+
+        // Update summary cards
+        document.getElementById('amortTotalInvested').textContent = formatter.format(summary.total_invested || 0);
+        document.getElementById('amortTotalRevenue').textContent = formatter.format(summary.total_revenue || 0);
+        const profitEl = document.getElementById('amortTotalProfit');
+        profitEl.textContent = formatter.format(summary.total_profit || 0);
+        profitEl.style.color = (summary.total_profit >= 0) ? 'var(--primary)' : 'var(--danger)';
+
+        const roiEl = document.getElementById('amortGlobalRoi');
+        roiEl.textContent = `${summary.global_roi_pct || 0}%`;
+        roiEl.style.color = (summary.global_roi_pct >= 0) ? 'var(--primary)' : 'var(--danger)';
+
+        // Badges
+        const badgesEl = document.getElementById('amortBadges');
+        badgesEl.innerHTML = `
+            <span class="amort-badge badge-paid">✅ Amortizados: ${summary.amortized_count || 0}</span>
+            <span class="amort-badge badge-pending">⏳ En curso: ${summary.in_progress_count || 0}</span>
+            <span class="amort-badge badge-draft">📦 Total productos: ${summary.total_products || 0}</span>
+        `;
+
+        // Render table
+        const tbody = document.getElementById('amortBody');
+        if (!rows.length) {
+            tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-gray);padding:2rem">Sin datos. Añade un producto para empezar a hacer seguimiento.</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = rows.map(r => {
+            const isAmort = r.status === 'AMORTIZADO';
+            const profitColor = r.profit >= 0 ? 'var(--primary)' : 'var(--danger)';
+            const roiColor = r.roi_pct >= 0 ? 'var(--primary)' : 'var(--danger)';
+            const statusBadge = isAmort
+                ? '<span class="badge badge-paid">✅ AMORTIZADO</span>'
+                : '<span class="badge badge-pending">⏳ EN CURSO</span>';
+
+            return `<tr>
+                <td><strong>${escapeHtml(r.product_name)}</strong></td>
+                <td>${formatter.format(r.purchase_price)}</td>
+                <td>${escapeHtml(r.purchase_date)}</td>
+                <td>${formatter.format(r.total_revenue)}</td>
+                <td style="color:${profitColor};font-weight:600">${formatter.format(r.profit)}</td>
+                <td style="color:${roiColor};font-weight:600">${r.roi_pct}%</td>
+                <td>${statusBadge}</td>
+                <td style="color:var(--text-gray);font-size:0.85rem">${escapeHtml(r.notes || '—')}</td>
+                <td>
+                    <button class="action-btn btn-secondary" style="padding:0.3rem 0.6rem;font-size:0.8rem"
+                        onclick="openAmortizationModal(${r.id}, '${escapeHtml(r.product_name)}', ${r.purchase_price}, '${escapeHtml(r.purchase_date)}', '${escapeHtml(r.notes || '')}')">
+                        Editar
+                    </button>
+                    <button class="action-btn" style="padding:0.3rem 0.6rem;font-size:0.8rem;background:var(--danger);margin-left:4px"
+                        onclick="deleteAmortization(${r.id}, '${escapeHtml(r.product_name)}')">
+                        Eliminar
+                    </button>
+                </td>
+            </tr>`;
+        }).join('');
+
+    } catch (e) {
+        console.error('Error loading amortizations:', e);
+        document.getElementById('amortBody').innerHTML =
+            `<tr><td colspan="9" style="text-align:center;color:var(--danger);padding:2rem">Error cargando datos: ${e.message}</td></tr>`;
+    }
+}
+
+async function openAmortizationModal(id = null, name = '', price = '', date = '', notes = '') {
+    // Load products into select if not cached
+    if (!_amortProducts.length) {
+        try {
+            const res = await fetch('/api/entities/products');
+            _amortProducts = await res.json();
+        } catch (e) {
+            _amortProducts = [];
+        }
+    }
+
+    const select = document.getElementById('amortProductSelect');
+    select.innerHTML = _amortProducts.map(p =>
+        `<option value="${escapeHtml(p.id)}" data-name="${escapeHtml(p.name)}">${escapeHtml(p.name)}</option>`
+    ).join('');
+
+    document.getElementById('amortEditId').value = id || '';
+    document.getElementById('amortPurchasePrice').value = price || '';
+    document.getElementById('amortPurchaseDate').value = date || '';
+    document.getElementById('amortNotes').value = notes || '';
+    document.getElementById('amortModalError').textContent = '';
+
+    // In edit mode, select the right product (disabled — can't change product in edit)
+    if (id) {
+        document.getElementById('amortModalTitle').textContent = `Editar: ${name}`;
+        select.disabled = true;
+        // select the matching option
+        const opt = [...select.options].find(o => o.text === name);
+        if (opt) opt.selected = true;
+    } else {
+        document.getElementById('amortModalTitle').textContent = 'Añadir producto a seguimiento';
+        select.disabled = false;
+    }
+
+    document.getElementById('amortModal').style.display = 'flex';
+}
+
+function closeAmortizationModal() {
+    document.getElementById('amortModal').style.display = 'none';
+    document.getElementById('amortProductSelect').disabled = false;
+}
+
+async function saveAmortization() {
+    const id = document.getElementById('amortEditId').value;
+    const select = document.getElementById('amortProductSelect');
+    const productId = select.value;
+    const productName = select.options[select.selectedIndex]?.dataset?.name || select.options[select.selectedIndex]?.text || '';
+    const price = parseFloat(document.getElementById('amortPurchasePrice').value);
+    const date = document.getElementById('amortPurchaseDate').value;
+    const notes = document.getElementById('amortNotes').value.trim();
+    const errorEl = document.getElementById('amortModalError');
+
+    errorEl.textContent = '';
+
+    if (!productId) { errorEl.textContent = 'Selecciona un producto.'; return; }
+    if (isNaN(price) || price <= 0) { errorEl.textContent = 'Precio de compra inválido.'; return; }
+    if (!date) { errorEl.textContent = 'Fecha de compra requerida.'; return; }
+
+    try {
+        let res, data;
+        if (id) {
+            // Edit mode
+            res = await fetch(`/api/amortizations/${id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ purchase_price: price, purchase_date: date, notes })
+            });
+        } else {
+            // Create mode
+            res = await fetch('/api/amortizations', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ product_id: productId, product_name: productName, purchase_price: price, purchase_date: date, notes })
+            });
+        }
+        data = await res.json();
+        if (!res.ok) {
+            errorEl.textContent = data.detail || 'Error al guardar';
+            return;
+        }
+        closeAmortizationModal();
+        loadAmortizations();
+    } catch (e) {
+        errorEl.textContent = `Error de conexión: ${e.message}`;
+    }
+}
+
+async function deleteAmortization(id, name) {
+    if (!confirm(`¿Eliminar "${name}" del seguimiento de amortizaciones?`)) return;
+    try {
+        const res = await fetch(`/api/amortizations/${id}`, { method: 'DELETE' });
+        if (res.ok) {
+            loadAmortizations();
+        } else {
+            const data = await res.json();
+            alert(data.detail || 'Error al eliminar');
+        }
+    } catch (e) {
+        alert(`Error: ${e.message}`);
+    }
+}
+
+// Close amortization modal on click outside
+window.addEventListener('click', (e) => {
+    if (e.target.id === 'amortModal') closeAmortizationModal();
+});

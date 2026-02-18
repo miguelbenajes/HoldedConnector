@@ -257,6 +257,16 @@ TOOL_DEFINITIONS = [
         }
     },
     {
+        "name": "get_amortization_status",
+        "description": "Get amortization (ROI) tracking for rental products. Returns each product's purchase cost, total revenue earned from invoices, profit, and ROI%. Also includes a global summary. Use when the user asks about amortization, ROI, investment recovery, or how much a product has earned.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "product_name": {"type": "string", "description": "Optional: filter by product name (partial match). Leave empty for all products."}
+            }
+        }
+    },
+    {
         "name": "analyze_file",
         "description": "Analyze an uploaded CSV or Excel file. Returns data summary, columns, data types, and statistical analysis.",
         "input_schema": {
@@ -705,6 +715,25 @@ def exec_render_chart(params):
         "datasets": params["datasets"]
     }
 
+def exec_get_amortization_status(params):
+    """Return amortization data for all tracked rental products, with optional name filter."""
+    rows = connector.get_amortizations()
+    name_filter = (params.get("product_name") or "").strip().lower()
+    if name_filter:
+        rows = [r for r in rows if name_filter in r["product_name"].lower()]
+
+    summary = connector.get_amortization_summary()
+
+    if not rows:
+        return {"message": "No amortization records found.", "summary": summary}
+
+    return {
+        "products": rows,
+        "summary": summary,
+        "count": len(rows)
+    }
+
+
 def exec_analyze_file(params):
     """Analyze an uploaded CSV or Excel file."""
     import pandas as pd
@@ -853,6 +882,7 @@ TOOL_EXECUTORS = {
     "analyze_file": exec_analyze_file,
     "list_files": exec_list_files,
     "upload_file": exec_upload_file,
+    "get_amortization_status": exec_get_amortization_status,
 }
 
 # ─── System Prompt Builder ───────────────────────────────────────────

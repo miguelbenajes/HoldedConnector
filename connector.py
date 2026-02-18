@@ -235,6 +235,20 @@ def init_db():
         )
     ''')
 
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS amortizations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_id TEXT NOT NULL,
+            product_name TEXT NOT NULL,
+            purchase_price REAL NOT NULL,
+            purchase_date TEXT NOT NULL,
+            notes TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(product_id)
+        )
+    ''')
+
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_invoices_contact ON invoices(contact_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_invoices_date ON invoices(date)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_purchases_contact ON purchase_invoices(contact_id)')
@@ -615,6 +629,108 @@ def list_uploaded_files(limit=50):
         logger.error(f"Error listing uploaded files: {str(e)}")
 
     return sorted(files, key=lambda x: x["uploaded_at"], reverse=True)
+
+# ============= Amortization Functions =============
+
+def get_amortizations():
+    """
+    Return all amortizations with real-time revenue calculation from invoice_items.
+    Revenue = SUM of subtotals in invoices where product_id matches.
+    """
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT
+                a.id,
+                a.product_id,
+                a.product_name,
+                a.purchase_price,
+                a.purchase_date,
+                a.notes,
+                a.created_at,
+                COALESCE(SUM(ii.subtotal), 0.0) AS total_revenue
+            FROM amortizations a
+            LEFT JOIN invoice_items ii ON ii.product_id = a.product_id
+            GROUP BY a.id
+            ORDER BY a.purchase_date DESC
+        ''')
+        rows = cursor.fetchall()
+        result = []
+        for row in rows:
+            d = dict(row)
+            d['profit'] = d['total_revenue'] - d['purchase_price']
+            d['roi_pct'] = round((d['profit'] / d['purchase_price'] * 100), 2) if d['purchase_price'] > 0 else 0
+            d['status'] = 'AMORTIZADO' if d['profit'] >= 0 else 'EN CURSO'
+            result.append(d)
+        return result
+    finally:
+        conn.close()
+
+def add_amortization(product_id, product_name, purchase_price, purchase_date, notes=""):
+    """Add a product to amortization tracking. Returns new id or None if duplicate."""
+    conn = sqlite3.connect(DB_NAME)
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO amortizations (product_id, product_name, purchase_price, purchase_date, notes)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (product_id, product_name, purchase_price, purchase_date, notes))
+        conn.commit()
+        return cursor.lastrowid
+    except sqlite3.IntegrityError:
+        return None  # product already tracked
+    finally:
+        conn.close()
+
+def update_amortization(amort_id, purchase_price=None, purchase_date=None, notes=None):
+    """Update purchase_price, purchase_date or notes for an amortization entry."""
+    conn = sqlite3.connect(DB_NAME)
+    try:
+        cursor = conn.cursor()
+        if purchase_price is not None:
+            cursor.execute("UPDATE amortizations SET purchase_price=?, updated_at=datetime('now') WHERE id=?",
+                           (purchase_price, amort_id))
+        if purchase_date is not None:
+            cursor.execute("UPDATE amortizations SET purchase_date=?, updated_at=datetime('now') WHERE id=?",
+                           (purchase_date, amort_id))
+        if notes is not None:
+            cursor.execute("UPDATE amortizations SET notes=?, updated_at=datetime('now') WHERE id=?",
+                           (notes, amort_id))
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+def delete_amortization(amort_id):
+    """Remove a product from amortization tracking."""
+    conn = sqlite3.connect(DB_NAME)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM amortizations WHERE id=?", (amort_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+def get_amortization_summary():
+    """Global summary: total invested, total recovered, global profit, counts."""
+    rows = get_amortizations()
+    total_invested = sum(r['purchase_price'] for r in rows)
+    total_revenue = sum(r['total_revenue'] for r in rows)
+    total_profit = sum(r['profit'] for r in rows)
+    amortized_count = sum(1 for r in rows if r['status'] == 'AMORTIZADO')
+    return {
+        "total_invested": round(total_invested, 2),
+        "total_revenue": round(total_revenue, 2),
+        "total_profit": round(total_profit, 2),
+        "global_roi_pct": round((total_profit / total_invested * 100), 2) if total_invested > 0 else 0,
+        "total_products": len(rows),
+        "amortized_count": amortized_count,
+        "in_progress_count": len(rows) - amortized_count
+    }
+
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")

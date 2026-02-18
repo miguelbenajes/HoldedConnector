@@ -32,6 +32,7 @@
                 <div class="nav-item" data-view="invoices">Invoices</div>
                 <div class="nav-item" data-view="purchases">Expenses</div>
                 <div class="nav-item" data-view="estimates">Estimates</div>
+                <div class="nav-item" data-view="amortizations">📊 Amortizaciones</div>
             </nav>
             <div class="safe-mode-badge" id="safeModeBadge">SAFE MODE ACTIVE</div>
         </aside>
@@ -141,8 +142,98 @@
                 </div>
             </div>
 
+            <!-- AMORTIZATIONS VIEW -->
+            <div id="view-amortizations" class="view-container">
+                <header>
+                    <h1>📊 Amortizaciones</h1>
+                    <div class="filter-controls">
+                        <button class="sync-btn" onclick="openAmortizationModal()">+ Añadir producto</button>
+                        <button class="action-btn btn-secondary" onclick="loadAmortizations()">Actualizar</button>
+                    </div>
+                </header>
+
+                <!-- Summary cards -->
+                <section class="stats-grid" id="amortSummaryCards">
+                    <div class="stat-card expenses">
+                        <h3>Total Invertido</h3>
+                        <p id="amortTotalInvested">0 €</p>
+                    </div>
+                    <div class="stat-card income">
+                        <h3>Total Recuperado</h3>
+                        <p id="amortTotalRevenue">0 €</p>
+                    </div>
+                    <div class="stat-card balance">
+                        <h3>Profit Global</h3>
+                        <p id="amortTotalProfit">0 €</p>
+                    </div>
+                    <div class="stat-card" style="border-top: 3px solid var(--accent)">
+                        <h3>ROI Global</h3>
+                        <p id="amortGlobalRoi">0%</p>
+                    </div>
+                </section>
+
+                <!-- Badges row -->
+                <div class="amort-badges" id="amortBadges"></div>
+
+                <!-- Main table -->
+                <div class="card table-container" style="margin-top:1.5rem">
+                    <table id="amortTable">
+                        <thead>
+                            <tr>
+                                <th>Producto</th>
+                                <th>Precio Compra</th>
+                                <th>Fecha Compra</th>
+                                <th>Revenue Total</th>
+                                <th>Profit</th>
+                                <th>ROI %</th>
+                                <th>Estado</th>
+                                <th>Notas</th>
+                                <th>Acciones</th>
+                            </tr>
+                        </thead>
+                        <tbody id="amortBody">
+                            <tr><td colspan="9" style="text-align:center;color:var(--text-gray);padding:2rem">Cargando...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
         </main>
     </div>
+
+    <!-- Amortization Add/Edit Modal -->
+    <div id="amortModal" class="modal-overlay" style="display:none">
+        <div class="modal-content" style="max-width:520px">
+            <header>
+                <h2 id="amortModalTitle">Añadir producto a seguimiento</h2>
+                <button class="close-btn" onclick="closeAmortizationModal()">&times;</button>
+            </header>
+            <div style="padding:1.5rem">
+                <input type="hidden" id="amortEditId">
+
+                <label class="amort-label">Producto</label>
+                <select id="amortProductSelect" style="width:100%;padding:0.8rem;background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:8px;color:var(--text-white);margin-bottom:1rem">
+                    <option value="">Cargando productos...</option>
+                </select>
+
+                <label class="amort-label">Precio de compra (€)</label>
+                <input type="number" id="amortPurchasePrice" step="0.01" min="0" placeholder="Ej: 2500.00"
+                    style="width:100%;padding:0.8rem;background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:8px;color:var(--text-white);margin-bottom:1rem">
+
+                <label class="amort-label">Fecha de compra</label>
+                <input type="date" id="amortPurchaseDate"
+                    style="width:100%;padding:0.8rem;background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:8px;color:var(--text-white);margin-bottom:1rem">
+
+                <label class="amort-label">Notas (opcional)</label>
+                <textarea id="amortNotes" rows="2" placeholder="Ej: Cámara Sony A7IV comprada en Amazon"
+                    style="width:100%;padding:0.8rem;background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:8px;color:var(--text-white);margin-bottom:1.5rem;resize:vertical"></textarea>
+
+                <button class="sync-btn" onclick="saveAmortization()" style="width:100%;margin-bottom:0.5rem">Guardar</button>
+                <p class="error-msg" id="amortModalError" style="margin-top:0.5rem"></p>
+            </div>
+        </div>
+    </div>
+
     <div id="detailsModal" class="modal-overlay">
         <div class="modal-content">
             <header>

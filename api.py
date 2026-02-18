@@ -581,6 +581,60 @@ async def list_files(directory: str = "uploads", limit: int = 20):
     except Exception as e:
         return {"error": f"Error listing files: {str(e)}"}
 
+# ────────────── Amortizations Endpoints ──────────────
+
+@app.get("/api/amortizations")
+def get_amortizations():
+    """Return all amortization entries with calculated revenue/profit/ROI."""
+    return connector.get_amortizations()
+
+@app.get("/api/amortizations/summary")
+def get_amortizations_summary():
+    """Global summary: total invested, recovered, global ROI."""
+    return connector.get_amortization_summary()
+
+class AmortizationCreate(BaseModel):
+    product_id: str
+    product_name: str
+    purchase_price: float
+    purchase_date: str       # YYYY-MM-DD
+    notes: Optional[str] = ""
+
+@app.post("/api/amortizations")
+def create_amortization(body: AmortizationCreate):
+    new_id = connector.add_amortization(
+        body.product_id, body.product_name,
+        body.purchase_price, body.purchase_date, body.notes or ""
+    )
+    if new_id is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=409, detail="Product already tracked in amortizations")
+    return {"status": "success", "id": new_id}
+
+class AmortizationUpdate(BaseModel):
+    purchase_price: Optional[float] = None
+    purchase_date: Optional[str] = None
+    notes: Optional[str] = None
+
+@app.put("/api/amortizations/{amort_id}")
+def update_amortization(amort_id: int, body: AmortizationUpdate):
+    ok = connector.update_amortization(
+        amort_id, body.purchase_price, body.purchase_date, body.notes
+    )
+    if not ok:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Amortization not found")
+    return {"status": "success"}
+
+@app.delete("/api/amortizations/{amort_id}")
+def delete_amortization(amort_id: int):
+    ok = connector.delete_amortization(amort_id)
+    if not ok:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Amortization not found")
+    return {"status": "success"}
+
+
 # Serve static files (mount at the end to avoid intercepting /api)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
