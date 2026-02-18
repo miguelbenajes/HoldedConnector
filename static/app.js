@@ -1954,7 +1954,7 @@ function _renderAnalysisStatus(status) {
 function _renderMatches(matches) {
     const tbody = document.getElementById('matchesBody');
     if (!matches.length) {
-        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-gray);padding:2rem">No hay matches pendientes. Ejecuta el análisis para escanear tus facturas de compra.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-gray);padding:2rem">No hay matches pendientes. Ejecuta el análisis para escanear tus facturas de compra.</td></tr>';
         return;
     }
 
@@ -1964,7 +1964,9 @@ function _renderMatches(matches) {
         return m || '—';
     };
 
-    tbody.innerHTML = matches.map(m => `
+    tbody.innerHTML = matches.map(m => {
+        const safeName = (m.product_name || '').replace(/'/g, "\\'");
+        return `
         <tr id="match-row-${m.id}">
             <td><strong>${escapeHtml(m.product_name)}</strong></td>
             <td style="color:var(--text-gray);font-size:0.85rem">${escapeHtml(m.item_name_in_invoice || m.product_name)}</td>
@@ -1972,15 +1974,95 @@ function _renderMatches(matches) {
             <td style="font-weight:600;color:var(--primary)">${formatter.format(m.matched_price)}</td>
             <td>${escapeHtml(m.matched_date || '—')}</td>
             <td>${methodLabel(m.match_method)}</td>
+            <td>
+                <button class="action-btn btn-secondary" style="padding:0.3rem 0.6rem;font-size:0.8rem"
+                    onclick="openMatchDetail(${m.id}, '${escapeHtml(m.purchase_id)}', '${safeName}', ${m.matched_price}, '${escapeHtml(m.matched_date || '')}', '${escapeHtml(m.supplier || '')}')">
+                    🧾 Ver
+                </button>
+            </td>
             <td style="white-space:nowrap">
                 <button class="action-btn" style="padding:0.3rem 0.7rem;font-size:0.8rem;margin-right:4px"
                     onclick="confirmMatch(${m.id}, true)">✅ Confirmar</button>
                 <button class="action-btn" style="padding:0.3rem 0.7rem;font-size:0.8rem;background:var(--danger)"
                     onclick="confirmMatch(${m.id}, false)">✕ Rechazar</button>
             </td>
-        </tr>
-    `).join('');
+        </tr>`;
+    }).join('');
 }
+
+// ── Match Detail Modal ──────────────────────────────────────────────
+
+let _currentMatchId = null;
+
+async function openMatchDetail(matchId, purchaseId, productName, detectedPrice, date, supplier) {
+    _currentMatchId = matchId;
+    document.getElementById('matchDetailModal').style.display = 'flex';
+    document.getElementById('matchDetailTitle').textContent = `🧾 Factura: ${productName}`;
+    document.getElementById('matchDetailPrice').value = detectedPrice;
+    document.getElementById('matchDetailError').textContent = '';
+    document.getElementById('matchDetailItems').innerHTML =
+        '<tr><td colspan="4" style="text-align:center;color:var(--text-gray);padding:1rem">Cargando items...</td></tr>';
+
+    // Summary
+    document.getElementById('matchDetailSummary').innerHTML = `
+        <div style="display:flex;gap:2rem;flex-wrap:wrap">
+            <span>📦 <strong>${escapeHtml(productName)}</strong></span>
+            <span>🏢 ${escapeHtml(supplier || '—')}</span>
+            <span>📅 ${escapeHtml(date || '—')}</span>
+            <span style="color:var(--primary)">💰 Detectado: <strong>${formatter.format(detectedPrice)}</strong></span>
+        </div>`;
+
+    // Try to load PDF in a new tab first; simultaneously load line items
+    const pdfBtn = `<button class="action-btn btn-secondary" style="margin-top:0.5rem;font-size:0.82rem"
+        onclick="openPdfModal('purchases','${escapeHtml(purchaseId)}')">📄 Abrir PDF en visor</button>`;
+    document.getElementById('matchDetailSummary').innerHTML += `<div style="margin-top:0.5rem">${pdfBtn}</div>`;
+
+    // Load line items from Holded
+    try {
+        const res = await fetch(`/api/entities/purchases/${purchaseId}/items`);
+        const items = await res.json();
+        if (!items.length) {
+            document.getElementById('matchDetailItems').innerHTML =
+                '<tr><td colspan="4" style="text-align:center;color:var(--text-gray);padding:1rem">Sin items disponibles en esta factura.</td></tr>';
+            return;
+        }
+        document.getElementById('matchDetailItems').innerHTML = items.map(it => `
+            <tr>
+                <td>${escapeHtml(it.name || '—')}</td>
+                <td style="text-align:center">${it.units ?? '—'}</td>
+                <td>${formatter.format(it.price ?? 0)}</td>
+                <td style="font-weight:600;color:var(--primary)">${formatter.format(it.subtotal ?? 0)}</td>
+            </tr>
+        `).join('');
+    } catch (e) {
+        document.getElementById('matchDetailItems').innerHTML =
+            `<tr><td colspan="4" style="text-align:center;color:var(--danger);padding:1rem">Error cargando items: ${e.message}</td></tr>`;
+    }
+}
+
+function closeMatchDetail() {
+    document.getElementById('matchDetailModal').style.display = 'none';
+    _currentMatchId = null;
+}
+
+async function confirmMatchFromDetail(confirmed) {
+    if (!_currentMatchId) return;
+    const price = parseFloat(document.getElementById('matchDetailPrice').value);
+    const errorEl = document.getElementById('matchDetailError');
+    errorEl.textContent = '';
+
+    if (confirmed && (isNaN(price) || price <= 0)) {
+        errorEl.textContent = 'Introduce un importe válido.';
+        return;
+    }
+
+    // If price was changed, update it on the match first
+    const row = document.getElementById(`match-row-${_currentMatchId}`);
+    closeMatchDetail();
+    await confirmMatch(_currentMatchId, confirmed, confirmed ? price : null);
+}
+
+// confirmMatch (defined below) accepts optional customPrice from the detail modal
 
 function _renderCategoryBreakdown(categories) {
     const el = document.getElementById('categoryBreakdown');
@@ -2023,27 +2105,30 @@ async function runAnalysisJob() {
     }
 }
 
-async function confirmMatch(matchId, confirmed) {
+async function confirmMatch(matchId, confirmed, customPrice = null) {
     const row = document.getElementById(`match-row-${matchId}`);
     if (row) {
         row.style.opacity = '0.5';
         row.querySelectorAll('button').forEach(b => b.disabled = true);
     }
     try {
+        const body = { confirmed };
+        if (customPrice !== null && !isNaN(customPrice)) body.custom_price = customPrice;
+
         const res = await fetch(`/api/analysis/matches/${matchId}/confirm`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ confirmed })
+            body: JSON.stringify(body)
         });
         const data = await res.json();
         if (res.ok) {
             if (row) row.remove();
             if (confirmed && data.added_to_amortizations) {
-                // Show toast-like feedback
+                const usedPrice = customPrice ? ` con importe manual ${formatter.format(customPrice)}` : '';
                 const msg = document.getElementById('analysisStatusMsg');
                 const prev = msg.innerHTML;
-                msg.innerHTML = `<span style="color:var(--primary)">✅ Añadido a Amortizaciones correctamente</span>`;
-                setTimeout(() => { msg.innerHTML = prev; }, 3000);
+                msg.innerHTML = `<span style="color:var(--primary)">✅ Añadido a Amortizaciones${usedPrice}</span>`;
+                setTimeout(() => { msg.innerHTML = prev; }, 4000);
             }
             // Refresh status counts
             const r = await fetch('/api/analysis/status');

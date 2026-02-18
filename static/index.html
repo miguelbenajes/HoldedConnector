@@ -268,11 +268,12 @@
                                     <th>Precio compra</th>
                                     <th>Fecha</th>
                                     <th>Método</th>
+                                    <th>Factura</th>
                                     <th>Acción</th>
                                 </tr>
                             </thead>
                             <tbody id="matchesBody">
-                                <tr><td colspan="7" style="text-align:center;color:var(--text-gray);padding:2rem">Ejecuta el análisis para buscar coincidencias.</td></tr>
+                                <tr><td colspan="8" style="text-align:center;color:var(--text-gray);padding:2rem">Ejecuta el análisis para buscar coincidencias.</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -472,6 +473,54 @@
                 <p style="font-size:0.85rem;color:var(--text-muted)">Paths must be absolute. Leave blank to use defaults.</p>
                 <p class="error-msg" id="directoryConfigError"></p>
                 <p class="success-msg" id="directoryConfigSuccess" style="color:var(--accent-green);display:none"></p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Match Detail / Edit Modal -->
+    <div id="matchDetailModal" class="modal-overlay" style="display:none">
+        <div class="modal-content" style="max-width:620px">
+            <header>
+                <h2 id="matchDetailTitle">Detalle de la factura</h2>
+                <button class="close-btn" onclick="closeMatchDetail()">&times;</button>
+            </header>
+            <div style="padding:1rem 1.5rem 1.5rem">
+
+                <!-- Summary bar -->
+                <div id="matchDetailSummary" style="padding:0.75rem 1rem;background:var(--card-bg);border-radius:8px;border:1px solid var(--glass-border);margin-bottom:1rem;font-size:0.9rem"></div>
+
+                <!-- Line items from Holded -->
+                <h3 style="margin-bottom:0.75rem;font-size:0.95rem;color:var(--text-gray)">📋 Items de la factura</h3>
+                <div class="table-container" style="max-height:240px;overflow-y:auto;margin-bottom:1.5rem">
+                    <table>
+                        <thead>
+                            <tr><th>Item</th><th>Uds</th><th>Precio unit.</th><th>Subtotal</th></tr>
+                        </thead>
+                        <tbody id="matchDetailItems">
+                            <tr><td colspan="4" style="text-align:center;color:var(--text-gray);padding:1rem">Cargando...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Price override -->
+                <div style="background:var(--card-bg);border:1px solid var(--glass-border);border-radius:8px;padding:1rem;margin-bottom:1rem">
+                    <label class="amort-label">💰 Importe a usar en Amortizaciones</label>
+                    <p style="font-size:0.82rem;color:var(--text-gray);margin-bottom:0.75rem">
+                        El sistema detectó el precio mostrado abajo. Puedes cambiarlo si el item corresponde a otro importe.
+                    </p>
+                    <div style="display:flex;gap:0.75rem;align-items:center">
+                        <input type="number" id="matchDetailPrice" step="0.01" min="0"
+                            style="flex:1;padding:0.75rem;background:rgba(255,255,255,0.05);border:1px solid var(--glass-border);border-radius:8px;color:var(--text-white);font-size:1rem;font-weight:600">
+                        <span style="color:var(--text-gray)">€</span>
+                    </div>
+                </div>
+
+                <!-- Actions -->
+                <div style="display:flex;gap:0.75rem">
+                    <button class="sync-btn" style="flex:1" onclick="confirmMatchFromDetail(true)">✅ Confirmar con este importe</button>
+                    <button class="action-btn" style="flex:1;background:var(--danger)" onclick="confirmMatchFromDetail(false)">✕ Rechazar</button>
+                </div>
+                <p class="error-msg" id="matchDetailError" style="margin-top:0.5rem"></p>
             </div>
         </div>
     </div>

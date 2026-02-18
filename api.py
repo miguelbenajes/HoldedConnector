@@ -817,11 +817,13 @@ def get_inventory_matches():
 
 class MatchConfirm(BaseModel):
     confirmed: bool
+    custom_price: Optional[float] = None   # User-overridden price from detail modal
 
 @app.post("/api/analysis/matches/{match_id}/confirm")
 def confirm_match(match_id: int, body: MatchConfirm):
-    """Confirm or reject an inventory match. Confirmed ones go to amortizations."""
-    result = connector.confirm_inventory_match(match_id, body.confirmed)
+    """Confirm or reject an inventory match. Confirmed ones go to amortizations.
+    If custom_price is provided, it overrides the auto-detected matched_price."""
+    result = connector.confirm_inventory_match(match_id, body.confirmed, body.custom_price)
     if not result.get("ok"):
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail=result.get("error", "Unknown error"))

@@ -902,10 +902,11 @@ def get_pending_matches() -> list:
         conn.close()
 
 
-def confirm_inventory_match(match_id: int, confirmed: bool):
+def confirm_inventory_match(match_id: int, confirmed: bool, custom_price=None):
     """
     Confirm or reject a pending inventory match.
     If confirmed: add to amortizations (if not already there).
+    If custom_price is provided, it overrides the auto-detected matched_price.
     If rejected: mark as rejected.
     Returns dict with result.
     """
@@ -926,17 +927,22 @@ def confirm_inventory_match(match_id: int, confirmed: bool):
         # Mark as confirmed
         cursor.execute("UPDATE inventory_matches SET status='confirmed' WHERE id=?", (match_id,))
 
+        # Use custom price if provided, otherwise use auto-detected price
+        final_price = float(custom_price) if custom_price and float(custom_price) > 0 else match['matched_price']
+        price_note = " (importe manual)" if custom_price and float(custom_price) != match['matched_price'] else ""
+
         # Add to amortizations (skip if product already tracked)
         cursor.execute('''
             INSERT OR IGNORE INTO amortizations
                 (product_id, product_name, purchase_price, purchase_date, notes)
             VALUES (?, ?, ?, ?, ?)
         ''', (match['product_id'], match['product_name'],
-              match['matched_price'], match['matched_date'],
-              f"Auto-detected from purchase {match['purchase_id']} via {match['match_method']}"))
+              final_price, match['matched_date'],
+              f"Auto-detected from purchase {match['purchase_id']} via {match['match_method']}{price_note}"))
         added = cursor.rowcount > 0
         conn.commit()
-        return {"ok": True, "action": "confirmed", "added_to_amortizations": added}
+        return {"ok": True, "action": "confirmed", "added_to_amortizations": added,
+                "price_used": final_price}
     finally:
         conn.close()
 
