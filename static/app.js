@@ -335,13 +335,26 @@ function renderEntityTable(entity) {
 
     const keys = Object.keys(currentEntityData[0]);
     const showPdf = ['invoices', 'estimates', 'purchases'].includes(entity);
+    const showActions = ['invoices', 'estimates', 'purchases', 'contacts', 'products'].includes(entity);
+
+    // Holded direct-edit URLs per entity type
+    const holdedUrl = (entity, id) => {
+        const map = {
+            'invoices':  `https://app.holded.com/doc/invoice/${id}/edit`,
+            'purchases': `https://app.holded.com/doc/purchase/${id}/edit`,
+            'estimates': `https://app.holded.com/doc/estimate/${id}/edit`,
+            'contacts':  `https://app.holded.com/contacts/${id}`,
+            'products':  `https://app.holded.com/inventory/products/${id}`,
+        };
+        return map[entity] || null;
+    };
 
     // Initial Header Render or Update
     thead.innerHTML = `<tr>${keys.map(k => {
         const isCurrent = currentSort.column === k;
         const sortClass = isCurrent ? `sort-${currentSort.direction}` : '';
         return `<th class="${sortClass}" onclick="handleSort('${entity}', '${k}')">${k.replace(/_/g, ' ').toUpperCase()}</th>`;
-    }).join('')}${showPdf ? '<th>ACTIONS</th>' : ''}</tr>`;
+    }).join('')}${showActions ? '<th>ACTIONS</th>' : ''}</tr>`;
 
     // Filter Data
     let filteredData = currentEntityData.filter(row => {
@@ -409,9 +422,24 @@ function renderEntityTable(entity) {
             tr.appendChild(td);
         });
 
-        if (showPdf) {
+        if (showActions) {
             const td = document.createElement('td');
-            td.innerHTML = `<button class="action-btn" title="View PDF" onclick="event.stopPropagation(); openPdfModal('${escapeHtml(entity)}', '${escapeHtml(row.id)}')">👁️</button>`;
+            td.style.whiteSpace = 'nowrap';
+            const url = holdedUrl(entity, row.id);
+            const editBtn = url
+                ? `<a class="action-btn" href="${url}" target="_blank" rel="noopener"
+                      title="Editar en Holded" onclick="event.stopPropagation()"
+                      style="text-decoration:none;display:inline-flex;align-items:center;gap:3px">
+                      ✏️ Holded
+                   </a>`
+                : '';
+            const pdfBtn = showPdf
+                ? `<button class="action-btn btn-secondary" title="Ver PDF"
+                      onclick="event.stopPropagation(); openPdfModal('${escapeHtml(entity)}', '${escapeHtml(row.id)}')">
+                      👁️ PDF
+                   </button>`
+                : '';
+            td.innerHTML = `<div style="display:flex;gap:4px;align-items:center">${pdfBtn}${editBtn}</div>`;
             tr.appendChild(td);
         }
         tbody.appendChild(tr);
