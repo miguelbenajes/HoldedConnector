@@ -22,9 +22,12 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
+# CORS: allow all origins for PWA/mobile access.
+# In production, restrict to your domain.
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8000", "http://127.0.0.1:8000"],
+    allow_origins=["*"] if ALLOWED_ORIGINS == "*" else ALLOWED_ORIGINS.split(","),
     allow_methods=["*"],
     allow_headers=["*"],
 )

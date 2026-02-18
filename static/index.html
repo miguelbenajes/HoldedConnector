@@ -5,6 +5,15 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Holded Dashboard | Local Insights</title>
+
+    <!-- PWA Meta Tags -->
+    <link rel="manifest" href="/static/manifest.json">
+    <meta name="theme-color" content="#10b981">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Holded">
+    <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
+
     <link rel="stylesheet" href="/static/style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -259,7 +268,48 @@
         </div>
     </div>
 
+    <!-- PWA Install Banner -->
+    <div id="pwaInstallBanner" class="pwa-install-banner" style="display:none">
+        <span>Install Holded Dashboard as an app</span>
+        <button onclick="installPWA()">Install</button>
+        <button onclick="dismissInstallBanner()" class="pwa-dismiss">&times;</button>
+    </div>
+
     <script src="/static/app.js"></script>
+    <script>
+        // Register Service Worker
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/static/sw.js')
+                .then(reg => console.log('SW registered:', reg.scope))
+                .catch(err => console.warn('SW registration failed:', err));
+        }
+
+        // PWA Install Prompt
+        let deferredPrompt = null;
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            deferredPrompt = e;
+            document.getElementById('pwaInstallBanner').style.display = 'flex';
+        });
+
+        function installPWA() {
+            if (!deferredPrompt) return;
+            deferredPrompt.prompt();
+            deferredPrompt.userChoice.then(result => {
+                deferredPrompt = null;
+                document.getElementById('pwaInstallBanner').style.display = 'none';
+            });
+        }
+
+        function dismissInstallBanner() {
+            document.getElementById('pwaInstallBanner').style.display = 'none';
+        }
+
+        window.addEventListener('appinstalled', () => {
+            document.getElementById('pwaInstallBanner').style.display = 'none';
+            console.log('PWA installed successfully');
+        });
+    </script>
 </body>
 
 </html>

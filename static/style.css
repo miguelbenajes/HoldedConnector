@@ -998,4 +998,66 @@ td {
     #entitySearch { width: 150px; }
     .chat-panel { width: 100%; right: -100%; }
     .chat-fab { bottom: 1rem; right: 1rem; width: 50px; height: 50px; font-size: 0.9rem; }
+    .pwa-install-banner { bottom: 0; border-radius: 0; width: 100%; }
+}
+
+/* ─── PWA Install Banner ─────────────────────────────────────────── */
+
+.pwa-install-banner {
+    position: fixed;
+    bottom: 1.5rem;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    background: var(--sidebar-bg);
+    border: 1px solid var(--glass-border);
+    border-radius: 12px;
+    padding: 0.8rem 1.2rem;
+    z-index: 10000;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    backdrop-filter: blur(12px);
+    animation: slideUp 0.4s ease;
+}
+
+.pwa-install-banner span {
+    color: var(--text-white);
+    font-size: 0.9rem;
+    font-weight: 500;
+}
+
+.pwa-install-banner button {
+    padding: 0.5rem 1.2rem;
+    border: none;
+    border-radius: 8px;
+    font-weight: 600;
+    font-size: 0.85rem;
+    cursor: pointer;
+    background: var(--accent-green);
+    color: #fff;
+    transition: opacity 0.2s;
+}
+
+.pwa-install-banner button:hover {
+    opacity: 0.85;
+}
+
+.pwa-install-banner .pwa-dismiss {
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 1.2rem;
+    padding: 0.3rem 0.6rem;
+}
+
+@keyframes slideUp {
+    from { transform: translateX(-50%) translateY(100%); opacity: 0; }
+    to { transform: translateX(-50%) translateY(0); opacity: 1; }
+}
+
+/* ─── PWA Standalone Mode Adjustments ────────────────────────────── */
+
+@media (display-mode: standalone) {
+    body { padding-top: env(safe-area-inset-top); }
+    .sidebar { padding-top: calc(1rem + env(safe-area-inset-top)); }
 }

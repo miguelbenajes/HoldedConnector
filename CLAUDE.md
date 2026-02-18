@@ -260,16 +260,83 @@ for e in events:
 
 ---
 
+## PWA & Deployment
+
+### PWA (Progressive Web App)
+The app is a full PWA — installable on desktop and mobile from the browser.
+
+**Files:**
+- `static/manifest.json` — App name, icons, theme, display mode
+- `static/sw.js` — Service worker (cache-first for static, network-first for API)
+- `static/icons/icon-192.png`, `icon-512.png` — App icons
+
+**Install on Mobile:**
+1. Open the app URL in Chrome/Safari
+2. Tap "Add to Home Screen" or use the install banner
+3. App launches in standalone mode (no browser bar)
+
+### Deployment to Server
+The app is prepared for server deployment. Key considerations:
+
+**Environment Variables for Production:**
+```bash
+HOLDED_API_KEY=sk_...
+HOLDED_SAFE_MODE=false
+ANTHROPIC_API_KEY=sk-ant-...
+ALLOWED_ORIGINS=https://yourdomain.com   # Restrict CORS in production
+UPLOADS_DIR=/var/data/uploads
+REPORTS_DIR=/var/data/reports
+```
+
+**CORS Configuration:**
+- Default: `*` (all origins allowed) — for development
+- Production: Set `ALLOWED_ORIGINS` env var to restrict to your domain
+- Config in `api.py` line 27
+
+**Server Requirements:**
+- Python 3.9+
+- SQLite (included)
+- ~512MB RAM minimum
+- HTTPS required for PWA installation on mobile
+
+**Quick Deploy (any Linux VPS):**
+```bash
+git clone https://github.com/miguelbenajes/HoldedConnector.git
+cd HoldedConnector
+pip install -r requirements.txt
+cp .env.example .env  # Configure keys
+python3 api.py        # Or use gunicorn/uvicorn for production
+```
+
+**Production with systemd:**
+```ini
+[Unit]
+Description=Holded Dashboard
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/holded-connector
+ExecStart=/usr/bin/python3 api.py
+Restart=always
+Environment=HOLDED_SAFE_MODE=false
+
+[Install]
+WantedBy=multi-user.target
+```
+
+---
+
 ## Future Enhancements
 
 - [ ] Real-time notifications for overdue invoices
 - [ ] Scheduled AI reports (email weekly summary)
 - [ ] Multi-language support (currently: Spanish/English)
 - [ ] Holded webhook integration for live sync
-- [ ] Mobile app (React Native)
+- [x] ~~Mobile app~~ → PWA implemented (installable on mobile)
 - [ ] Dark/light theme toggle
 - [ ] User authentication & roles
 - [ ] Chat search & filtering
+- [ ] Deploy to production server (VPS ready)
 
 ---
 
@@ -283,6 +350,8 @@ for e in events:
 | Favorites not saving | Check SQLite permissions, ai_favorites table |
 | Streaming hangs | Restart server, check server.log for errors |
 | SAFE_MODE not working | Verify `HOLDED_SAFE_MODE=true` in .env |
+| PWA not installable | Needs HTTPS in production (localhost works without) |
+| Upload "Not Found" | Restart server after code update |
 
 ---
 
@@ -295,5 +364,5 @@ for e in events:
 
 ---
 
-**Last Updated:** 2026-02-17
-**Latest Commit:** 1eb826b (Milestone 3: Streaming + Charts + History + 5 new tools)
+**Last Updated:** 2026-02-18
+**Latest Commit:** PWA + File Upload + Deployment Ready
