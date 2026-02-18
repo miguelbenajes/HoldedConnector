@@ -505,41 +505,51 @@ async def upload_file(file: UploadFile = File(...)):
     """Upload a file for AI analysis (CSV/Excel only)."""
     from fastapi import HTTPException
 
-    uploads_dir = connector.get_uploads_dir()
-    os.makedirs(uploads_dir, exist_ok=True)
-
-    # Validate file type
-    allowed_exts = {".csv", ".xlsx", ".xls"}
-    file_ext = os.path.splitext(file.filename)[1].lower()
-
-    if file_ext not in allowed_exts:
-        raise HTTPException(status_code=400, detail=f"File type not allowed: {file_ext}. Only CSV/Excel allowed.")
-
-    # Validate file size (max 50MB)
     try:
-        content = await file.read()
-        if len(content) > 50 * 1024 * 1024:
-            raise HTTPException(status_code=413, detail="File too large (max 50MB)")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"File read error: {str(e)}")
+        uploads_dir = connector.get_uploads_dir()
+        logger.info(f"Upload directory: {uploads_dir}")
 
-    # Save file with timestamp prefix (unique names)
-    safe_name = f"{int(time.time())}_{os.path.basename(file.filename)}"
-    filepath = os.path.join(uploads_dir, safe_name)
+        # Create directory if it doesn't exist
+        os.makedirs(uploads_dir, exist_ok=True)
+        logger.info(f"Upload directory created/verified: {uploads_dir}")
 
-    try:
+        # Validate file type
+        allowed_exts = {".csv", ".xlsx", ".xls"}
+        file_ext = os.path.splitext(file.filename)[1].lower()
+
+        if file_ext not in allowed_exts:
+            raise HTTPException(status_code=400, detail=f"File type not allowed: {file_ext}. Only CSV/Excel allowed.")
+
+        # Validate file size (max 50MB)
+        try:
+            content = await file.read()
+            if len(content) > 50 * 1024 * 1024:
+                raise HTTPException(status_code=413, detail="File too large (max 50MB)")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"File read error: {str(e)}")
+            raise HTTPException(status_code=400, detail=f"File read error: {str(e)}")
+
+        # Save file with timestamp prefix (unique names)
+        safe_name = f"{int(time.time())}_{os.path.basename(file.filename)}"
+        filepath = os.path.join(uploads_dir, safe_name)
+        logger.info(f"Saving file to: {filepath}")
+
         with open(filepath, "wb") as f:
             f.write(content)
 
+        logger.info(f"File uploaded successfully: {filepath}")
         return {
             "success": True,
             "filename": safe_name,
             "original_name": file.filename,
             "size": len(content)
         }
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Upload error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 @app.get("/api/files/list")

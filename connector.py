@@ -510,13 +510,14 @@ def get_uploads_dir():
     """
     Return uploads directory path.
     Priority: settings table > env var > default
+    Note: Directory may not exist yet; calling code should create it.
     """
     saved = get_setting("uploads_dir")
-    if saved and os.path.isdir(saved):
+    if saved:
         return saved
 
     env_path = os.getenv("UPLOADS_DIR", "")
-    if env_path and os.path.isdir(env_path):
+    if env_path:
         return env_path
 
     return os.path.abspath("uploads")
@@ -525,13 +526,14 @@ def get_reports_dir():
     """
     Return reports directory path.
     Priority: settings table > env var > default
+    Note: Directory may not exist yet; calling code should create it.
     """
     saved = get_setting("reports_dir")
-    if saved and os.path.isdir(saved):
+    if saved:
         return saved
 
     env_path = os.getenv("REPORTS_DIR", "")
-    if env_path and os.path.isdir(env_path):
+    if env_path:
         return env_path
 
     return os.path.abspath("reports")
