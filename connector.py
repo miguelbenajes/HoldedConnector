@@ -668,18 +668,48 @@ def list_uploaded_files(limit=50):
 # Each entry: (category, subcategory, [keywords_to_match_in_desc_or_supplier])
 # Keywords are matched case-insensitively against: purchase desc + contact_name + item names
 CATEGORY_RULES = [
-    ("Transporte", "Taxi/VTC",      ["uber", "cabify", "taxi", "bolt", "free now"]),
-    ("Transporte", "Vuelo",         ["vuelo", "flight", "iberia", "ryanair", "vueling", "easyjet", "air", "aena"]),
-    ("Transporte", "Tren",          ["renfe", "ave", "tren", "cercanias", "feve"]),
-    ("Alojamiento", "Hotel",        ["hotel", "hostal", "booking", "airbnb", "alojamiento", "habitacion"]),
-    ("Alimentación", "Restaurante", ["restaurante", "cafeteria", "bar ", "comida", "cena", "almuerzo", "delivery", "glovo", "just eat"]),
-    ("Equipamiento", "Electrónica", ["amazon", "apple", "fnac", "mediamarkt", "pccomponentes", "camara", "objetivo", "lente", "monitor", "ordenador", "laptop"]),
-    ("Equipamiento", "Material",    ["leroy", "bauhaus", "ikea", "material", "herramienta"]),
-    ("Software", "Suscripción",     ["adobe", "google", "microsoft", "dropbox", "notion", "spotify", "netflix", "suscripcion", "subscription", "saas"]),
-    ("Comunicaciones", "Telefonía", ["movistar", "vodafone", "orange", "yoigo", "telefonica", "movil", "tarifa"]),
-    ("Servicios", "Profesional",    ["consultoria", "asesoria", "gestor", "abogado", "freelance", "servicio"]),
-    ("Combustible", "Gasolina",     ["gasolina", "diesel", "combustible", "repsol", "bp", "cepsa", "shell"]),
-    # Add your own rules here — you know your suppliers better than anyone
+    # --- Transporte ---
+    ("Transporte", "Taxi/VTC",      ["uber", "cabify", "taxi", "bolt", "free now", "mytaxi", "cabapp"]),
+    ("Transporte", "Vuelo",         ["vuelo", "flight", "iberia", "ryanair", "vueling", "easyjet", "transavia", "air europa", "wizzair", "aena"]),
+    ("Transporte", "Tren",          ["renfe", "ave", "tren", "cercanias", "feve", "ouigo"]),
+    ("Transporte", "Mensajería",    ["dhl", "correos", "fedex", "ups", "mrw", "seur", "nacex", "paquete", "envio"]),
+
+    # --- Alojamiento ---
+    ("Alojamiento", "Apartamento",  ["airbnb", "vrbo"]),
+    ("Alojamiento", "Hotel",        ["hotel", "hostal", "booking", "alojamiento", "habitacion", "parador"]),
+
+    # --- Alimentación ---
+    ("Alimentación", "Restaurante", ["restaurante", "cafeteria", "bar ", "comida", "cena", "almuerzo", "delivery", "glovo", "just eat", "uber eats"]),
+    ("Alimentación", "Supermercado",["mercadona", "carrefour", "lidl", "aldi", "eroski", "el corte ingles"]),
+
+    # --- Equipamiento (proveedores reales del negocio) ---
+    ("Equipamiento", "Fotografía",  ["llumm", "fotopro", "photospecialist", "kamera express", "camara", "objetivo", "lente", "tripode", "flash", "fotografia"]),
+    ("Equipamiento", "Electrónica", ["apple", "fnac", "mediamarkt", "pccomponentes", "anker", "bambulab", "bambu lab", "monitor", "ordenador", "laptop", "iphone", "ipad", "mac"]),
+    ("Equipamiento", "Amazon",      ["amazon"]),  # Amazon needs Claude (items vary: electronics, tools, etc.)
+    ("Equipamiento", "Material",    ["leroy merlin", "leroy", "bauhaus", "ikea", "bricodepot", "herramienta", "material"]),
+
+    # --- Software y SaaS ---
+    ("Software", "Diseño/Creatividad", ["adobe", "figma", "canva", "sketch"]),
+    ("Software", "Cloud/Dev",       ["google cloud", "google workspace", "aws", "azure", "digitalocean", "cloudflare", "github", "vercel"]),
+    ("Software", "Gestión",         ["holded", "fastspring", "zapier", "hubspot", "salesforce", "notion", "slack"]),
+    ("Software", "Suscripción",     ["microsoft", "dropbox", "spotify", "netflix", "suscripcion", "subscription", "saas"]),
+
+    # --- Comunicaciones ---
+    ("Comunicaciones", "Telefonía", ["movistar", "vodafone", "orange", "yoigo", "telefonica", "digi spain", "digi telecom", "wewi mobile", "movil", "tarifa"]),
+    ("Comunicaciones", "Internet",  ["jazztel", "masmovil", "pepephone", "adsl", "fibra"]),
+
+    # --- Servicios Profesionales ---
+    ("Servicios", "Seguridad",      ["tyco", "securitas", "prosegur", "alarma", "cra", "seguridad"]),
+    ("Servicios", "Limpieza",       ["limpieza", "conserje", "mantenimiento comunidad"]),
+    ("Servicios", "Profesional",    ["consultoria", "asesoria", "gestor", "abogado", "freelance", "palacios acurio", "castellanos"]),
+    ("Servicios", "Fotografía",     ["llumm studios", "sesion", "produccion", "fotografia", "video"]),
+
+    # --- Suministros ---
+    ("Suministros", "Electricidad", ["iberdrola", "endesa", "naturgy", "fenosa", "luz ", "electricidad"]),
+    ("Suministros", "Agua",         ["aguas de", "canal de isabel", "agua "]),
+
+    # --- Combustible ---
+    ("Combustible", "Gasolina",     ["gasolina", "diesel", "combustible", "repsol", "bp ", "cepsa", "shell"]),
 ]
 
 def categorize_by_rules(desc: str, contact_name: str, item_names: list):
@@ -745,6 +775,31 @@ def save_purchase_analysis(purchase_id: str, category: str, subcategory: str,
             VALUES (?, ?, ?, ?, ?, ?)
         ''', (purchase_id, category, subcategory, confidence, method, reasoning))
         conn.commit()
+    finally:
+        conn.close()
+
+
+def get_analyzed_invoices(limit: int = 50, offset: int = 0, category: str = None) -> list:
+    """List categorized purchase invoices with their analysis, newest first."""
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.cursor()
+        where = "WHERE pa.id IS NOT NULL"
+        params = []
+        if category:
+            where += " AND pa.category = ?"
+            params.append(category)
+        cursor.execute(f'''
+            SELECT pi.id, pi.contact_name, pi.desc, pi.amount, pi.date, pi.status,
+                   pa.category, pa.subcategory, pa.confidence, pa.method, pa.reasoning
+            FROM purchase_invoices pi
+            JOIN purchase_analysis pa ON pi.id = pa.purchase_id
+            {where}
+            ORDER BY pi.date DESC
+            LIMIT ? OFFSET ?
+        ''', params + [limit, offset])
+        return [dict(r) for r in cursor.fetchall()]
     finally:
         conn.close()
 

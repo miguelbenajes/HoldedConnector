@@ -835,6 +835,11 @@ def get_category_breakdown():
     stats = connector.get_analysis_stats()
     return stats.get("by_category", [])
 
+@app.get("/api/analysis/invoices")
+def get_analyzed_invoices(limit: int = 50, offset: int = 0, category: str = None):
+    """List categorized invoices with analysis details, paginated."""
+    return connector.get_analyzed_invoices(limit=limit, offset=offset, category=category)
+
 
 # Serve static files (mount at the end to avoid intercepting /api)
 app.mount("/static", StaticFiles(directory="static"), name="static")

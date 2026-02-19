@@ -1917,6 +1917,9 @@ function closeAmortHistory() {
 
 let _analysisPolling = null;
 
+let _analyzedPage = 0;
+const _analyzedPageSize = 50;
+
 async function loadAnalysisView() {
     try {
         const [statusRes, matchesRes] = await Promise.all([
@@ -1929,8 +1932,76 @@ async function loadAnalysisView() {
         _renderAnalysisStatus(status);
         _renderMatches(matches);
         _renderCategoryBreakdown(status.by_category || []);
+
+        // Populate category filter from breakdown data
+        _populateCategoryFilter(status.by_category || []);
+        // Load categorized invoices table
+        _analyzedPage = 0;
+        loadAnalyzedInvoices();
     } catch (e) {
         console.error('Error loading analysis view:', e);
+    }
+}
+
+function _populateCategoryFilter(categories) {
+    const sel = document.getElementById('analysisCategoryFilter');
+    if (!sel) return;
+    const current = sel.value;
+    sel.innerHTML = '<option value="">Todas las categorías</option>';
+    categories.forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = c.category;
+        opt.textContent = `${c.category} (${c.count})`;
+        if (c.category === current) opt.selected = true;
+        sel.appendChild(opt);
+    });
+}
+
+async function loadAnalyzedInvoices(page = 0) {
+    _analyzedPage = page;
+    const category = document.getElementById('analysisCategoryFilter')?.value || '';
+    const offset = page * _analyzedPageSize;
+    const url = `/api/analysis/invoices?limit=${_analyzedPageSize}&offset=${offset}${category ? `&category=${encodeURIComponent(category)}` : ''}`;
+
+    const tbody = document.getElementById('analyzedInvoicesBody');
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-gray);padding:1rem">Cargando...</td></tr>';
+
+    try {
+        const rows = await fetch(url).then(r => r.json());
+        if (!rows.length) {
+            tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-gray);padding:2rem">Sin facturas categorizadas aún. Ejecuta el análisis.</td></tr>';
+            document.getElementById('analyzedInvoicesPager').innerHTML = '';
+            return;
+        }
+
+        const methodIcon = m => m === 'rules' ? '⚡' : '🤖';
+        const confidenceClass = c => c === 'high' ? 'badge-paid' : c === 'medium' ? 'badge-pending' : '';
+        const fmt = amt => amt != null ? `${parseFloat(amt).toFixed(2)} €` : '—';
+        const fmtDate = d => d ? d.substring(0, 10) : '—';
+
+        tbody.innerHTML = rows.map(r => `
+            <tr>
+                <td style="white-space:nowrap">${fmtDate(r.date)}</td>
+                <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r.contact_name || ''}">${r.contact_name || '—'}</td>
+                <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r.desc || r.reasoning || ''}">${r.desc || r.reasoning || '—'}</td>
+                <td style="text-align:right;font-weight:600">${fmt(r.amount)}</td>
+                <td><span class="badge ${confidenceClass(r.confidence)}" style="font-size:0.75rem">${r.category || '—'}</span></td>
+                <td style="font-size:0.85rem;color:var(--text-gray)">${r.subcategory || '—'}</td>
+                <td title="${r.method === 'rules' ? 'Regla automática' : 'Claude AI'}">${methodIcon(r.method)} ${r.method === 'rules' ? 'Reglas' : 'Claude'}</td>
+                <td><span class="badge ${confidenceClass(r.confidence)}" style="font-size:0.7rem">${r.confidence || '—'}</span></td>
+            </tr>`).join('');
+
+        // Pager
+        const pager = document.getElementById('analyzedInvoicesPager');
+        const hasPrev = page > 0;
+        const hasNext = rows.length === _analyzedPageSize;
+        pager.innerHTML = `
+            <span style="color:var(--text-gray);font-size:0.85rem">Página ${page + 1} · mostrando ${rows.length} facturas</span>
+            ${hasPrev ? `<button class="action-btn btn-secondary" style="margin-left:0.5rem" onclick="loadAnalyzedInvoices(${page - 1})">← Anterior</button>` : ''}
+            ${hasNext ? `<button class="action-btn btn-secondary" style="margin-left:0.5rem" onclick="loadAnalyzedInvoices(${page + 1})">Siguiente →</button>` : ''}
+        `;
+    } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="8" style="color:var(--danger);padding:1rem">Error: ${e.message}</td></tr>`;
     }
 }
 
@@ -1961,7 +2032,7 @@ function _renderAnalysisStatus(status) {
             }, 3000);
         }
     } else {
-        btn.textContent = `▶ Analizar ${status.pending > 0 ? Math.min(status.pending, 10) : 10} facturas`;
+        btn.textContent = '▶ Analizar';
         btn.disabled = (status.pending === 0);
         const lastRun = status.last_run ? new Date(status.last_run).toLocaleString('es-ES') : 'Nunca';
         const pendingMatches = status.pending_matches || 0;
@@ -2117,18 +2188,18 @@ function _renderCategoryBreakdown(categories) {
 
 async function runAnalysisJob() {
     const btn = document.getElementById('analysisRunBtn');
+    const batchSize = parseInt(document.getElementById('analysisBatchSize')?.value || '10');
     btn.disabled = true;
     btn.textContent = '⏳ Iniciando...';
     try {
-        const res = await fetch('/api/analysis/run', { method: 'POST' });
+        const res = await fetch(`/api/analysis/run?batch_size=${batchSize}`, { method: 'POST' });
         const data = await res.json();
         if (data.status === 'started' || data.status === 'already_running') {
-            // Start polling
             loadAnalysisView();
         }
     } catch (e) {
         btn.disabled = false;
-        btn.textContent = '▶ Analizar facturas';
+        btn.textContent = '▶ Analizar';
         alert(`Error: ${e.message}`);
     }
 }

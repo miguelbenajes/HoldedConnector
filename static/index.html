@@ -218,8 +218,14 @@
                 <header>
                     <h1>🧠 Análisis Inteligente de Gastos</h1>
                     <div class="filter-controls">
-                        <button class="sync-btn" onclick="runAnalysisJob()" id="analysisRunBtn">▶ Analizar 10 facturas</button>
-                        <button class="action-btn btn-secondary" onclick="loadAnalysisView()">Actualizar</button>
+                        <select id="analysisBatchSize" style="padding:0.5rem 0.8rem;background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:8px;color:var(--text-white);font-size:0.9rem">
+                            <option value="10">10 facturas</option>
+                            <option value="25">25 facturas</option>
+                            <option value="50">50 facturas</option>
+                            <option value="100">100 facturas</option>
+                        </select>
+                        <button class="sync-btn" onclick="runAnalysisJob()" id="analysisRunBtn">▶ Analizar</button>
+                        <button class="action-btn btn-secondary" onclick="loadAnalysisView()">↻ Actualizar</button>
                     </div>
                 </header>
 
@@ -248,6 +254,39 @@
                     <div id="analysisProgressBar" style="height:100%;background:var(--primary);border-radius:8px;width:0%;transition:width 0.5s"></div>
                 </div>
                 <p id="analysisStatusMsg" style="margin-top:0.5rem;font-size:0.85rem;color:var(--text-gray)"></p>
+
+                <!-- Categorized invoices table -->
+                <div class="card" style="margin-top:1.5rem">
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
+                        <h2 style="margin:0">📋 Facturas categorizadas</h2>
+                        <div style="display:flex;gap:0.5rem;align-items:center">
+                            <select id="analysisCategoryFilter" onchange="loadAnalyzedInvoices()"
+                                style="padding:0.4rem 0.7rem;background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:8px;color:var(--text-white);font-size:0.85rem">
+                                <option value="">Todas las categorías</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="table-container">
+                        <table id="analyzedInvoicesTable">
+                            <thead>
+                                <tr>
+                                    <th>Fecha</th>
+                                    <th>Proveedor</th>
+                                    <th>Descripción</th>
+                                    <th>Importe</th>
+                                    <th>Categoría</th>
+                                    <th>Subcategoría</th>
+                                    <th>Método</th>
+                                    <th>Confianza</th>
+                                </tr>
+                            </thead>
+                            <tbody id="analyzedInvoicesBody">
+                                <tr><td colspan="8" style="text-align:center;color:var(--text-gray);padding:2rem">Cargando...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div style="margin-top:1rem;text-align:center" id="analyzedInvoicesPager"></div>
+                </div>
 
                 <!-- Inventory matches panel -->
                 <div class="card" style="margin-top:1.5rem" id="matchesPanel">
