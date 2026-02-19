@@ -1064,7 +1064,13 @@ def get_amortizations():
                 a.purchase_date,
                 a.notes,
                 a.created_at,
-                COALESCE(SUM(ii.subtotal), 0.0) AS total_revenue
+                COALESCE(SUM(
+                    CASE
+                        WHEN ii.subtotal IS NOT NULL AND ii.subtotal > 0
+                        THEN ii.subtotal
+                        ELSE COALESCE(ii.units, 0) * COALESCE(ii.price, 0)
+                    END
+                ), 0.0) AS total_revenue
             FROM amortizations a
             LEFT JOIN invoice_items ii ON ii.product_id = a.product_id
             GROUP BY a.id
