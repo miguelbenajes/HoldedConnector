@@ -667,49 +667,91 @@ def list_uploaded_files(limit=50):
 # Category keywords for rule-based classification.
 # Each entry: (category, subcategory, [keywords_to_match_in_desc_or_supplier])
 # Keywords are matched case-insensitively against: purchase desc + contact_name + item names
+# ─── Taxonomía contable: espeja exactamente la carpeta
+# 'MODELO Soportadas' del gestor de Miguel.
+# category    → carpeta principal
+# subcategory → subcarpeta (o proveedor concreto)
+# keywords    → palabras buscadas en: desc + contact_name + item_names (lowercase)
 CATEGORY_RULES = [
-    # --- Transporte ---
-    ("Transporte", "Taxi/VTC",      ["uber", "cabify", "taxi", "bolt", "free now", "mytaxi", "cabapp"]),
-    ("Transporte", "Vuelo",         ["vuelo", "flight", "iberia", "ryanair", "vueling", "easyjet", "transavia", "air europa", "wizzair", "aena"]),
-    ("Transporte", "Tren",          ["renfe", "ave", "tren", "cercanias", "feve", "ouigo"]),
-    ("Transporte", "Mensajería",    ["dhl", "correos", "fedex", "ups", "mrw", "seur", "nacex", "paquete", "envio"]),
 
-    # --- Alojamiento ---
-    ("Alojamiento", "Apartamento",  ["airbnb", "vrbo"]),
-    ("Alojamiento", "Hotel",        ["hotel", "hostal", "booking", "alojamiento", "habitacion", "parador"]),
+    # ── AIRBNB RECIBOS ──────────────────────────────────────
+    ("AIRBNB RECIBOS",       "Airbnb",         ["airbnb"]),
 
-    # --- Alimentación ---
-    ("Alimentación", "Restaurante", ["restaurante", "cafeteria", "bar ", "comida", "cena", "almuerzo", "delivery", "glovo", "just eat", "uber eats"]),
-    ("Alimentación", "Supermercado",["mercadona", "carrefour", "lidl", "aldi", "eroski", "el corte ingles"]),
+    # ── AMAZON ──────────────────────────────────────────────
+    # Amazon lleva a Claude para que determine el artículo concreto
+    ("AMAZON",               "Amazon",         ["amazon eu", "amazon.es", "amazon services"]),
 
-    # --- Equipamiento (proveedores reales del negocio) ---
-    ("Equipamiento", "Fotografía",  ["llumm", "fotopro", "photospecialist", "kamera express", "camara", "objetivo", "lente", "tripode", "flash", "fotografia"]),
-    ("Equipamiento", "Electrónica", ["apple", "fnac", "mediamarkt", "pccomponentes", "anker", "bambulab", "bambu lab", "monitor", "ordenador", "laptop", "iphone", "ipad", "mac"]),
-    ("Equipamiento", "Amazon",      ["amazon"]),  # Amazon needs Claude (items vary: electronics, tools, etc.)
-    ("Equipamiento", "Material",    ["leroy merlin", "leroy", "bauhaus", "ikea", "bricodepot", "herramienta", "material"]),
+    # ── GASTOS LOCAL ────────────────────────────────────────
+    ("GASTOS LOCAL",         "agua y luz",     ["iberdrola", "endesa", "naturgy", "fenosa",
+                                                "aguas de", "canal isabel", "agua potable",
+                                                "suministro electr", "luz "]),
+    ("GASTOS LOCAL",         "alarma",         ["tyco", "securitas", "prosegur", "alarma",
+                                                "conexion a cra", "cra "]),
+    ("GASTOS LOCAL",         "alquiler",       ["alquiler", "arrendamiento", "renta local",
+                                                "contrato arrendamiento"]),
 
-    # --- Software y SaaS ---
-    ("Software", "Diseño/Creatividad", ["adobe", "figma", "canva", "sketch"]),
-    ("Software", "Cloud/Dev",       ["google cloud", "google workspace", "aws", "azure", "digitalocean", "cloudflare", "github", "vercel"]),
-    ("Software", "Gestión",         ["holded", "fastspring", "zapier", "hubspot", "salesforce", "notion", "slack"]),
-    ("Software", "Suscripción",     ["microsoft", "dropbox", "spotify", "netflix", "suscripcion", "subscription", "saas"]),
+    # ── SEGUROS - SEG SOCIAL ────────────────────────────────
+    ("SEGUROS - SEG SOCIAL", "Seguro",         ["seguro", "axa", "mapfre", "mutua",
+                                                "allianz", "zurich", "prima seguro"]),
+    ("SEGUROS - SEG SOCIAL", "Seg. Social",    ["seguridad social", "autonomo", "cuota autonomo",
+                                                "reta ", "tesoreria general"]),
 
-    # --- Comunicaciones ---
-    ("Comunicaciones", "Telefonía", ["movistar", "vodafone", "orange", "yoigo", "telefonica", "digi spain", "digi telecom", "wewi mobile", "movil", "tarifa"]),
-    ("Comunicaciones", "Internet",  ["jazztel", "masmovil", "pepephone", "adsl", "fibra"]),
+    # ── SOFTWARE ────────────────────────────────────────────
+    ("SOFTWARE",             "adobe",          ["adobe"]),
+    ("SOFTWARE",             "apple",          ["apple distribution", "apple services",
+                                                "itunes", "app store", "icloud"]),
+    ("SOFTWARE",             "capture one",    ["capture one", "phase one"]),
+    ("SOFTWARE",             "google",         ["google cloud", "google workspace",
+                                                "google ireland", "google llc"]),
+    ("SOFTWARE",             "holded",         ["holded"]),
+    ("SOFTWARE",             "hostalia",       ["hostalia", "hosting", "dominio", "cpanel"]),
+    ("SOFTWARE",             "spotify",        ["spotify"]),
+    # Software genérico (no tiene subcarpeta propia aún)
+    ("SOFTWARE",             "Suscripción",    ["microsoft", "dropbox", "notion", "slack",
+                                                "fastspring", "github", "figma", "canva",
+                                                "cloudflare", "digitalocean", "vercel",
+                                                "suscripcion", "subscription"]),
 
-    # --- Servicios Profesionales ---
-    ("Servicios", "Seguridad",      ["tyco", "securitas", "prosegur", "alarma", "cra", "seguridad"]),
-    ("Servicios", "Limpieza",       ["limpieza", "conserje", "mantenimiento comunidad"]),
-    ("Servicios", "Profesional",    ["consultoria", "asesoria", "gestor", "abogado", "freelance", "palacios acurio", "castellanos"]),
-    ("Servicios", "Fotografía",     ["llumm studios", "sesion", "produccion", "fotografia", "video"]),
+    # ── TELEFONIA E INTERNET ────────────────────────────────
+    ("TELEFONIA E INTERNET", "Digi",           ["digi spain", "digi telecom"]),
+    ("TELEFONIA E INTERNET", "finetwork",      ["finetwork"]),
+    # Otras operadoras sin subcarpeta propia
+    ("TELEFONIA E INTERNET", "Telefonía",      ["movistar", "vodafone", "orange", "yoigo",
+                                                "telefonica", "wewi mobile", "movil",
+                                                "tarifa datos", "factura telefono"]),
 
-    # --- Suministros ---
-    ("Suministros", "Electricidad", ["iberdrola", "endesa", "naturgy", "fenosa", "luz ", "electricidad"]),
-    ("Suministros", "Agua",         ["aguas de", "canal de isabel", "agua "]),
+    # ── TRANSPORTE ──────────────────────────────────────────
+    ("TRANSPORTE",           "dhl",            ["dhl"]),
+    ("TRANSPORTE",           "gasolina",       ["gasolina", "diesel", "combustible",
+                                                "repsol", "bp ", "cepsa", "shell",
+                                                "estacion de servicio"]),
+    ("TRANSPORTE",           "renfe",          ["renfe", "ave ", "ouigo", "cercanias"]),
+    ("TRANSPORTE",           "taxis",          ["taxi", "mytaxi", "cabify", "bolt",
+                                                "free now", "cabapp"]),
+    ("TRANSPORTE",           "uber",           ["uber"]),
+    ("TRANSPORTE",           "vuelos",         ["vueling", "iberia", "ryanair", "transavia",
+                                                "air europa", "wizzair", "easyjet",
+                                                "vuelo", "billete aereo", "aena"]),
+    # Mensajería/paquetería sin subcarpeta propia
+    ("TRANSPORTE",           "Mensajería",     ["correos", "fedex", "ups", "mrw",
+                                                "seur", "nacex", "envio paquete"]),
 
-    # --- Combustible ---
-    ("Combustible", "Gasolina",     ["gasolina", "diesel", "combustible", "repsol", "bp ", "cepsa", "shell"]),
+    # ── A AMORTIZAR ─────────────────────────────────────────
+    # Equipamiento de alto valor que se amortiza
+    ("A AMORTIZAR",          "Equipamiento",   ["fnac", "mediamarkt", "pccomponentes",
+                                                "bambulab", "bambu lab", "anker",
+                                                "llumm", "fotopro", "photospecialist",
+                                                "kamera express", "leroy merlin", "leroy",
+                                                "bauhaus", "ikea"]),
+
+    # ── VARIOS ──────────────────────────────────────────────
+    # Cajón de sastre — lo que no encaje en ninguna carpeta
+    ("VARIOS",               "Restaurante",    ["restaurante", "cafeteria", "comida",
+                                                "cena", "almuerzo", "glovo", "just eat",
+                                                "uber eats"]),
+    ("VARIOS",               "Formación",      ["formacion", "curso", "training",
+                                                "udemy", "coursera", "master"]),
+    ("VARIOS",               "Varios",         ["varios", "material oficina", "papeleria"]),
 ]
 
 def categorize_by_rules(desc: str, contact_name: str, item_names: list):
@@ -717,9 +759,9 @@ def categorize_by_rules(desc: str, contact_name: str, item_names: list):
     Try to categorize a purchase invoice using keyword rules.
     Returns dict with category/subcategory/confidence='high' or None if no match.
 
-    TODO: Add your own business-specific rules to CATEGORY_RULES above.
-    Think about: your regular suppliers, Spanish/English variants,
-    abbreviations your accountant uses, sector-specific terms.
+    Categories mirror the folder structure in:
+    ~/Documents/MIGUEL/WORK/CONTABILIDAD/MODELO Soportadas
+    Add new rules to CATEGORY_RULES when you create new supplier folders.
     """
     text = " ".join(filter(None, [desc, contact_name] + item_names)).lower()
     for category, subcategory, keywords in CATEGORY_RULES:

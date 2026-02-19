@@ -134,15 +134,24 @@ def _claude_categorize(inv: dict) -> dict:
         client = anthropic.Anthropic(api_key=api_key)
         item_list = ", ".join(inv.get('item_names') or []) or "—"
         prompt = (
-            f"Clasifica esta factura de gasto empresarial en español.\n"
+            f"Clasifica esta factura de gasto empresarial. "
+            f"Elige la carpeta contable que mejor encaje.\n"
             f"Proveedor: {inv.get('contact_name','')}\n"
             f"Descripción: {inv.get('desc','')}\n"
             f"Items: {item_list}\n"
             f"Importe: {inv.get('amount',0)}€\n\n"
+            f"Carpetas contables disponibles:\n"
+            f"- AIRBNB RECIBOS (recibos de alojamiento Airbnb)\n"
+            f"- AMAZON (compras en Amazon de cualquier tipo)\n"
+            f"- GASTOS LOCAL → subcarpeta: agua y luz | alarma | alquiler\n"
+            f"- SEGUROS - SEG SOCIAL → subcarpeta: Seguro | Seg. Social\n"
+            f"- SOFTWARE → subcarpeta: adobe | apple | capture one | google | holded | hostalia | spotify | Suscripción\n"
+            f"- TELEFONIA E INTERNET → subcarpeta: Digi | finetwork | Telefonía\n"
+            f"- TRANSPORTE → subcarpeta: dhl | gasolina | renfe | taxis | uber | vuelos | Mensajería\n"
+            f"- A AMORTIZAR (equipamiento de alto valor: cámaras, ordenadores, maquinaria)\n"
+            f"- VARIOS → subcarpeta: Restaurante | Formación | Varios\n\n"
             f"Responde SOLO con JSON: "
-            f'{{\"category\":\"...\",\"subcategory\":\"...\",\"reasoning\":\"...\"}}\n'
-            f"Categorías posibles: Transporte, Alojamiento, Alimentación, Equipamiento, "
-            f"Software, Comunicaciones, Servicios, Combustible, Formación, Otros"
+            f'{{\"category\":\"...\",\"subcategory\":\"...\",\"reasoning\":\"...\"}}'
         )
         msg = client.messages.create(
             model=ai_agent._get_model(),
