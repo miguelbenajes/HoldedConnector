@@ -812,6 +812,70 @@ def delete_amortization(amort_id: int):
     return {"status": "success"}
 
 
+# ── Amortization Purchase Links ───────────────────────────────────────────────
+
+@app.get("/api/amortizations/{amort_id}/purchases")
+def get_amortization_purchases(amort_id: int):
+    """Return all purchase links (cost sources) for one amortization."""
+    return connector.get_amortization_purchases(amort_id)
+
+
+class PurchaseLinkCreate(BaseModel):
+    cost_override: float
+    allocation_note: Optional[str] = ""
+    purchase_id: Optional[str] = None       # purchase_invoices.id
+    purchase_item_id: Optional[int] = None  # purchase_items.id
+
+
+@app.post("/api/amortizations/{amort_id}/purchases")
+def add_amortization_purchase(amort_id: int, body: PurchaseLinkCreate):
+    """Add a purchase cost source to an amortization. Recalculates total cost."""
+    new_id = connector.add_amortization_purchase(
+        amortization_id=amort_id,
+        cost_override=body.cost_override,
+        allocation_note=body.allocation_note or "",
+        purchase_id=body.purchase_id,
+        purchase_item_id=body.purchase_item_id,
+    )
+    if new_id is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="Could not add purchase link")
+    return {"status": "success", "id": new_id}
+
+
+class PurchaseLinkUpdate(BaseModel):
+    cost_override: Optional[float] = None
+    allocation_note: Optional[str] = None
+    purchase_id: Optional[str] = None
+    purchase_item_id: Optional[int] = None
+
+
+@app.put("/api/amortizations/purchases/{link_id}")
+def update_amortization_purchase(link_id: int, body: PurchaseLinkUpdate):
+    """Edit cost or note of a purchase link. Recalculates parent total cost."""
+    ok = connector.update_amortization_purchase(
+        purchase_link_id=link_id,
+        cost_override=body.cost_override,
+        allocation_note=body.allocation_note,
+        purchase_id=body.purchase_id,
+        purchase_item_id=body.purchase_item_id,
+    )
+    if not ok:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Purchase link not found")
+    return {"status": "success"}
+
+
+@app.delete("/api/amortizations/purchases/{link_id}")
+def delete_amortization_purchase(link_id: int):
+    """Remove a purchase link and recalculate parent total cost."""
+    ok = connector.delete_amortization_purchase(link_id)
+    if not ok:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Purchase link not found")
+    return {"status": "success"}
+
+
 # ────────────── Invoice Analysis Endpoints ──────────────
 
 @app.get("/api/analysis/status")
@@ -835,13 +899,19 @@ def get_inventory_matches():
 
 class MatchConfirm(BaseModel):
     confirmed: bool
-    custom_price: Optional[float] = None   # User-overridden price from detail modal
+    custom_price: Optional[float] = None      # User-overridden cost for this specific purchase link
+    allocation_note: Optional[str] = None     # e.g. "1/3 del pack de 3 Manfrotto 1004BAC"
+    product_type: Optional[str] = None        # Override default product type (alquiler/venta/etc.)
 
 @app.post("/api/analysis/matches/{match_id}/confirm")
 def confirm_match(match_id: int, body: MatchConfirm):
     """Confirm or reject an inventory match. Confirmed ones go to amortizations.
     If custom_price is provided, it overrides the auto-detected matched_price."""
-    result = connector.confirm_inventory_match(match_id, body.confirmed, body.custom_price)
+    result = connector.confirm_inventory_match(
+        match_id, body.confirmed, body.custom_price,
+        allocation_note=body.allocation_note or "",
+        product_type=body.product_type,
+    )
     if not result.get("ok"):
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail=result.get("error", "Unknown error"))

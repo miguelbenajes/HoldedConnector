@@ -1144,6 +1144,61 @@ td {
     font-size: .8rem;
 }
 
+/* ── Amortization expandable detail rows ────────────────────────── */
+.amort-main-row:hover { background: rgba(255,255,255,.03); }
+.amort-expand-icon {
+    display: inline-block;
+    font-size: .7rem;
+    margin-right: .35rem;
+    color: var(--text-gray);
+    transition: transform .15s;
+}
+.amort-detail-row { background: rgba(16,185,129,.03); }
+.amort-detail-cell {
+    padding: 0 !important;
+    border-top: none !important;
+}
+.amort-detail-wrap {
+    padding: .75rem 1.5rem 1rem 2.5rem;
+    border-top: 1px dashed var(--border-color);
+}
+.amort-detail-title {
+    font-size: .78rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: var(--accent-green);
+    margin-bottom: .6rem;
+}
+.amort-links-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: .82rem;
+    margin-bottom: .75rem;
+}
+.amort-links-table th {
+    padding: .3rem .6rem;
+    color: var(--text-gray);
+    font-weight: 600;
+    text-align: left;
+    border-bottom: 1px solid var(--border-color);
+    font-size: .75rem;
+    text-transform: uppercase;
+}
+.amort-links-table td {
+    padding: .4rem .6rem;
+    border-bottom: 1px solid rgba(255,255,255,.04);
+    vertical-align: middle;
+}
+.amort-add-link {
+    display: flex;
+    align-items: center;
+    gap: .6rem;
+    padding-top: .6rem;
+    border-top: 1px solid var(--border-color);
+    flex-wrap: wrap;
+}
+
 /* ── Column configurator context menu ───────────────────────────── */
 .col-config-menu {
     background: #1e2536;

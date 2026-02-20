@@ -1664,57 +1664,77 @@ async function loadAmortizations() {
             return;
         }
 
-        tbody.innerHTML = rows.map(r => {
+        // Build rows — each product gets a main row + a hidden detail row for purchase links
+        while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
+        rows.forEach(function(r) {
             const profitColor = r.profit >= 0 ? 'var(--primary)' : 'var(--danger)';
             const roiColor    = r.roi_pct >= 0 ? 'var(--primary)' : 'var(--danger)';
-            const statusBadge = r.status === 'AMORTIZADO'
-                ? '<span class="badge badge-paid">✅ AMORTIZADO</span>'
-                : '<span class="badge badge-pending">⏳ EN CURSO</span>';
             const safeName    = r.product_name.replace(/'/g, "\\'");
             const safeType    = r.product_type || 'alquiler';
             const typeInfo    = PRODUCT_TYPES[safeType] || PRODUCT_TYPES.alquiler;
-            const typeBadge   = `<span class="badge" style="background:${typeInfo.color}22;color:${typeInfo.color};border:1px solid ${typeInfo.color}44;font-size:0.72rem">${typeInfo.label}</span>`;
             const irpfBadge   = typeInfo.irpf > 0
                 ? `<span style="font-size:0.78rem;color:var(--warning);font-weight:600">${typeInfo.irpf}%</span>`
                 : `<span style="font-size:0.78rem;color:var(--text-gray)">—</span>`;
+            const statusBadge = r.status === 'AMORTIZADO'
+                ? '<span class="badge badge-paid">✅ AMORT.</span>'
+                : '<span class="badge badge-pending">⏳ CURSO</span>';
 
-            // Inline type selector — saves immediately on change
-            const typeSelect = `<select onchange="updateAmortType(${r.id}, this.value)"
-                style="font-size:0.78rem;padding:0.2rem 0.4rem;background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:6px;color:var(--text-white);cursor:pointer">
-                ${Object.entries(PRODUCT_TYPES).map(([k, v]) =>
-                    `<option value="${k}" ${k === safeType ? 'selected' : ''}>${v.label}</option>`
-                ).join('')}
-            </select>`;
+            // Inline type selector
+            const typeOpts = Object.entries(PRODUCT_TYPES).map(function([k, v]) {
+                return '<option value="' + k + '"' + (k === safeType ? ' selected' : '') + '>' + v.label + '</option>';
+            }).join('');
+            const typeSelect = '<select onchange="updateAmortType(' + r.id + ', this.value)" style="font-size:0.78rem;padding:0.2rem 0.4rem;background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:6px;color:var(--text-white)">' + typeOpts + '</select>';
 
-            return `<tr>
-                <td><strong>${escapeHtml(r.product_name)}</strong></td>
+            // Main row
+            const mainTr = document.createElement('tr');
+            mainTr.className = 'amort-main-row';
+            mainTr.dataset.amortId = r.id;
+            mainTr.style.cursor = 'pointer';
+            mainTr.title = 'Clic para ver/editar fuentes de coste';
+            mainTr.addEventListener('click', function(e) {
+                if (e.target.tagName === 'SELECT' || e.target.tagName === 'BUTTON' || e.target.tagName === 'OPTION') return;
+                toggleAmortDetail(r.id);
+            });
+            mainTr.innerHTML = `
+                <td><span class="amort-expand-icon" id="amort-expand-${r.id}">▶</span> <strong>${escapeHtml(r.product_name)}</strong></td>
                 <td>${typeSelect}</td>
                 <td style="text-align:center">${irpfBadge}</td>
-                <td>${formatter.format(r.purchase_price)}</td>
+                <td id="amort-cost-${r.id}"><strong>${formatter.format(r.purchase_price)}</strong></td>
                 <td>${escapeHtml(r.purchase_date)}</td>
                 <td>${formatter.format(r.total_revenue)}</td>
                 <td style="color:${profitColor};font-weight:600">${formatter.format(r.profit)}</td>
                 <td style="color:${roiColor};font-weight:600">${r.roi_pct}%</td>
                 <td>${statusBadge}</td>
-                <td style="color:var(--text-gray);font-size:0.85rem">${escapeHtml(r.notes || '—')}</td>
-                <td>
-                    <button class="action-btn btn-secondary" style="padding:0.3rem 0.6rem;font-size:0.8rem"
-                        onclick="openAmortHistory('${escapeHtml(r.product_id)}','${safeName}',${r.purchase_price},${r.total_revenue})">
-                        📋 Ver
-                    </button>
-                </td>
                 <td style="white-space:nowrap">
                     <button class="action-btn btn-secondary" style="padding:0.3rem 0.6rem;font-size:0.8rem"
-                        onclick="openAmortizationModal(${r.id},'${safeName}',${r.purchase_price},'${escapeHtml(r.purchase_date)}','${escapeHtml(r.notes || '')}','${safeType}')">
-                        Editar
+                        onclick="openAmortHistory('${escapeHtml(r.product_id)}','${safeName}',${r.purchase_price},${r.total_revenue});event.stopPropagation()">
+                        📋 Historial
                     </button>
-                    <button class="action-btn" style="padding:0.3rem 0.6rem;font-size:0.8rem;background:var(--danger);margin-left:4px"
-                        onclick="deleteAmortization(${r.id},'${safeName}')">
+                    <button class="action-btn btn-secondary" style="padding:0.3rem 0.6rem;font-size:0.8rem"
+                        onclick="openAmortizationModal(${r.id},'${safeName}',${r.purchase_price},'${escapeHtml(r.purchase_date)}','${escapeHtml(r.notes || '')}','${safeType}');event.stopPropagation()">
+                        ✎
+                    </button>
+                    <button class="action-btn" style="padding:0.3rem 0.6rem;font-size:0.8rem;background:var(--danger)"
+                        onclick="deleteAmortization(${r.id},'${safeName}');event.stopPropagation()">
                         ✕
                     </button>
                 </td>
-            </tr>`;
-        }).join('');
+            `;
+            tbody.appendChild(mainTr);
+
+            // Detail row (hidden by default)
+            const detailTr = document.createElement('tr');
+            detailTr.id = 'amort-detail-' + r.id;
+            detailTr.className = 'amort-detail-row';
+            detailTr.style.display = 'none';
+            const detailTd = document.createElement('td');
+            detailTd.colSpan = 10;
+            detailTd.className = 'amort-detail-cell';
+            detailTd.id = 'amort-detail-cell-' + r.id;
+            detailTd.innerHTML = '<span style="color:var(--text-gray);font-size:.82rem">Cargando fuentes de coste…</span>';
+            detailTr.appendChild(detailTd);
+            tbody.appendChild(detailTr);
+        });
 
         if (_amortChartVisible) renderAmortChart(rows);
 
@@ -2443,4 +2463,188 @@ function downloadBackup(type) {
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
+}
+
+// ── Amortization purchase-link detail panel ───────────────────────────────────
+
+var _amortDetailOpen = null;
+
+async function toggleAmortDetail(amortId) {
+    const detailRow  = document.getElementById('amort-detail-' + amortId);
+    const expandIcon = document.getElementById('amort-expand-' + amortId);
+    if (!detailRow) return;
+
+    const isOpen = detailRow.style.display !== 'none';
+    if (isOpen) {
+        detailRow.style.display = 'none';
+        if (expandIcon) expandIcon.textContent = '▶';
+        _amortDetailOpen = null;
+        return;
+    }
+    if (_amortDetailOpen && _amortDetailOpen !== amortId) {
+        var prev = document.getElementById('amort-detail-' + _amortDetailOpen);
+        var prevIcon = document.getElementById('amort-expand-' + _amortDetailOpen);
+        if (prev) prev.style.display = 'none';
+        if (prevIcon) prevIcon.textContent = '▶';
+    }
+    detailRow.style.display = '';
+    if (expandIcon) expandIcon.textContent = '▼';
+    _amortDetailOpen = amortId;
+    await renderAmortDetail(amortId);
+}
+
+async function renderAmortDetail(amortId) {
+    const cell = document.getElementById('amort-detail-cell-' + amortId);
+    if (!cell) return;
+    while (cell.firstChild) cell.removeChild(cell.firstChild);
+
+    var loading = document.createElement('span');
+    loading.style.cssText = 'color:var(--text-gray);font-size:.82rem';
+    loading.textContent = 'Cargando…';
+    cell.appendChild(loading);
+
+    try {
+        const res   = await fetch('/api/amortizations/' + amortId + '/purchases');
+        const links = await res.json();
+        while (cell.firstChild) cell.removeChild(cell.firstChild);
+
+        var wrap = document.createElement('div');
+        wrap.className = 'amort-detail-wrap';
+
+        var titleEl = document.createElement('div');
+        titleEl.className = 'amort-detail-title';
+        titleEl.textContent = '💰 Fuentes de coste';
+        wrap.appendChild(titleEl);
+
+        if (links.length === 0) {
+            var emptyEl = document.createElement('p');
+            emptyEl.style.cssText = 'color:var(--text-gray);font-size:.82rem;margin:.5rem 0 1rem';
+            emptyEl.textContent = 'Sin fuentes de coste registradas. Añade una abajo.';
+            wrap.appendChild(emptyEl);
+        } else {
+            var tbl = document.createElement('table');
+            tbl.className = 'amort-links-table';
+            var thead = document.createElement('thead');
+            thead.innerHTML = '<tr><th>Proveedor / Factura</th><th>Item detectado</th><th>Nota de asignación</th><th style="text-align:right">Coste asignado</th><th></th></tr>';
+            tbl.appendChild(thead);
+            var ltbody = document.createElement('tbody');
+
+            links.forEach(function(lnk) {
+                var tr = document.createElement('tr');
+                var supplier = lnk.supplier || lnk.invoice_desc || '—';
+                var docRef   = lnk.doc_number ? ' #' + lnk.doc_number : '';
+                var dateStr  = lnk.invoice_date ? new Date(lnk.invoice_date * 1000).toLocaleDateString('es-ES') : '';
+                var itemName = lnk.item_name || '—';
+                var note     = lnk.allocation_note || '—';
+
+                tr.innerHTML =
+                    '<td style="font-size:.82rem"><strong>' + escapeHtml(supplier) + escapeHtml(docRef) + '</strong>' +
+                        (dateStr ? '<br><span style="color:var(--text-gray)">' + escapeHtml(dateStr) + '</span>' : '') + '</td>' +
+                    '<td style="font-size:.82rem;color:var(--text-gray)">' + escapeHtml(itemName) + '</td>' +
+                    '<td style="font-size:.82rem">' + escapeHtml(note) + '</td>' +
+                    '<td style="text-align:right;font-weight:600" id="amort-link-cost-' + lnk.id + '">' + formatter.format(lnk.cost_override) + '</td>' +
+                    '<td style="white-space:nowrap">' +
+                        '<button class="action-btn btn-secondary" style="padding:.2rem .5rem;font-size:.78rem" onclick="editAmortLink(' + lnk.id + ',' + amortId + ')">✎</button> ' +
+                        '<button class="action-btn" style="padding:.2rem .5rem;font-size:.78rem;background:var(--danger)" onclick="deleteAmortLink(' + lnk.id + ',' + amortId + ')">✕</button>' +
+                    '</td>';
+                ltbody.appendChild(tr);
+            });
+            tbl.appendChild(ltbody);
+            wrap.appendChild(tbl);
+        }
+
+        // Add-link form
+        var addWrap = document.createElement('div');
+        addWrap.className = 'amort-add-link';
+
+        var addLabel = document.createElement('strong');
+        addLabel.style.cssText = 'font-size:.82rem;color:var(--text-gray)';
+        addLabel.textContent = '+ Añadir fuente de coste:';
+
+        var costInput = document.createElement('input');
+        costInput.id = 'amort-new-cost-' + amortId;
+        costInput.type = 'number'; costInput.step = '0.01'; costInput.placeholder = 'Importe €';
+        costInput.style.cssText = 'width:100px;padding:.3rem .5rem;background:var(--bg-card);border:1px solid var(--border-color);border-radius:6px;color:var(--text-light)';
+
+        var noteInput = document.createElement('input');
+        noteInput.id = 'amort-new-note-' + amortId;
+        noteInput.type = 'text'; noteInput.placeholder = 'Nota (ej: 1/3 del pack)';
+        noteInput.style.cssText = 'flex:1;padding:.3rem .5rem;background:var(--bg-card);border:1px solid var(--border-color);border-radius:6px;color:var(--text-light)';
+
+        var addBtn = document.createElement('button');
+        addBtn.className = 'btn-primary';
+        addBtn.style.cssText = 'padding:.3rem .8rem;font-size:.82rem';
+        addBtn.textContent = 'Añadir';
+        addBtn.addEventListener('click', function(){ addAmortLink(amortId); });
+
+        addWrap.appendChild(addLabel);
+        addWrap.appendChild(costInput);
+        addWrap.appendChild(noteInput);
+        addWrap.appendChild(addBtn);
+        wrap.appendChild(addWrap);
+
+        cell.appendChild(wrap);
+    } catch (e) {
+        while (cell.firstChild) cell.removeChild(cell.firstChild);
+        var errEl = document.createElement('span');
+        errEl.style.color = 'var(--danger)';
+        errEl.textContent = 'Error: ' + e.message;
+        cell.appendChild(errEl);
+    }
+}
+
+async function addAmortLink(amortId) {
+    const costEl = document.getElementById('amort-new-cost-' + amortId);
+    const noteEl = document.getElementById('amort-new-note-' + amortId);
+    const cost   = parseFloat(costEl ? costEl.value : 0);
+    if (!cost || cost <= 0) { alert('Introduce un importe válido'); return; }
+
+    const res = await fetch('/api/amortizations/' + amortId + '/purchases', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cost_override: cost, allocation_note: noteEl ? noteEl.value : '' })
+    });
+    if (res.ok) {
+        if (costEl) costEl.value = '';
+        if (noteEl) noteEl.value = '';
+        await refreshAmortRow(amortId);
+        await renderAmortDetail(amortId);
+    } else { alert('Error al añadir la fuente de coste'); }
+}
+
+async function editAmortLink(linkId, amortId) {
+    const newCostStr = prompt('Nuevo importe para esta fuente de coste (€):');
+    if (!newCostStr) return;
+    const newCost = parseFloat(newCostStr);
+    if (!newCost || newCost <= 0) { alert('Importe no válido'); return; }
+    const res = await fetch('/api/amortizations/purchases/' + linkId, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cost_override: newCost })
+    });
+    if (res.ok) {
+        await refreshAmortRow(amortId);
+        await renderAmortDetail(amortId);
+    }
+}
+
+async function deleteAmortLink(linkId, amortId) {
+    if (!confirm('¿Eliminar esta fuente de coste?')) return;
+    const res = await fetch('/api/amortizations/purchases/' + linkId, { method: 'DELETE' });
+    if (res.ok) {
+        await refreshAmortRow(amortId);
+        await renderAmortDetail(amortId);
+    }
+}
+
+async function refreshAmortRow(amortId) {
+    try {
+        const res  = await fetch('/api/amortizations');
+        const rows = await res.json();
+        const r    = rows.find(function(x){ return x.id === amortId; });
+        if (r) {
+            const cc = document.getElementById('amort-cost-' + r.id);
+            if (cc) cc.innerHTML = '<strong>' + formatter.format(r.purchase_price) + '</strong>';
+        }
+    } catch (e) { /* silently ignore */ }
 }

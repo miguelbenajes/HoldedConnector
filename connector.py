@@ -311,6 +311,41 @@ def init_db():
         )
     ''')
 
+    # ── amortization_purchases: many-to-many between amortizations and purchase sources
+    # Each row represents one purchase invoice (or item) linked to one amortization product.
+    # cost_override is the actual cost assigned to this product from that purchase —
+    # it can differ from the invoice price (pack splits, kit allocations, etc.)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS amortization_purchases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            amortization_id INTEGER NOT NULL,
+            purchase_id TEXT,              -- purchase_invoices.id (optional, from match)
+            purchase_item_id INTEGER,      -- purchase_items.id (optional, for item-level link)
+            cost_override REAL NOT NULL,   -- actual cost assigned (editable)
+            allocation_note TEXT,          -- e.g. "1/3 del pack de 3 unidades"
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (amortization_id) REFERENCES amortizations(id) ON DELETE CASCADE
+        )
+    ''')
+
+    # Migration: populate amortization_purchases from existing amortizations that
+    # were auto-detected from purchase matches (notes contain "Auto-detected from purchase <id>")
+    cursor.execute('''
+        INSERT OR IGNORE INTO amortization_purchases (amortization_id, purchase_id, cost_override, allocation_note)
+        SELECT
+            a.id,
+            CASE
+                WHEN a.notes LIKE 'Auto-detected from purchase %'
+                THEN TRIM(SUBSTR(a.notes, 27, INSTR(SUBSTR(a.notes,27),' ')-1))
+                ELSE NULL
+            END AS purchase_id,
+            a.purchase_price,
+            'Migrado automáticamente'
+        FROM amortizations a
+        WHERE a.id NOT IN (SELECT DISTINCT amortization_id FROM amortization_purchases)
+          AND a.purchase_price > 0
+    ''')
+
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_invoices_contact ON invoices(contact_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_invoices_date ON invoices(date)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_purchases_contact ON purchase_invoices(contact_id)')
@@ -1096,13 +1131,16 @@ def get_pending_matches() -> list:
         conn.close()
 
 
-def confirm_inventory_match(match_id: int, confirmed: bool, custom_price=None):
+def confirm_inventory_match(match_id: int, confirmed: bool, custom_price=None,
+                            allocation_note="", product_type=None):
     """
     Confirm or reject a pending inventory match.
-    If confirmed: add to amortizations (if not already there).
-    If custom_price is provided, it overrides the auto-detected matched_price.
-    If rejected: mark as rejected.
-    Returns dict with result.
+    If confirmed:
+      - Upsert into amortizations (creates or skips if product_id already there)
+      - Add a new row to amortization_purchases with cost_override
+      - Recalculate amortizations.purchase_price = SUM of all purchase links
+    custom_price: overrides auto-detected price for this specific purchase link
+    allocation_note: e.g. "1/3 del pack" — stored on the purchase link
     """
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
@@ -1118,30 +1156,163 @@ def confirm_inventory_match(match_id: int, confirmed: bool, custom_price=None):
             conn.commit()
             return {"ok": True, "action": "rejected"}
 
-        # Mark as confirmed
+        # Mark match as confirmed
         cursor.execute("UPDATE inventory_matches SET status='confirmed' WHERE id=?", (match_id,))
 
-        # Use custom price if provided, otherwise use auto-detected price
         final_price = float(custom_price) if custom_price and float(custom_price) > 0 else match['matched_price']
-        price_note = " (importe manual)" if custom_price and float(custom_price) != match['matched_price'] else ""
+        ptype = product_type or 'alquiler'
 
-        # Add to amortizations (skip if product already tracked)
+        # Upsert amortization — INSERT OR IGNORE so existing products are not overwritten
         cursor.execute('''
             INSERT OR IGNORE INTO amortizations
-                (product_id, product_name, purchase_price, purchase_date, notes)
-            VALUES (?, ?, ?, ?, ?)
+                (product_id, product_name, purchase_price, purchase_date, notes, product_type)
+            VALUES (?, ?, 0, ?, ?, ?)
         ''', (match['product_id'], match['product_name'],
-              final_price, match['matched_date'],
-              f"Auto-detected from purchase {match['purchase_id']} via {match['match_method']}{price_note}"))
-        added = cursor.rowcount > 0
+              match['matched_date'],
+              f"Vinculado desde inventory_matches via {match['match_method']}",
+              ptype))
+
+        # Retrieve the amortization id (whether just created or pre-existing)
+        cursor.execute("SELECT id FROM amortizations WHERE product_id=?", (match['product_id'],))
+        amort_row = cursor.fetchone()
+        if not amort_row:
+            conn.rollback()
+            return {"ok": False, "error": "Could not create or find amortization"}
+        amort_id = amort_row[0]
+
+        # Add the purchase link
+        note = allocation_note or f"Auto desde match #{match_id} ({match['match_method']})"
+        cursor.execute('''
+            INSERT INTO amortization_purchases
+                (amortization_id, purchase_id, purchase_item_id, cost_override, allocation_note)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (amort_id, match['purchase_id'], match['purchase_item_id'], final_price, note))
+
+        # Recalculate purchase_price
+        _recalc_purchase_price(cursor, amort_id)
+
         conn.commit()
-        return {"ok": True, "action": "confirmed", "added_to_amortizations": added,
-                "price_used": final_price}
+        return {"ok": True, "action": "confirmed",
+                "amortization_id": amort_id, "price_used": final_price}
     finally:
         conn.close()
 
 
 # ============= Amortization Functions =============
+
+def _recalc_purchase_price(cursor, amortization_id):
+    """Recompute amortizations.purchase_price = SUM(cost_override) from amortization_purchases."""
+    cursor.execute(
+        "SELECT COALESCE(SUM(cost_override), 0) FROM amortization_purchases WHERE amortization_id=?",
+        (amortization_id,)
+    )
+    total = cursor.fetchone()[0]
+    cursor.execute(
+        "UPDATE amortizations SET purchase_price=?, updated_at=datetime('now') WHERE id=?",
+        (total, amortization_id)
+    )
+
+
+def get_amortization_purchases(amortization_id):
+    """Return all purchase links for one amortization, with purchase invoice details."""
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT
+                ap.id,
+                ap.amortization_id,
+                ap.purchase_id,
+                ap.purchase_item_id,
+                ap.cost_override,
+                ap.allocation_note,
+                ap.created_at,
+                pi.contact_name  AS supplier,
+                pi.desc          AS invoice_desc,
+                pi.date          AS invoice_date,
+                pi.desc          AS doc_number,
+                pit.name         AS item_name,
+                pit.price        AS item_unit_price,
+                pit.units        AS item_units
+            FROM amortization_purchases ap
+            LEFT JOIN purchase_invoices pi  ON pi.id  = ap.purchase_id
+            LEFT JOIN purchase_items    pit ON pit.id = ap.purchase_item_id
+            WHERE ap.amortization_id = ?
+            ORDER BY ap.created_at
+        ''', (amortization_id,))
+        return [dict(r) for r in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def add_amortization_purchase(amortization_id, cost_override, allocation_note="",
+                               purchase_id=None, purchase_item_id=None):
+    """Link a purchase invoice/item to an amortization with a specific cost."""
+    conn = sqlite3.connect(DB_NAME)
+    try:
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO amortization_purchases
+                (amortization_id, purchase_id, purchase_item_id, cost_override, allocation_note)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (amortization_id, purchase_id, purchase_item_id,
+              float(cost_override), allocation_note))
+        new_id = cursor.lastrowid
+        _recalc_purchase_price(cursor, amortization_id)
+        conn.commit()
+        return new_id
+    finally:
+        conn.close()
+
+
+def update_amortization_purchase(purchase_link_id, cost_override=None, allocation_note=None,
+                                  purchase_id=None, purchase_item_id=None):
+    """Edit a purchase link (cost or note). Recalculates parent purchase_price."""
+    conn = sqlite3.connect(DB_NAME)
+    try:
+        cursor = conn.cursor()
+        fields, values = [], []
+        if cost_override is not None:
+            fields.append("cost_override=?"); values.append(float(cost_override))
+        if allocation_note is not None:
+            fields.append("allocation_note=?"); values.append(allocation_note)
+        if purchase_id is not None:
+            fields.append("purchase_id=?"); values.append(purchase_id)
+        if purchase_item_id is not None:
+            fields.append("purchase_item_id=?"); values.append(purchase_item_id)
+        if not fields:
+            return False
+        values.append(purchase_link_id)
+        cursor.execute(f"UPDATE amortization_purchases SET {', '.join(fields)} WHERE id=?", values)
+        # Get parent amortization_id to recalc
+        cursor.execute("SELECT amortization_id FROM amortization_purchases WHERE id=?", (purchase_link_id,))
+        row = cursor.fetchone()
+        if row:
+            _recalc_purchase_price(cursor, row[0])
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def delete_amortization_purchase(purchase_link_id):
+    """Remove a purchase link and recalculate parent purchase_price."""
+    conn = sqlite3.connect(DB_NAME)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT amortization_id FROM amortization_purchases WHERE id=?", (purchase_link_id,))
+        row = cursor.fetchone()
+        if not row:
+            return False
+        amort_id = row[0]
+        cursor.execute("DELETE FROM amortization_purchases WHERE id=?", (purchase_link_id,))
+        _recalc_purchase_price(cursor, amort_id)
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
 
 def get_product_type_rules() -> list:
     """Return all product type fiscal rules."""
