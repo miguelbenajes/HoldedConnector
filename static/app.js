@@ -1571,6 +1571,14 @@ let _amortProducts = [];   // cached product list for select dropdown
 let _amortChartInstance = null;  // Chart.js instance (destroy before re-render)
 let _amortChartVisible = false;
 
+// Fiscal type metadata (mirrors product_type_rules table)
+const PRODUCT_TYPES = {
+    alquiler: { label: '🔄 Alquiler',        color: '#3b82f6', irpf: 19, hint: 'Equipamiento cedido en uso. Retención IRPF 19% en facturas emitidas.' },
+    venta:    { label: '🏷️ Venta',           color: '#10b981', irpf: 0,  hint: 'Venta directa. Sin IRPF. Cada compra debe correlacionarse con una venta.' },
+    servicio: { label: '👤 Servicio / Fee',   color: '#f59e0b', irpf: 15, hint: 'Honorarios profesionales. Retención IRPF 15% en facturas emitidas.' },
+    gasto:    { label: '📦 Gasto / Suplido',  color: '#94a3b8', irpf: 0,  hint: 'Gasto deducible o suplido. No genera ingreso directamente.' },
+};
+
 async function loadAmortizations() {
     try {
         const [dataRes, summaryRes] = await Promise.all([
@@ -1580,45 +1588,56 @@ async function loadAmortizations() {
         const rows = await dataRes.json();
         const summary = await summaryRes.json();
 
-        // Update summary cards
+        // Summary cards
         document.getElementById('amortTotalInvested').textContent = formatter.format(summary.total_invested || 0);
         document.getElementById('amortTotalRevenue').textContent = formatter.format(summary.total_revenue || 0);
         const profitEl = document.getElementById('amortTotalProfit');
         profitEl.textContent = formatter.format(summary.total_profit || 0);
         profitEl.style.color = (summary.total_profit >= 0) ? 'var(--primary)' : 'var(--danger)';
-
         const roiEl = document.getElementById('amortGlobalRoi');
         roiEl.textContent = `${summary.global_roi_pct || 0}%`;
         roiEl.style.color = (summary.global_roi_pct >= 0) ? 'var(--primary)' : 'var(--danger)';
 
         // Badges
-        const badgesEl = document.getElementById('amortBadges');
-        badgesEl.innerHTML = `
+        document.getElementById('amortBadges').innerHTML = `
             <span class="amort-badge badge-paid">✅ Amortizados: ${summary.amortized_count || 0}</span>
             <span class="amort-badge badge-pending">⏳ En curso: ${summary.in_progress_count || 0}</span>
-            <span class="amort-badge badge-draft">📦 Total productos: ${summary.total_products || 0}</span>
+            <span class="amort-badge badge-draft">📦 Total: ${summary.total_products || 0}</span>
         `;
 
-        // Render table
         const tbody = document.getElementById('amortBody');
         if (!rows.length) {
-            tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-gray);padding:2rem">Sin datos. Añade un producto para empezar a hacer seguimiento.</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="12" style="text-align:center;color:var(--text-gray);padding:2rem">Sin datos. Añade un producto para empezar.</td></tr>';
             document.getElementById('amortChartCard').style.display = 'none';
             return;
         }
 
         tbody.innerHTML = rows.map(r => {
-            const isAmort = r.status === 'AMORTIZADO';
             const profitColor = r.profit >= 0 ? 'var(--primary)' : 'var(--danger)';
-            const roiColor = r.roi_pct >= 0 ? 'var(--primary)' : 'var(--danger)';
-            const statusBadge = isAmort
+            const roiColor    = r.roi_pct >= 0 ? 'var(--primary)' : 'var(--danger)';
+            const statusBadge = r.status === 'AMORTIZADO'
                 ? '<span class="badge badge-paid">✅ AMORTIZADO</span>'
                 : '<span class="badge badge-pending">⏳ EN CURSO</span>';
-            // Safely encode name for onclick attribute
-            const safeName = r.product_name.replace(/'/g, "\\'");
+            const safeName    = r.product_name.replace(/'/g, "\\'");
+            const safeType    = r.product_type || 'alquiler';
+            const typeInfo    = PRODUCT_TYPES[safeType] || PRODUCT_TYPES.alquiler;
+            const typeBadge   = `<span class="badge" style="background:${typeInfo.color}22;color:${typeInfo.color};border:1px solid ${typeInfo.color}44;font-size:0.72rem">${typeInfo.label}</span>`;
+            const irpfBadge   = typeInfo.irpf > 0
+                ? `<span style="font-size:0.78rem;color:var(--warning);font-weight:600">${typeInfo.irpf}%</span>`
+                : `<span style="font-size:0.78rem;color:var(--text-gray)">—</span>`;
+
+            // Inline type selector — saves immediately on change
+            const typeSelect = `<select onchange="updateAmortType(${r.id}, this.value)"
+                style="font-size:0.78rem;padding:0.2rem 0.4rem;background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:6px;color:var(--text-white);cursor:pointer">
+                ${Object.entries(PRODUCT_TYPES).map(([k, v]) =>
+                    `<option value="${k}" ${k === safeType ? 'selected' : ''}>${v.label}</option>`
+                ).join('')}
+            </select>`;
 
             return `<tr>
                 <td><strong>${escapeHtml(r.product_name)}</strong></td>
+                <td>${typeSelect}</td>
+                <td style="text-align:center">${irpfBadge}</td>
                 <td>${formatter.format(r.purchase_price)}</td>
                 <td>${escapeHtml(r.purchase_date)}</td>
                 <td>${formatter.format(r.total_revenue)}</td>
@@ -1628,42 +1647,53 @@ async function loadAmortizations() {
                 <td style="color:var(--text-gray);font-size:0.85rem">${escapeHtml(r.notes || '—')}</td>
                 <td>
                     <button class="action-btn btn-secondary" style="padding:0.3rem 0.6rem;font-size:0.8rem"
-                        onclick="openAmortHistory('${escapeHtml(r.product_id)}', '${safeName}', ${r.purchase_price}, ${r.total_revenue})">
+                        onclick="openAmortHistory('${escapeHtml(r.product_id)}','${safeName}',${r.purchase_price},${r.total_revenue})">
                         📋 Ver
                     </button>
                 </td>
-                <td>
+                <td style="white-space:nowrap">
                     <button class="action-btn btn-secondary" style="padding:0.3rem 0.6rem;font-size:0.8rem"
-                        onclick="openAmortizationModal(${r.id}, '${safeName}', ${r.purchase_price}, '${escapeHtml(r.purchase_date)}', '${escapeHtml(r.notes || '')}')">
+                        onclick="openAmortizationModal(${r.id},'${safeName}',${r.purchase_price},'${escapeHtml(r.purchase_date)}','${escapeHtml(r.notes || '')}','${safeType}')">
                         Editar
                     </button>
                     <button class="action-btn" style="padding:0.3rem 0.6rem;font-size:0.8rem;background:var(--danger);margin-left:4px"
-                        onclick="deleteAmortization(${r.id}, '${safeName}')">
-                        Eliminar
+                        onclick="deleteAmortization(${r.id},'${safeName}')">
+                        ✕
                     </button>
                 </td>
             </tr>`;
         }).join('');
 
-        // Re-render chart if it was visible
         if (_amortChartVisible) renderAmortChart(rows);
 
     } catch (e) {
         console.error('Error loading amortizations:', e);
         document.getElementById('amortBody').innerHTML =
-            `<tr><td colspan="9" style="text-align:center;color:var(--danger);padding:2rem">Error cargando datos: ${e.message}</td></tr>`;
+            `<tr><td colspan="12" style="text-align:center;color:var(--danger);padding:2rem">Error: ${e.message}</td></tr>`;
     }
 }
 
-async function openAmortizationModal(id = null, name = '', price = '', date = '', notes = '') {
-    // Load products into select if not cached
+// Inline type change — no modal needed
+async function updateAmortType(id, newType) {
+    try {
+        await fetch(`/api/amortizations/${id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ product_type: newType })
+        });
+        // Refresh IRPF badge without full reload
+        loadAmortizations();
+    } catch (e) {
+        alert(`Error guardando tipo: ${e.message}`);
+    }
+}
+
+async function openAmortizationModal(id = null, name = '', price = '', date = '', notes = '', productType = 'alquiler') {
     if (!_amortProducts.length) {
         try {
             const res = await fetch('/api/entities/products');
             _amortProducts = await res.json();
-        } catch (e) {
-            _amortProducts = [];
-        }
+        } catch (e) { _amortProducts = []; }
     }
 
     const select = document.getElementById('amortProductSelect');
@@ -1677,11 +1707,15 @@ async function openAmortizationModal(id = null, name = '', price = '', date = ''
     document.getElementById('amortNotes').value = notes || '';
     document.getElementById('amortModalError').textContent = '';
 
-    // In edit mode, select the right product (disabled — can't change product in edit)
+    // Set product type selector + hint
+    const typeEl = document.getElementById('amortProductType');
+    typeEl.value = productType || 'alquiler';
+    _updateAmortTypeHint(typeEl.value);
+    typeEl.onchange = () => _updateAmortTypeHint(typeEl.value);
+
     if (id) {
         document.getElementById('amortModalTitle').textContent = `Editar: ${name}`;
         select.disabled = true;
-        // select the matching option
         const opt = [...select.options].find(o => o.text === name);
         if (opt) opt.selected = true;
     } else {
@@ -1692,49 +1726,43 @@ async function openAmortizationModal(id = null, name = '', price = '', date = ''
     document.getElementById('amortModal').style.display = 'flex';
 }
 
+function _updateAmortTypeHint(typeKey) {
+    const hint = document.getElementById('amortTypeHint');
+    if (hint) hint.textContent = PRODUCT_TYPES[typeKey]?.hint || '';
+}
+
 function closeAmortizationModal() {
     document.getElementById('amortModal').style.display = 'none';
     document.getElementById('amortProductSelect').disabled = false;
 }
 
 async function saveAmortization() {
-    const id = document.getElementById('amortEditId').value;
-    const select = document.getElementById('amortProductSelect');
-    const productId = select.value;
+    const id          = document.getElementById('amortEditId').value;
+    const select      = document.getElementById('amortProductSelect');
+    const productId   = select.value;
     const productName = select.options[select.selectedIndex]?.dataset?.name || select.options[select.selectedIndex]?.text || '';
-    const price = parseFloat(document.getElementById('amortPurchasePrice').value);
-    const date = document.getElementById('amortPurchaseDate').value;
-    const notes = document.getElementById('amortNotes').value.trim();
-    const errorEl = document.getElementById('amortModalError');
+    const price       = parseFloat(document.getElementById('amortPurchasePrice').value);
+    const date        = document.getElementById('amortPurchaseDate').value;
+    const notes       = document.getElementById('amortNotes').value.trim();
+    const productType = document.getElementById('amortProductType').value;
+    const errorEl     = document.getElementById('amortModalError');
 
     errorEl.textContent = '';
-
-    if (!productId) { errorEl.textContent = 'Selecciona un producto.'; return; }
+    if (!productId)            { errorEl.textContent = 'Selecciona un producto.'; return; }
     if (isNaN(price) || price <= 0) { errorEl.textContent = 'Precio de compra inválido.'; return; }
-    if (!date) { errorEl.textContent = 'Fecha de compra requerida.'; return; }
+    if (!date)                 { errorEl.textContent = 'Fecha de compra requerida.'; return; }
 
     try {
-        let res, data;
-        if (id) {
-            // Edit mode
-            res = await fetch(`/api/amortizations/${id}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ purchase_price: price, purchase_date: date, notes })
-            });
-        } else {
-            // Create mode
-            res = await fetch('/api/amortizations', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ product_id: productId, product_name: productName, purchase_price: price, purchase_date: date, notes })
-            });
-        }
-        data = await res.json();
-        if (!res.ok) {
-            errorEl.textContent = data.detail || 'Error al guardar';
-            return;
-        }
+        const body = id
+            ? { purchase_price: price, purchase_date: date, notes, product_type: productType }
+            : { product_id: productId, product_name: productName, purchase_price: price, purchase_date: date, notes, product_type: productType };
+        const res  = await fetch(id ? `/api/amortizations/${id}` : '/api/amortizations', {
+            method: id ? 'PUT' : 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        const data = await res.json();
+        if (!res.ok) { errorEl.textContent = data.detail || 'Error al guardar'; return; }
         closeAmortizationModal();
         loadAmortizations();
     } catch (e) {

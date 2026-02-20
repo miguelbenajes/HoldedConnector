@@ -243,11 +243,41 @@ def init_db():
             purchase_price REAL NOT NULL,
             purchase_date TEXT NOT NULL,
             notes TEXT,
+            product_type TEXT NOT NULL DEFAULT 'alquiler',
             created_at TEXT DEFAULT (datetime('now')),
             updated_at TEXT DEFAULT (datetime('now')),
             UNIQUE(product_id)
         )
     ''')
+
+    # Add product_type column to existing amortizations table if missing (migration)
+    try:
+        cursor.execute("ALTER TABLE amortizations ADD COLUMN product_type TEXT NOT NULL DEFAULT 'alquiler'")
+    except Exception:
+        pass  # Column already exists
+
+    # Fiscal rules per product type — drives IRPF logic across the whole app
+    # irpf_pct: retention applied on invoices (15% services, 19% rentals, 0% sales/expenses)
+    # is_expense: True for purchase-side concepts (gastos / suplidos)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS product_type_rules (
+            type_key TEXT PRIMARY KEY,
+            label TEXT NOT NULL,
+            irpf_pct REAL NOT NULL DEFAULT 0,
+            is_expense INTEGER NOT NULL DEFAULT 0,
+            description TEXT
+        )
+    ''')
+    # Seed rules (INSERT OR IGNORE — never overwrites user edits)
+    cursor.executemany('''
+        INSERT OR IGNORE INTO product_type_rules (type_key, label, irpf_pct, is_expense, description)
+        VALUES (?, ?, ?, ?, ?)
+    ''', [
+        ('alquiler',  'Alquiler',           19.0, 0, 'Equipamiento cedido en uso. IRPF retención 19%.'),
+        ('venta',     'Venta',               0.0, 0, 'Venta de producto. Sin retención IRPF. Match 1-to-1 compra→venta.'),
+        ('servicio',  'Servicio / Fee',     15.0, 0, 'Honorarios profesionales. IRPF retención 15%.'),
+        ('gasto',     'Gasto',               0.0, 1, 'Gasto deducible / suplido. No genera ingreso directo.'),
+    ])
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS purchase_analysis (
@@ -1113,10 +1143,23 @@ def confirm_inventory_match(match_id: int, confirmed: bool, custom_price=None):
 
 # ============= Amortization Functions =============
 
+def get_product_type_rules() -> list:
+    """Return all product type fiscal rules."""
+    conn = sqlite3.connect(DB_NAME)
+    conn.row_factory = sqlite3.Row
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM product_type_rules ORDER BY is_expense, irpf_pct DESC")
+        return [dict(r) for r in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
 def get_amortizations():
     """
     Return all amortizations with real-time revenue calculation from invoice_items.
-    Revenue = SUM of subtotals in invoices where product_id matches.
+    Revenue = SUM of (units * price) per invoice_item where product_id matches.
+    Also returns product_type and its fiscal rule (irpf_pct).
     """
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
@@ -1130,6 +1173,7 @@ def get_amortizations():
                 a.purchase_price,
                 a.purchase_date,
                 a.notes,
+                a.product_type,
                 a.created_at,
                 COALESCE(SUM(
                     CASE
@@ -1137,9 +1181,13 @@ def get_amortizations():
                         THEN ii.subtotal
                         ELSE COALESCE(ii.units, 0) * COALESCE(ii.price, 0)
                     END
-                ), 0.0) AS total_revenue
+                ), 0.0) AS total_revenue,
+                ptr.label        AS type_label,
+                ptr.irpf_pct     AS irpf_pct,
+                ptr.is_expense   AS is_expense
             FROM amortizations a
-            LEFT JOIN invoice_items ii ON ii.product_id = a.product_id
+            LEFT JOIN invoice_items ii  ON ii.product_id  = a.product_id
+            LEFT JOIN product_type_rules ptr ON ptr.type_key = a.product_type
             GROUP BY a.id
             ORDER BY a.purchase_date DESC
         ''')
@@ -1155,15 +1203,18 @@ def get_amortizations():
     finally:
         conn.close()
 
-def add_amortization(product_id, product_name, purchase_price, purchase_date, notes=""):
+
+def add_amortization(product_id, product_name, purchase_price, purchase_date,
+                     notes="", product_type="alquiler"):
     """Add a product to amortization tracking. Returns new id or None if duplicate."""
     conn = sqlite3.connect(DB_NAME)
     try:
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO amortizations (product_id, product_name, purchase_price, purchase_date, notes)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (product_id, product_name, purchase_price, purchase_date, notes))
+            INSERT INTO amortizations
+                (product_id, product_name, purchase_price, purchase_date, notes, product_type)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (product_id, product_name, purchase_price, purchase_date, notes, product_type))
         conn.commit()
         return cursor.lastrowid
     except sqlite3.IntegrityError:
@@ -1171,20 +1222,30 @@ def add_amortization(product_id, product_name, purchase_price, purchase_date, no
     finally:
         conn.close()
 
-def update_amortization(amort_id, purchase_price=None, purchase_date=None, notes=None):
-    """Update purchase_price, purchase_date or notes for an amortization entry."""
+
+def update_amortization(amort_id, purchase_price=None, purchase_date=None,
+                        notes=None, product_type=None):
+    """Update fields for an amortization entry. Pass only the fields to change."""
     conn = sqlite3.connect(DB_NAME)
     try:
         cursor = conn.cursor()
+        fields = []
+        values = []
         if purchase_price is not None:
-            cursor.execute("UPDATE amortizations SET purchase_price=?, updated_at=datetime('now') WHERE id=?",
-                           (purchase_price, amort_id))
+            fields.append("purchase_price=?"); values.append(purchase_price)
         if purchase_date is not None:
-            cursor.execute("UPDATE amortizations SET purchase_date=?, updated_at=datetime('now') WHERE id=?",
-                           (purchase_date, amort_id))
+            fields.append("purchase_date=?"); values.append(purchase_date)
         if notes is not None:
-            cursor.execute("UPDATE amortizations SET notes=?, updated_at=datetime('now') WHERE id=?",
-                           (notes, amort_id))
+            fields.append("notes=?"); values.append(notes)
+        if product_type is not None:
+            fields.append("product_type=?"); values.append(product_type)
+        if not fields:
+            return False
+        fields.append("updated_at=datetime('now')")
+        values.append(amort_id)
+        cursor.execute(
+            f"UPDATE amortizations SET {', '.join(fields)} WHERE id=?", values
+        )
         conn.commit()
         return cursor.rowcount > 0
     finally:

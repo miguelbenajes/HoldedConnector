@@ -195,6 +195,8 @@
                         <thead>
                             <tr>
                                 <th>Producto</th>
+                                <th>Tipo</th>
+                                <th>IRPF</th>
                                 <th>Precio Compra</th>
                                 <th>Fecha Compra</th>
                                 <th>Revenue Total</th>
@@ -202,12 +204,12 @@
                                 <th>ROI %</th>
                                 <th>Estado</th>
                                 <th>Notas</th>
-                                <th>Alquileres</th>
+                                <th>Historial</th>
                                 <th>Acciones</th>
                             </tr>
                         </thead>
                         <tbody id="amortBody">
-                            <tr><td colspan="10" style="text-align:center;color:var(--text-gray);padding:2rem">Cargando...</td></tr>
+                            <tr><td colspan="12" style="text-align:center;color:var(--text-gray);padding:2rem">Cargando...</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -344,6 +346,15 @@
                 <select id="amortProductSelect" style="width:100%;padding:0.8rem;background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:8px;color:var(--text-white);margin-bottom:1rem">
                     <option value="">Cargando productos...</option>
                 </select>
+
+                <label class="amort-label">Tipo de concepto</label>
+                <select id="amortProductType" style="width:100%;padding:0.8rem;background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:8px;color:var(--text-white);margin-bottom:0.4rem">
+                    <option value="alquiler">🔄 Alquiler — IRPF 19%</option>
+                    <option value="venta">🏷️ Venta — Sin IRPF (1 compra → 1 venta)</option>
+                    <option value="servicio">👤 Servicio / Fee — IRPF 15%</option>
+                    <option value="gasto">📦 Gasto / Suplido — No genera ingreso</option>
+                </select>
+                <p id="amortTypeHint" style="font-size:0.8rem;color:var(--text-gray);margin-bottom:1rem"></p>
 
                 <label class="amort-label">Precio de compra (€)</label>
                 <input type="number" id="amortPurchasePrice" step="0.01" min="0" placeholder="Ej: 2500.00"

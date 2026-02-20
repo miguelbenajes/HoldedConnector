@@ -753,7 +753,7 @@ async def list_files(directory: str = "uploads", limit: int = 20):
 
 @app.get("/api/amortizations")
 def get_amortizations():
-    """Return all amortization entries with calculated revenue/profit/ROI."""
+    """Return all amortization entries with calculated revenue/profit/ROI + fiscal type."""
     return connector.get_amortizations()
 
 @app.get("/api/amortizations/summary")
@@ -761,18 +761,25 @@ def get_amortizations_summary():
     """Global summary: total invested, recovered, global ROI."""
     return connector.get_amortization_summary()
 
+@app.get("/api/amortizations/types")
+def get_product_types():
+    """Return all product type fiscal rules (alquiler, venta, servicio, gasto)."""
+    return connector.get_product_type_rules()
+
 class AmortizationCreate(BaseModel):
     product_id: str
     product_name: str
     purchase_price: float
-    purchase_date: str       # YYYY-MM-DD
+    purchase_date: str
     notes: Optional[str] = ""
+    product_type: Optional[str] = "alquiler"
 
 @app.post("/api/amortizations")
 def create_amortization(body: AmortizationCreate):
     new_id = connector.add_amortization(
         body.product_id, body.product_name,
-        body.purchase_price, body.purchase_date, body.notes or ""
+        body.purchase_price, body.purchase_date,
+        body.notes or "", body.product_type or "alquiler"
     )
     if new_id is None:
         from fastapi import HTTPException
@@ -783,11 +790,13 @@ class AmortizationUpdate(BaseModel):
     purchase_price: Optional[float] = None
     purchase_date: Optional[str] = None
     notes: Optional[str] = None
+    product_type: Optional[str] = None
 
 @app.put("/api/amortizations/{amort_id}")
 def update_amortization(amort_id: int, body: AmortizationUpdate):
     ok = connector.update_amortization(
-        amort_id, body.purchase_price, body.purchase_date, body.notes
+        amort_id, body.purchase_price, body.purchase_date,
+        body.notes, body.product_type
     )
     if not ok:
         from fastapi import HTTPException
