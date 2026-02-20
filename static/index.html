@@ -68,9 +68,7 @@
                 <header>
                     <h1>Dashboard Summary</h1>
                     <div class="filter-controls">
-                        <input type="date" id="startDate">
-                        <input type="date" id="endDate">
-                        <button class="sync-btn" id="filterBtn">Apply Range</button>
+                        <div id="overviewDatePicker" class="hdate-picker"></div>
                         <button class="sync-btn" id="syncBtn">Sync Now</button>
                         <button class="action-btn btn-secondary" id="exportExcelBtn">Export Excel</button>
                     </div>
@@ -128,10 +126,7 @@
                 <header>
                     <h1 id="entityViewTitle">Entity Details</h1>
                     <div class="filter-controls">
-                        <div class="date-filter-group" id="entityDateFilters">
-                            <input type="date" id="entityStartDate">
-                            <input type="date" id="entityEndDate">
-                        </div>
+                        <div id="entityDatePicker" class="hdate-picker"></div>
                         <input type="text" id="entitySearch" placeholder="Search...">
                         <button class="sync-btn" onclick="showView('overview')">Back to Dashboard</button>
                     </div>
@@ -633,6 +628,7 @@
         <button onclick="dismissInstallBanner()" class="pwa-dismiss">&times;</button>
     </div>
 
+    <script src="/static/hdate.js"></script>
     <script src="/static/app.js"></script>
     <script>
         // Register Service Worker

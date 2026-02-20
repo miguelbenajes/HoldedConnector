@@ -204,17 +204,22 @@ async function fetchRecentActivity(start = null, end = null) {
     }
 }
 
-document.getElementById('filterBtn').addEventListener('click', () => {
-    const startStr = document.getElementById('startDate').value;
-    const endStr = document.getElementById('endDate').value;
-    if (startStr && endStr) {
-        const start = Math.floor(new Date(startStr).getTime() / 1000);
-        const end = Math.floor(new Date(endStr).getTime() / 1000);
+// ── Overview date picker ─────────────────────────────────────────────────────
+var overviewDatePicker = null;
+(function initOverviewPicker() {
+    if (typeof HDatePicker === 'undefined') {
+        console.warn('HDatePicker not loaded yet — deferring');
+        window.addEventListener('load', initOverviewPicker);
+        return;
+    }
+    overviewDatePicker = new HDatePicker('overviewDatePicker', function(range) {
+        var start = Math.floor(range.start.getTime() / 1000);
+        var end   = Math.floor(range.end.getTime()   / 1000);
         fetchStats(start, end);
         renderCharts(start, end);
         fetchRecentActivity(start, end);
-    }
-});
+    });
+})();
 
 document.getElementById('syncBtn').addEventListener('click', async () => {
     const btn = document.getElementById('syncBtn');
@@ -300,9 +305,10 @@ async function loadEntityData(entity) {
         'estimates': 'Estimates (Presupuestos)'
     };
 
-    const dateFilters = document.getElementById('entityDateFilters');
+    // Show/hide date picker based on entity type
+    const datePickerEl = document.getElementById('entityDatePicker');
     const isFinancial = ['invoices', 'purchases', 'estimates'].includes(entity);
-    dateFilters.classList.toggle('active', isFinancial);
+    if (datePickerEl) datePickerEl.style.visibility = isFinancial ? 'visible' : 'hidden';
 
     document.getElementById('entityViewTitle').textContent = titleMap[entity] || 'Entity Details';
     const thead = document.getElementById('entityThead');
@@ -327,17 +333,36 @@ function renderEntityTable(entity) {
     const thead = document.getElementById('entityThead');
     const tbody = document.getElementById('entityTbody');
     const searchTerm = document.getElementById('entitySearch').value.toLowerCase();
-    const startDate = document.getElementById('entityStartDate').value;
-    const endDate = document.getElementById('entityEndDate').value;
+    // Use HDatePicker range when available, otherwise no date filter
+    const startDate = entityDateRange ? entityDateRange.start : null;
+    const endDate   = entityDateRange ? entityDateRange.end   : null;
 
     if (!currentEntityData || currentEntityData.length === 0) {
         tbody.innerHTML = '<tr><td colspan="100" style="text-align:center">No records found.</td></tr>';
         return;
     }
 
-    const keys = Object.keys(currentEntityData[0]);
+    const allKeys = Object.keys(currentEntityData[0]);
     const showPdf = ['invoices', 'estimates', 'purchases'].includes(entity);
     const showActions = ['invoices', 'estimates', 'purchases', 'contacts', 'products'].includes(entity);
+
+    // ── Feature 1+2: Column visibility with localStorage persistence ──────────
+    // Default: hide fields ending in _id (except 'id' itself stays hidden too)
+    const DEFAULT_HIDDEN = new Set(['id', ...allKeys.filter(k => k !== 'id' && k.endsWith('_id'))]);
+    const STORAGE_KEY = `col_config_${entity}`;
+    let colConfig = null;
+    try { colConfig = JSON.parse(localStorage.getItem(STORAGE_KEY)); } catch(e) {}
+    // colConfig = { visible: [...], order: [...] } | null
+    // If no saved config, use all keys minus defaults hidden
+    let keys;
+    if (colConfig && colConfig.order && colConfig.visible) {
+        keys = colConfig.order.filter(k => colConfig.visible.includes(k));
+    } else {
+        keys = allKeys.filter(k => !DEFAULT_HIDDEN.has(k));
+    }
+    function saveColConfig() {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ visible: keys, order: keys, allKeys: allKeys }));
+    }
 
     // Holded direct-edit URLs per entity type
     const holdedUrl = (entity, id) => {
@@ -351,12 +376,31 @@ function renderEntityTable(entity) {
         return map[entity] || null;
     };
 
-    // Initial Header Render or Update
-    thead.innerHTML = `<tr>${keys.map(k => {
-        const isCurrent = currentSort.column === k;
-        const sortClass = isCurrent ? `sort-${currentSort.direction}` : '';
-        return `<th class="${sortClass}" onclick="handleSort('${entity}', '${k}')">${k.replace(/_/g, ' ').toUpperCase()}</th>`;
-    }).join('')}${showActions ? '<th>ACTIONS</th>' : ''}</tr>`;
+    // ── Header render with right-click column configurator ───────────────────
+    while (thead.firstChild) thead.removeChild(thead.firstChild);
+    const headerRow = document.createElement('tr');
+    keys.forEach(function(k) {
+        const th = document.createElement('th');
+        th.className = currentSort.column === k ? `sort-${currentSort.direction}` : '';
+        th.textContent = k.replace(/_/g, ' ').toUpperCase();
+        th.style.cursor = 'pointer';
+        th.addEventListener('click', function(){ handleSort(entity, k); });
+        th.addEventListener('contextmenu', function(e){
+            e.preventDefault();
+            openColMenu(e, entity, allKeys, keys, DEFAULT_HIDDEN, function(newKeys){
+                keys = newKeys;
+                saveColConfig();
+                renderEntityTable(entity);
+            });
+        });
+        headerRow.appendChild(th);
+    });
+    if (showActions) {
+        const thA = document.createElement('th');
+        thA.textContent = 'ACTIONS';
+        headerRow.appendChild(thA);
+    }
+    thead.appendChild(headerRow);
 
     // Filter Data
     let filteredData = currentEntityData.filter(row => {
@@ -366,9 +410,9 @@ function renderEntityTable(entity) {
 
         // Date filter (if applicable and set)
         if (startDate && endDate && row.date) {
-            const rowDate = row.date; // already unix epoch
-            const startEpoch = new Date(startDate).getTime() / 1000;
-            const endEpoch = new Date(endDate).getTime() / 1000 + 86399; // End of day
+            const rowDate = row.date; // already unix epoch (seconds)
+            const startEpoch = Math.floor(startDate.getTime() / 1000);
+            const endEpoch   = Math.floor(endDate.getTime()   / 1000);
             if (rowDate < startEpoch || rowDate > endEpoch) return false;
         }
 
@@ -464,15 +508,21 @@ document.getElementById('entitySearch').addEventListener('input', () => {
     if (currentView !== 'overview') renderEntityTable(currentView);
 });
 
-document.getElementById('entityStartDate').addEventListener('change', () => {
-    const currentView = document.querySelector('.nav-item.active').getAttribute('data-view');
-    renderEntityTable(currentView);
-});
-
-document.getElementById('entityEndDate').addEventListener('change', () => {
-    const currentView = document.querySelector('.nav-item.active').getAttribute('data-view');
-    renderEntityTable(currentView);
-});
+// ── Entity date picker ───────────────────────────────────────────────────────
+var entityDateRange = null; // { start: Date, end: Date } | null
+var entityDatePicker = null;
+(function initEntityPicker() {
+    if (typeof HDatePicker === 'undefined') {
+        window.addEventListener('load', initEntityPicker);
+        return;
+    }
+    entityDatePicker = new HDatePicker('entityDatePicker', function(range) {
+        entityDateRange = range;
+        var currentView = (document.querySelector('.nav-item.active') || {}).getAttribute &&
+                          document.querySelector('.nav-item.active').getAttribute('data-view');
+        if (currentView && currentView !== 'overview') renderEntityTable(currentView);
+    });
+})();
 
 async function openDocumentDetails(type, id) {
     console.log(`Opening details for ${type} ID: ${id}`);
@@ -2272,6 +2322,75 @@ async function confirmMatch(matchId, confirmed, customPrice = null) {
         alert(`Error: ${e.message}`);
     }
 }
+
+// ── Column configurator context menu (Feature 2) ─────────────────────────────
+var _colMenuEl = null;
+function openColMenu(e, entity, allKeys, currentKeys, defaultHidden, onUpdate) {
+    // Remove any existing menu
+    if (_colMenuEl && _colMenuEl.parentNode) _colMenuEl.parentNode.removeChild(_colMenuEl);
+
+    const menu = document.createElement('div');
+    menu.className = 'col-config-menu';
+    menu.style.cssText = 'position:fixed;z-index:99999;left:'+e.clientX+'px;top:'+e.clientY+'px';
+    _colMenuEl = menu;
+
+    // Title
+    const title = document.createElement('div');
+    title.className = 'col-config-title';
+    title.textContent = 'Columnas visibles';
+    menu.appendChild(title);
+
+    // Checkboxes
+    const visibleSet = new Set(currentKeys);
+    allKeys.forEach(function(k) {
+        const row = document.createElement('label');
+        row.className = 'col-config-row';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = visibleSet.has(k);
+        cb.dataset.key = k;
+        const lbl = document.createElement('span');
+        lbl.textContent = k.replace(/_/g, ' ');
+        if (defaultHidden.has(k)) lbl.style.opacity = '.5';
+        row.appendChild(cb); row.appendChild(lbl);
+        menu.appendChild(row);
+    });
+
+    // Reset button
+    const resetBtn = document.createElement('div');
+    resetBtn.className = 'col-config-reset';
+    resetBtn.textContent = 'Restablecer por defecto';
+    resetBtn.addEventListener('click', function() {
+        localStorage.removeItem('col_config_'+entity);
+        closeMenu();
+        onUpdate(allKeys.filter(function(k){ return !defaultHidden.has(k); }));
+    });
+    menu.appendChild(resetBtn);
+
+    // Apply on checkbox change
+    menu.addEventListener('change', function() {
+        var newKeys = allKeys.filter(function(k){
+            var cb = menu.querySelector('[data-key="'+k+'"]');
+            return cb && cb.checked;
+        });
+        if (newKeys.length === 0) return; // prevent all hidden
+        closeMenu();
+        onUpdate(newKeys);
+    });
+
+    document.body.appendChild(menu);
+
+    // Close on outside click
+    function closeMenu() {
+        if (menu.parentNode) menu.parentNode.removeChild(menu);
+        document.removeEventListener('click', outsideClick);
+    }
+    function outsideClick(ev) {
+        if (!menu.contains(ev.target)) closeMenu();
+    }
+    setTimeout(function(){ document.addEventListener('click', outsideClick); }, 10);
+}
+
 
 // ── Backup view ───────────────────────────────────────────────────────────────
 
