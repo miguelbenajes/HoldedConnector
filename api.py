@@ -859,6 +859,136 @@ def get_analyzed_invoices(limit: int = 50, offset: int = 0, category: str = None
     return connector.get_analyzed_invoices(limit=limit, offset=offset, category=category)
 
 
+# ── Backup endpoints ──────────────────────────────────────────────────────────
+
+@app.get("/api/backup/db")
+def backup_database():
+    """Download the raw SQLite database file (holded.db)."""
+    import os
+    db_path = os.path.abspath("holded.db")
+    if not os.path.exists(db_path):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Database file not found")
+    filename = f"holded_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+    return FileResponse(
+        path=db_path,
+        filename=filename,
+        media_type="application/octet-stream",
+    )
+
+@app.get("/api/backup/data")
+def backup_data_json():
+    """Export key tables as a single JSON file for portability."""
+    import json
+    tables = [
+        "invoices", "purchase_invoices", "estimates", "contacts",
+        "products", "payments", "projects", "amortizations",
+        "purchase_analysis", "inventory_matches", "product_type_rules",
+        "ai_favorites", "settings",
+    ]
+    export: dict = {"exported_at": datetime.now().isoformat(), "tables": {}}
+    conn = sqlite3.connect(connector.DB_NAME)
+    try:
+        for tbl in tables:
+            try:
+                cur = conn.execute(f"SELECT * FROM {tbl}")
+                cols = [d[0] for d in cur.description]
+                export["tables"][tbl] = [dict(zip(cols, row)) for row in cur.fetchall()]
+            except Exception:
+                export["tables"][tbl] = []  # table may not exist yet
+    finally:
+        conn.close()
+
+    body = json.dumps(export, ensure_ascii=False, default=str, indent=2)
+    filename = f"holded_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    return Response(
+        content=body,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+@app.get("/api/backup/code")
+def backup_code_zip():
+    """Export the current codebase as a zip archive via git archive."""
+    import subprocess, os
+    project_dir = os.path.dirname(os.path.abspath(__file__))
+    filename = f"holded_code_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+    try:
+        result = subprocess.run(
+            ["git", "archive", "--format=zip", "HEAD"],
+            capture_output=True,
+            cwd=project_dir,
+        )
+        if result.returncode != 0:
+            # fallback: zip the directory manually (exclude .db, .env, __pycache__)
+            import zipfile, io
+            buf = io.BytesIO()
+            skip_exts = {".db", ".pyc", ".pyo", ".log"}
+            skip_dirs = {"__pycache__", ".git", "uploads", "reports", ".env"}
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for root, dirs, files in os.walk(project_dir):
+                    dirs[:] = [d for d in dirs if d not in skip_dirs]
+                    for fname in files:
+                        fpath = os.path.join(root, fname)
+                        if any(fname.endswith(ext) for ext in skip_exts):
+                            continue
+                        arcname = os.path.relpath(fpath, project_dir)
+                        zf.write(fpath, arcname)
+            buf.seek(0)
+            return Response(
+                content=buf.read(),
+                media_type="application/zip",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+        return Response(
+            content=result.stdout,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except Exception as exc:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=str(exc))
+
+@app.get("/api/backup/status")
+def backup_status():
+    """Return metadata about what will be backed up (sizes, record counts, last commit)."""
+    import os, subprocess
+    db_path = os.path.abspath("holded.db")
+    db_size = os.path.getsize(db_path) if os.path.exists(db_path) else 0
+
+    # record counts
+    counts: dict = {}
+    conn = sqlite3.connect(connector.DB_NAME)
+    try:
+        for tbl in ["invoices", "purchase_invoices", "contacts", "products",
+                    "amortizations", "purchase_analysis", "inventory_matches"]:
+            try:
+                counts[tbl] = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+            except Exception:
+                counts[tbl] = 0
+    finally:
+        conn.close()
+
+    # last git commit
+    try:
+        project_dir = os.path.dirname(os.path.abspath(__file__))
+        git_log = subprocess.run(
+            ["git", "log", "-1", "--pretty=format:%h|%s|%ai"],
+            capture_output=True, text=True, cwd=project_dir,
+        )
+        parts = git_log.stdout.strip().split("|") if git_log.returncode == 0 else []
+        last_commit = {"hash": parts[0], "message": parts[1], "date": parts[2]} if len(parts) == 3 else None
+    except Exception:
+        last_commit = None
+
+    return {
+        "db_size_bytes": db_size,
+        "db_size_mb": round(db_size / 1_048_576, 2),
+        "record_counts": counts,
+        "last_commit": last_commit,
+    }
+
+
 # Serve static files (mount at the end to avoid intercepting /api)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 

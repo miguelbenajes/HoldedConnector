@@ -34,6 +34,7 @@
                 <div class="nav-item" data-view="estimates">Estimates</div>
                 <div class="nav-item" data-view="amortizations">📊 Amortizaciones</div>
                 <div class="nav-item" data-view="analysis">🧠 Análisis Gastos</div>
+                <div class="nav-item" data-view="backup">💾 Backup</div>
             </nav>
             <div class="safe-mode-badge" id="safeModeBadge">SAFE MODE ACTIVE</div>
         </aside>
@@ -325,6 +326,56 @@
                     <h2 style="margin-bottom:1rem">📂 Gastos por categoría</h2>
                     <div id="categoryBreakdown">
                         <p style="color:var(--text-gray);text-align:center;padding:1rem">Sin datos aún. Ejecuta el análisis para ver el desglose.</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- BACKUP VIEW -->
+            <div id="view-backup" class="view-container">
+                <div class="card" style="max-width:680px">
+                    <h1 style="margin-bottom:.25rem">💾 Copia de seguridad</h1>
+                    <p style="color:var(--text-gray);margin-bottom:1.5rem;font-size:.9rem">
+                        Descarga el código fuente y/o los datos para guardarlos en tu máquina.
+                    </p>
+
+                    <!-- Status panel -->
+                    <div id="backupStatus" style="background:var(--bg-card-hover);border-radius:10px;padding:1rem 1.25rem;margin-bottom:1.5rem;font-size:.85rem;color:var(--text-gray)">
+                        Cargando información…
+                    </div>
+
+                    <!-- Download cards -->
+                    <div style="display:grid;gap:1rem">
+
+                        <!-- DB -->
+                        <div class="backup-card">
+                            <div class="backup-card-icon">🗄️</div>
+                            <div class="backup-card-body">
+                                <strong>Base de datos (holded.db)</strong>
+                                <p>SQLite completo: facturas, compras, contactos, amortizaciones, análisis… todo.</p>
+                            </div>
+                            <button class="btn-primary" onclick="downloadBackup('db')">Descargar .db</button>
+                        </div>
+
+                        <!-- JSON data -->
+                        <div class="backup-card">
+                            <div class="backup-card-icon">📋</div>
+                            <div class="backup-card-body">
+                                <strong>Datos en JSON</strong>
+                                <p>Exportación de todas las tablas clave en formato JSON legible y portable.</p>
+                            </div>
+                            <button class="btn-primary" onclick="downloadBackup('data')">Descargar .json</button>
+                        </div>
+
+                        <!-- Code zip -->
+                        <div class="backup-card">
+                            <div class="backup-card-icon">📦</div>
+                            <div class="backup-card-body">
+                                <strong>Código fuente</strong>
+                                <p>Archivo ZIP del proyecto completo (sin .db ni .env). Equivalente a <code>git archive HEAD</code>.</p>
+                            </div>
+                            <button class="btn-primary" onclick="downloadBackup('code')">Descargar .zip</button>
+                        </div>
+
                     </div>
                 </div>
             </div>

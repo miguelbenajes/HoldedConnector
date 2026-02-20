@@ -261,7 +261,7 @@ function showView(viewName) {
     });
     document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
 
-    const specialViews = { 'overview': 'view-overview', 'setup': 'view-setup', 'amortizations': 'view-amortizations', 'analysis': 'view-analysis' };
+    const specialViews = { 'overview': 'view-overview', 'setup': 'view-setup', 'amortizations': 'view-amortizations', 'analysis': 'view-analysis', 'backup': 'view-backup' };
     const targetViewId = specialViews[viewName] || 'view-entity';
 
     const targetView = document.getElementById(targetViewId);
@@ -277,6 +277,8 @@ function showView(viewName) {
             loadAmortizations();
         } else if (viewName === 'analysis') {
             loadAnalysisView();
+        } else if (viewName === 'backup') {
+            loadBackupView();
         } else if (!specialViews[viewName]) {
             loadEntityData(viewName);
         }
@@ -2269,4 +2271,57 @@ async function confirmMatch(matchId, confirmed, customPrice = null) {
         if (row) { row.style.opacity = '1'; row.querySelectorAll('button').forEach(b => b.disabled = false); }
         alert(`Error: ${e.message}`);
     }
+}
+
+// ── Backup view ───────────────────────────────────────────────────────────────
+
+async function loadBackupView() {
+    const statusEl = document.getElementById('backupStatus');
+    if (!statusEl) return;
+    statusEl.innerHTML = '<span style="opacity:.6">Cargando información…</span>';
+    try {
+        const res = await fetch('/api/backup/status');
+        const d = await res.json();
+
+        // Build commit line
+        const commitLine = d.last_commit
+            ? `<strong>${d.last_commit.hash}</strong> · ${d.last_commit.message} · <span style="opacity:.7">${d.last_commit.date.slice(0,10)}</span>`
+            : '<span style="opacity:.6">Sin commits encontrados</span>';
+
+        // Build record table
+        const counts = d.record_counts || {};
+        const rows = Object.entries(counts).map(([tbl, n]) =>
+            `<span style="color:var(--text-light)">${tbl}</span><span style="text-align:right">${n.toLocaleString()}</span>`
+        ).join('');
+
+        statusEl.innerHTML = `
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:.4rem .75rem;align-items:center;margin-bottom:.75rem">
+                <span>📁 Base de datos</span><span><strong>${d.db_size_mb} MB</strong></span>
+                <span>📝 Último commit</span><span>${commitLine}</span>
+            </div>
+            <div style="border-top:1px solid var(--border-color);padding-top:.6rem;display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:.25rem .75rem">
+                ${rows}
+            </div>
+        `;
+    } catch (e) {
+        statusEl.innerHTML = `<span style="color:#f87171">Error cargando estado: ${e.message}</span>`;
+    }
+}
+
+function downloadBackup(type) {
+    // type: 'db' | 'data' | 'code'
+    const urls = {
+        db:   '/api/backup/db',
+        data: '/api/backup/data',
+        code: '/api/backup/code',
+    };
+    const url = urls[type];
+    if (!url) return;
+    // Create a hidden <a> and click it — triggers browser Save dialog
+    const a = document.createElement('a');
+    a.href = url;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
 }

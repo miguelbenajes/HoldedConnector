@@ -1103,3 +1103,43 @@ td {
         grid-template-columns: 1fr;
     }
 }
+
+/* ── Backup cards ───────────────────────────────────────────────── */
+.backup-card {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    background: var(--bg-card-hover);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 1rem 1.25rem;
+    transition: border-color 0.2s;
+}
+.backup-card:hover {
+    border-color: var(--accent-green);
+}
+.backup-card-icon {
+    font-size: 2rem;
+    flex-shrink: 0;
+}
+.backup-card-body {
+    flex: 1;
+    min-width: 0;
+}
+.backup-card-body strong {
+    display: block;
+    color: var(--text-light);
+    margin-bottom: .2rem;
+}
+.backup-card-body p {
+    margin: 0;
+    font-size: .82rem;
+    color: var(--text-gray);
+    line-height: 1.4;
+}
+.backup-card-body code {
+    background: rgba(255,255,255,.06);
+    padding: .1em .35em;
+    border-radius: 4px;
+    font-size: .8rem;
+}
