@@ -878,84 +878,148 @@ def get_analysis_stats() -> dict:
 
 def find_inventory_in_purchases() -> list:
     """
-    Scan purchase_items for items that match products in the inventory.
-    Matching strategy:
-      1. Exact: purchase_item.product_id == products.id (Holded-linked)
-      2. Fuzzy: product name similarity >= 80% (handles naming variants)
-    Returns list of candidate matches not yet in inventory_matches table.
+    Exhaustive scan of purchase_items to find inventory products.
+
+    Matching strategy (per product, looking for best item):
+      1. Exact: purchase_item.product_id == product.id  (Holded-linked)
+      2. Substring: cleaned product name contained in cleaned item name
+      3. Token overlap: >=75% of product name tokens found in item name
+      4. Fuzzy: SequenceMatcher ratio >= 0.72 on cleaned names
+
+    Cleaning:
+      - Strips leading Amazon ASIN codes (e.g. "B08GTYFC37 - Product...")
+      - Strips quantity prefixes from product names ("2x Profoto..." -> "Profoto...")
+      - Lowercases both sides before comparison
+
+    Skips products already in amortizations or inventory_matches (any status).
+    Iterates by product to guarantee one best match per product.
     """
+    import re
     from difflib import SequenceMatcher
+    from datetime import datetime
+
+    # Supplier-level descriptions that never contain product info
+    _NOISE_PATTERNS = re.compile(
+        r'factura|invoice|billete|taxi|taxim|airbnb|vueling|iberia|ryanair|'
+        r'adobe|holded|confirmaci|recibo|receipt|flight|booking|resumen de|'
+        r'contrato|cuota|tarifa|orden de pago|seguro|seg\. social',
+        re.IGNORECASE
+    )
+
+    def _clean_item(name):
+        if not name:
+            return ''
+        # Remove Amazon ASIN prefix: "B08GTYFC37 - Real name..."
+        name = re.sub(r'^[A-Z0-9]{10}\s*[-]\s*', '', name, flags=re.IGNORECASE)
+        # Remove article numbers like "001.00 - " or "93483136 - "
+        name = re.sub(r'^\d+[\.\d]*\s*[-]\s*', '', name)
+        return name.strip().lower()
+
+    def _clean_product(name):
+        # Strip quantity prefix: "2x Profoto Air Remote" -> "profoto air remote"
+        name = re.sub(r'^\d+x\s+', '', name, flags=re.IGNORECASE)
+        return name.strip().lower()
+
+    def _score(pname_clean, iname_clean):
+        if not pname_clean or not iname_clean:
+            return 0.0
+        # Substring containment (most reliable for partial descriptions)
+        if len(pname_clean) >= 6 and pname_clean in iname_clean:
+            return 0.96
+        if len(iname_clean) >= 6 and iname_clean in pname_clean:
+            return 0.93
+        # Token overlap: how many product tokens (>=4 chars) appear in item
+        tokens = [t for t in pname_clean.split() if len(t) >= 4]
+        if tokens:
+            overlap = sum(1 for t in tokens if t in iname_clean) / len(tokens)
+            if overlap >= 0.75:
+                return 0.85 + overlap * 0.1
+        # Full fuzzy ratio trimmed to avoid length bias
+        return SequenceMatcher(
+            None, pname_clean, iname_clean[:len(pname_clean) + 25]
+        ).ratio()
 
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
     try:
         cursor = conn.cursor()
 
-        # Get all products
         cursor.execute("SELECT id, name FROM products")
         products = [dict(r) for r in cursor.fetchall()]
 
-        # Get all purchase items not already matched
+        # Load ALL purchase items with a real price
         cursor.execute('''
             SELECT pit.id as item_id, pit.purchase_id, pit.product_id,
-                   pit.name as item_name, pit.price, pit.subtotal, pit.units,
+                   pit.name as item_name, pit.price, pit.units,
                    pi.date, pi.contact_name
             FROM purchase_items pit
             JOIN purchase_invoices pi ON pi.id = pit.purchase_id
-            LEFT JOIN inventory_matches im ON im.purchase_id = pit.purchase_id
-                AND im.product_id = pit.product_id
-            WHERE im.id IS NULL AND pit.price > 0
+            WHERE pit.price IS NOT NULL AND pit.price > 0
         ''')
-        purchase_items = [dict(r) for r in cursor.fetchall()]
+        all_items = [dict(r) for r in cursor.fetchall()]
+
+        # Pre-filter noise and pre-clean names
+        useful_items = []
+        for item in all_items:
+            raw = item['item_name'] or ''
+            if _NOISE_PATTERNS.search(raw):
+                continue
+            cleaned = _clean_item(raw)
+            if len(cleaned) < 5:
+                continue
+            item['_cleaned'] = cleaned
+            useful_items.append(item)
+
+        # Products already handled — skip them
+        cursor.execute("SELECT product_id FROM amortizations")
+        already_amort = set(r[0] for r in cursor.fetchall())
+        cursor.execute("SELECT product_id FROM inventory_matches")
+        already_matched = set(r[0] for r in cursor.fetchall())
+        skip_ids = already_amort | already_matched
 
         matches = []
-        for item in purchase_items:
-            matched_product = None
-            match_method = None
+        for prod in products:
+            if prod['id'] in skip_ids:
+                continue
 
-            # Strategy 1: exact product_id link
-            if item['product_id']:
-                exact = next((p for p in products if p['id'] == item['product_id']), None)
-                if exact:
-                    matched_product = exact
-                    match_method = 'exact_id'
+            pname_clean = _clean_product(prod['name'])
+            if len(pname_clean) < 4:
+                continue
 
-            # Strategy 2: fuzzy name match
-            if not matched_product and item['item_name']:
-                best_ratio = 0
-                best_product = None
-                for product in products:
-                    ratio = SequenceMatcher(
-                        None,
-                        item['item_name'].lower(),
-                        product['name'].lower()
-                    ).ratio()
-                    if ratio > best_ratio:
-                        best_ratio = ratio
-                        best_product = product
-                if best_ratio >= 0.80:
-                    matched_product = best_product
-                    match_method = f'fuzzy_{int(best_ratio*100)}pct'
+            best_score = 0.0
+            best_item = None
+            best_method = None
 
-            if matched_product:
-                # Use price per unit if units > 1, else subtotal
-                units = item['units'] or 1
-                price = item['price'] if item['price'] else (item['subtotal'] / units if units else item['subtotal'])
+            for item in useful_items:
+                # Strategy 1: exact Holded product_id link
+                if item['product_id'] and item['product_id'] == prod['id']:
+                    best_score = 1.0
+                    best_item = item
+                    best_method = 'exact_id'
+                    break
+
+                sc = _score(pname_clean, item['_cleaned'])
+                if sc > best_score:
+                    best_score = sc
+                    best_item = item
+                    best_method = f'fuzzy_{int(sc * 100)}pct'
+
+            if best_score >= 0.72 and best_item:
                 date_str = ''
-                if item['date']:
-                    from datetime import datetime
-                    date_str = datetime.fromtimestamp(item['date']).strftime('%Y-%m-%d')
+                if best_item['date']:
+                    date_str = datetime.fromtimestamp(best_item['date']).strftime('%Y-%m-%d')
                 matches.append({
-                    'purchase_id': item['purchase_id'],
-                    'purchase_item_id': item['item_id'],
-                    'product_id': matched_product['id'],
-                    'product_name': matched_product['name'],
-                    'item_name_in_invoice': item['item_name'],
-                    'matched_price': round(price, 2),
-                    'matched_date': date_str,
-                    'match_method': match_method,
-                    'supplier': item['contact_name'],
+                    'purchase_id':          best_item['purchase_id'],
+                    'purchase_item_id':     best_item['item_id'],
+                    'product_id':           prod['id'],
+                    'product_name':         prod['name'],
+                    'item_name_in_invoice': best_item['item_name'],
+                    'matched_price':        round(float(best_item['price'] or 0), 2),
+                    'matched_date':         date_str,
+                    'match_method':         best_method,
+                    'supplier':             best_item['contact_name'],
                 })
+
         return matches
     finally:
         conn.close()
@@ -987,12 +1051,15 @@ def get_pending_matches() -> list:
     try:
         cursor = conn.cursor()
         cursor.execute('''
-            SELECT im.*, pi.contact_name as supplier,
-                   datetime(pi.date, 'unixepoch') as invoice_date_full
+            SELECT im.*,
+                   pi.contact_name as supplier,
+                   datetime(pi.date, 'unixepoch') as invoice_date_full,
+                   pit.name as item_name_found
             FROM inventory_matches im
             JOIN purchase_invoices pi ON pi.id = im.purchase_id
+            LEFT JOIN purchase_items pit ON pit.id = im.purchase_item_id
             WHERE im.status = 'pending'
-            ORDER BY im.created_at DESC
+            ORDER BY im.matched_price DESC
         ''')
         return [dict(r) for r in cursor.fetchall()]
     finally:
