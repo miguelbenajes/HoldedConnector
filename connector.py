@@ -17,17 +17,56 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
-DB_NAME = "holded.db"
+# ── Database backend selection ───────────────────────────────────────────────
+# If DATABASE_URL is set → use PostgreSQL (Supabase in production).
+# If not set → fall back to local SQLite (dev mode, zero config required).
+DATABASE_URL = os.getenv("DATABASE_URL")
+_USE_SQLITE = not DATABASE_URL
+
+if not _USE_SQLITE:
+    import psycopg2
+    import psycopg2.extras
+
+DB_NAME = os.getenv("DB_NAME", "holded.db")  # used only in SQLite mode
+
+
+def get_db():
+    """Return a database connection for the active backend."""
+    if _USE_SQLITE:
+        conn = sqlite3.connect(DB_NAME)
+        conn.row_factory = sqlite3.Row
+        return conn
+    return psycopg2.connect(DATABASE_URL)
+
+
+def _cursor(conn):
+    """Return a dict-like cursor regardless of DB backend."""
+    if _USE_SQLITE:
+        return conn.cursor()
+    return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+
+def _q(sql):
+    """Convert SQLite ? placeholders to PostgreSQL %s when needed."""
+    if _USE_SQLITE:
+        return sql
+    return sql.replace("?", "%s")
+
+# ────────────────────────────────────────────────────────────────────────────
+
 
 def reload_config():
     global API_KEY, HEADERS
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db()
     try:
-        cursor = conn.cursor()
+        cursor = _cursor(conn)
         cursor.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
         cursor.execute("SELECT key, value FROM settings")
         rows = cursor.fetchall()
-        settings = {row[0]: row[1] for row in rows}
+        if _USE_SQLITE:
+            settings = {row[0]: row[1] for row in rows}
+        else:
+            settings = {row["key"]: row["value"] for row in rows}
 
         if 'holded_api_key' in settings:
             API_KEY = settings['holded_api_key']
@@ -39,28 +78,41 @@ def reload_config():
     finally:
         conn.close()
 
+
 def get_setting(key, default=None):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db()
     try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        cursor = _cursor(conn)
+        cursor.execute(_q("SELECT value FROM settings WHERE key = ?"), (key,))
         row = cursor.fetchone()
-        return row[0] if row else default
+        if row is None:
+            return default
+        return row[0] if _USE_SQLITE else row["value"]
     finally:
         conn.close()
 
+
 def save_setting(key, value):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db()
     try:
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+        cursor = _cursor(conn)
+        if _USE_SQLITE:
+            cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+        else:
+            cursor.execute("""
+                INSERT INTO settings (key, value) VALUES (%s, %s)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            """, (key, value))
         conn.commit()
     finally:
         conn.close()
 
-# Initial load
-if os.path.exists(DB_NAME):
+
+# Initial load — always safe: SQLite file may not exist yet, PG may not be reachable
+try:
     reload_config()
+except Exception:
+    pass  # DB not ready yet (first run before init_db)
 
 def extract_ret(prod):
     r = prod.get('retention')
@@ -88,9 +140,29 @@ def init_db():
             desc TEXT,
             date INTEGER,
             amount REAL,
-            status INTEGER
+            status INTEGER,
+            payments_pending REAL DEFAULT 0,
+            payments_total REAL DEFAULT 0,
+            due_date INTEGER,
+            doc_number TEXT
         )
     ''')
+    # Migrations: add columns if they don't exist yet (for existing DBs)
+    for col, definition in [
+        ("payments_pending", "REAL DEFAULT 0"),
+        ("payments_total",   "REAL DEFAULT 0"),
+        ("due_date",         "INTEGER"),
+        ("doc_number",       "TEXT"),
+    ]:
+        try:
+            cursor.execute(f"ALTER TABLE invoices ADD COLUMN {col} {definition}")
+        except Exception:
+            pass  # column already exists
+    for tbl in ("purchase_invoices", "estimates"):
+        try:
+            cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN doc_number TEXT")
+        except Exception:
+            pass  # column already exists
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS purchase_invoices (
@@ -100,7 +172,8 @@ def init_db():
             desc TEXT,
             date INTEGER,
             amount REAL,
-            status INTEGER
+            status INTEGER,
+            doc_number TEXT
         )
     ''')
 
@@ -112,7 +185,8 @@ def init_db():
             desc TEXT,
             date INTEGER,
             amount REAL,
-            status INTEGER
+            status INTEGER,
+            doc_number TEXT
         )
     ''')
 
@@ -424,11 +498,22 @@ def sync_documents(doc_type, table, items_table, fk_column):
 
         for item in data:
             doc_id = item.get('id')
-            cursor.execute(f'''
-                INSERT OR REPLACE INTO {table} (id, contact_id, contact_name, desc, date, amount, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (doc_id, item.get('contact'), item.get('contactName'), item.get('desc'),
-                  item.get('date'), item.get('total'), item.get('status')))
+            if table == 'invoices':
+                cursor.execute(f'''
+                    INSERT OR REPLACE INTO {table}
+                        (id, contact_id, contact_name, desc, date, amount, status,
+                         payments_pending, payments_total, due_date, doc_number)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (doc_id, item.get('contact'), item.get('contactName'), item.get('desc'),
+                      item.get('date'), item.get('total'), item.get('status'),
+                      item.get('paymentsPending', 0), item.get('paymentsTotal', 0),
+                      item.get('dueDate'), item.get('docNumber')))
+            else:
+                cursor.execute(f'''
+                    INSERT OR REPLACE INTO {table} (id, contact_id, contact_name, desc, date, amount, status, doc_number)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (doc_id, item.get('contact'), item.get('contactName'), item.get('desc'),
+                      item.get('date'), item.get('total'), item.get('status'), item.get('docNumber')))
 
             cursor.execute(f'DELETE FROM {items_table} WHERE {fk_column} = ?', (doc_id,))
             for prod in item.get('products', []):
@@ -886,8 +971,9 @@ def save_purchase_analysis(purchase_id: str, category: str, subcategory: str,
         conn.close()
 
 
-def get_analyzed_invoices(limit: int = 50, offset: int = 0, category: str = None) -> list:
-    """List categorized purchase invoices with their analysis, newest first."""
+def get_analyzed_invoices(limit: int = 50, offset: int = 0, category: str = None, q: str = None) -> list:
+    """List categorized purchase invoices with their analysis, newest first.
+    Optional q= for full-text search across contact_name, desc, category, subcategory."""
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
     try:
@@ -897,6 +983,10 @@ def get_analyzed_invoices(limit: int = 50, offset: int = 0, category: str = None
         if category:
             where += " AND pa.category = ?"
             params.append(category)
+        if q:
+            where += " AND (pi.contact_name LIKE ? OR pi.desc LIKE ? OR pa.category LIKE ? OR pa.subcategory LIKE ?)"
+            like = f"%{q}%"
+            params += [like, like, like, like]
         cursor.execute(f'''
             SELECT pi.id, pi.contact_name, pi.desc, pi.amount, pi.date, pi.status,
                    pa.category, pa.subcategory, pa.confidence, pa.method, pa.reasoning
@@ -928,12 +1018,15 @@ def get_analysis_stats() -> dict:
             GROUP BY category ORDER BY total_amount DESC
         ''')
         by_category = [dict(r) for r in cursor.fetchall()]
+        cursor.execute("SELECT MAX(analyzed_at) as last_run FROM purchase_analysis")
+        last_run = cursor.fetchone()["last_run"]  # e.g. "2026-02-20 20:10:16" or None
         return {
             "total": total,
             "analyzed": analyzed,
             "pending": total - analyzed,
             "pct": round(analyzed / total * 100, 1) if total > 0 else 0,
-            "by_category": by_category
+            "by_category": by_category,
+            "last_run_db": last_run,  # always reflects reality, survives server restarts
         }
     finally:
         conn.close()
