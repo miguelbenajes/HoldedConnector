@@ -129,132 +129,120 @@ def extract_ret(prod):
     return 0
 
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
+    conn = get_db()
+    cursor = _cursor(conn)
 
-    cursor.execute('''
+    # Dialect-specific type tokens
+    if _USE_SQLITE:
+        _serial  = "INTEGER PRIMARY KEY AUTOINCREMENT"
+        _real    = "REAL"
+        _now     = "datetime('now')"
+    else:
+        _serial  = "SERIAL PRIMARY KEY"
+        _real    = "NUMERIC"
+        _now     = "NOW()"
+
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS invoices (
             id TEXT PRIMARY KEY,
             contact_id TEXT,
             contact_name TEXT,
             desc TEXT,
             date INTEGER,
-            amount REAL,
+            amount {_real},
             status INTEGER,
-            payments_pending REAL DEFAULT 0,
-            payments_total REAL DEFAULT 0,
+            payments_pending {_real} DEFAULT 0,
+            payments_total {_real} DEFAULT 0,
             due_date INTEGER,
             doc_number TEXT
         )
     ''')
-    # Migrations: add columns if they don't exist yet (for existing DBs)
-    for col, definition in [
-        ("payments_pending", "REAL DEFAULT 0"),
-        ("payments_total",   "REAL DEFAULT 0"),
-        ("due_date",         "INTEGER"),
-        ("doc_number",       "TEXT"),
-    ]:
-        try:
-            cursor.execute(f"ALTER TABLE invoices ADD COLUMN {col} {definition}")
-        except Exception:
-            pass  # column already exists
-    for tbl in ("purchase_invoices", "estimates"):
-        try:
-            cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN doc_number TEXT")
-        except Exception:
-            pass  # column already exists
 
-    cursor.execute('''
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS purchase_invoices (
             id TEXT PRIMARY KEY,
             contact_id TEXT,
             contact_name TEXT,
             desc TEXT,
             date INTEGER,
-            amount REAL,
+            amount {_real},
             status INTEGER,
             doc_number TEXT
         )
     ''')
 
-    cursor.execute('''
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS estimates (
             id TEXT PRIMARY KEY,
             contact_id TEXT,
             contact_name TEXT,
             desc TEXT,
             date INTEGER,
-            amount REAL,
+            amount {_real},
             status INTEGER,
             doc_number TEXT
         )
     ''')
 
-    cursor.execute('''
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS products (
             id TEXT PRIMARY KEY,
             name TEXT,
             desc TEXT,
-            price REAL,
-            stock REAL,
+            price {_real},
+            stock {_real},
             sku TEXT
         )
     ''')
 
-    cursor.execute('''
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS invoice_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {_serial},
             invoice_id TEXT,
             product_id TEXT,
             name TEXT,
             sku TEXT,
-            units REAL,
-            price REAL,
-            subtotal REAL,
-            discount REAL,
-            tax REAL,
-            retention REAL,
-            account TEXT,
-            FOREIGN KEY (invoice_id) REFERENCES invoices (id),
-            FOREIGN KEY (product_id) REFERENCES products (id)
+            units {_real},
+            price {_real},
+            subtotal {_real},
+            discount {_real},
+            tax {_real},
+            retention {_real},
+            account TEXT
         )
     ''')
 
-    cursor.execute('''
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS estimate_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {_serial},
             estimate_id TEXT,
             product_id TEXT,
             name TEXT,
             sku TEXT,
-            units REAL,
-            price REAL,
-            subtotal REAL,
-            discount REAL,
-            tax REAL,
-            retention REAL,
-            account TEXT,
-            FOREIGN KEY (estimate_id) REFERENCES estimates (id),
-            FOREIGN KEY (product_id) REFERENCES products (id)
+            units {_real},
+            price {_real},
+            subtotal {_real},
+            discount {_real},
+            tax {_real},
+            retention {_real},
+            account TEXT
         )
     ''')
 
-    cursor.execute('''
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS purchase_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {_serial},
             purchase_id TEXT,
             product_id TEXT,
             name TEXT,
             sku TEXT,
-            units REAL,
-            price REAL,
-            subtotal REAL,
-            discount REAL,
-            tax REAL,
-            retention REAL,
-            account TEXT,
-            FOREIGN KEY (purchase_id) REFERENCES purchase_invoices (id),
-            FOREIGN KEY (product_id) REFERENCES products (id)
+            units {_real},
+            price {_real},
+            subtotal {_real},
+            discount {_real},
+            tax {_real},
+            retention {_real},
+            account TEXT
         )
     ''')
 
@@ -279,23 +267,22 @@ def init_db():
         )
     ''')
 
-    cursor.execute('''
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS projects (
             id TEXT PRIMARY KEY,
             name TEXT,
             desc TEXT,
             status TEXT,
             customer_id TEXT,
-            budget REAL,
-            FOREIGN KEY (customer_id) REFERENCES contacts (id)
+            budget {_real}
         )
     ''')
 
-    cursor.execute('''
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS payments (
             id TEXT PRIMARY KEY,
             document_id TEXT,
-            amount REAL,
+            amount {_real},
             date INTEGER,
             method TEXT,
             type TEXT
@@ -309,78 +296,59 @@ def init_db():
         )
     ''')
 
-    cursor.execute('''
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS amortizations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {_serial},
             product_id TEXT NOT NULL,
             product_name TEXT NOT NULL,
-            purchase_price REAL NOT NULL,
+            purchase_price {_real} NOT NULL,
             purchase_date TEXT NOT NULL,
             notes TEXT,
             product_type TEXT NOT NULL DEFAULT 'alquiler',
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now')),
+            created_at TEXT DEFAULT ({_now}),
+            updated_at TEXT DEFAULT ({_now}),
             UNIQUE(product_id)
         )
     ''')
 
-    # Add product_type column to existing amortizations table if missing (migration)
-    try:
-        cursor.execute("ALTER TABLE amortizations ADD COLUMN product_type TEXT NOT NULL DEFAULT 'alquiler'")
-    except Exception:
-        pass  # Column already exists
-
     # Fiscal rules per product type — drives IRPF logic across the whole app
     # irpf_pct: retention applied on invoices (15% services, 19% rentals, 0% sales/expenses)
     # is_expense: True for purchase-side concepts (gastos / suplidos)
-    cursor.execute('''
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS product_type_rules (
             type_key TEXT PRIMARY KEY,
             label TEXT NOT NULL,
-            irpf_pct REAL NOT NULL DEFAULT 0,
+            irpf_pct {_real} NOT NULL DEFAULT 0,
             is_expense INTEGER NOT NULL DEFAULT 0,
             description TEXT
         )
     ''')
-    # Seed rules (INSERT OR IGNORE — never overwrites user edits)
-    cursor.executemany('''
-        INSERT OR IGNORE INTO product_type_rules (type_key, label, irpf_pct, is_expense, description)
-        VALUES (?, ?, ?, ?, ?)
-    ''', [
-        ('alquiler',  'Alquiler',           19.0, 0, 'Equipamiento cedido en uso. IRPF retención 19%.'),
-        ('venta',     'Venta',               0.0, 0, 'Venta de producto. Sin retención IRPF. Match 1-to-1 compra→venta.'),
-        ('servicio',  'Servicio / Fee',     15.0, 0, 'Honorarios profesionales. IRPF retención 15%.'),
-        ('gasto',     'Gasto',               0.0, 1, 'Gasto deducible / suplido. No genera ingreso directo.'),
-    ])
 
-    cursor.execute('''
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS purchase_analysis (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {_serial},
             purchase_id TEXT NOT NULL UNIQUE,
             category TEXT,
             subcategory TEXT,
             confidence TEXT,
             method TEXT,
             reasoning TEXT,
-            analyzed_at TEXT DEFAULT (datetime('now')),
-            FOREIGN KEY (purchase_id) REFERENCES purchase_invoices(id)
+            analyzed_at TEXT DEFAULT ({_now})
         )
     ''')
 
-    cursor.execute('''
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS inventory_matches (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {_serial},
             purchase_id TEXT NOT NULL,
             purchase_item_id INTEGER,
             product_id TEXT NOT NULL,
             product_name TEXT NOT NULL,
-            matched_price REAL NOT NULL,
+            matched_price {_real} NOT NULL,
             matched_date TEXT NOT NULL,
             match_method TEXT,
             status TEXT DEFAULT 'pending',
-            created_at TEXT DEFAULT (datetime('now')),
-            FOREIGN KEY (purchase_id) REFERENCES purchase_invoices(id),
-            FOREIGN KEY (product_id) REFERENCES products(id),
+            created_at TEXT DEFAULT ({_now}),
             UNIQUE(purchase_id, product_id)
         )
     ''')
@@ -389,45 +357,144 @@ def init_db():
     # Each row represents one purchase invoice (or item) linked to one amortization product.
     # cost_override is the actual cost assigned to this product from that purchase —
     # it can differ from the invoice price (pack splits, kit allocations, etc.)
-    cursor.execute('''
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS amortization_purchases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {_serial},
             amortization_id INTEGER NOT NULL,
-            purchase_id TEXT,              -- purchase_invoices.id (optional, from match)
-            purchase_item_id INTEGER,      -- purchase_items.id (optional, for item-level link)
-            cost_override REAL NOT NULL,   -- actual cost assigned (editable)
-            allocation_note TEXT,          -- e.g. "1/3 del pack de 3 unidades"
-            created_at TEXT DEFAULT (datetime('now')),
-            FOREIGN KEY (amortization_id) REFERENCES amortizations(id) ON DELETE CASCADE
+            purchase_id TEXT,
+            purchase_item_id INTEGER,
+            cost_override {_real} NOT NULL,
+            allocation_note TEXT,
+            created_at TEXT DEFAULT ({_now})
         )
     ''')
 
-    # Migration: populate amortization_purchases from existing amortizations that
-    # were auto-detected from purchase matches (notes contain "Auto-detected from purchase <id>")
+    # ── AI tables ────────────────────────────────────────────────────────────
     cursor.execute('''
-        INSERT OR IGNORE INTO amortization_purchases (amortization_id, purchase_id, cost_override, allocation_note)
-        SELECT
-            a.id,
-            CASE
-                WHEN a.notes LIKE 'Auto-detected from purchase %'
-                THEN TRIM(SUBSTR(a.notes, 27, INSTR(SUBSTR(a.notes,27),' ')-1))
-                ELSE NULL
-            END AS purchase_id,
-            a.purchase_price,
-            'Migrado automáticamente'
-        FROM amortizations a
-        WHERE a.id NOT IN (SELECT DISTINCT amortization_id FROM amortization_purchases)
-          AND a.purchase_price > 0
+        CREATE TABLE IF NOT EXISTS ai_history (
+            id TEXT PRIMARY KEY,
+            role TEXT,
+            content TEXT,
+            timestamp TEXT,
+            conversation_id TEXT,
+            tool_calls TEXT
+        )
     ''')
 
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_invoices_contact ON invoices(contact_id)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_invoices_date ON invoices(date)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_purchases_contact ON purchase_invoices(contact_id)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_purchases_date ON purchase_invoices(date)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_inv_items_product ON invoice_items(product_id)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_inv_items_invoice ON invoice_items(invoice_id)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_pur_items_product ON purchase_items(product_id)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_pur_items_purchase ON purchase_items(purchase_id)')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS ai_favorites (
+            id TEXT PRIMARY KEY,
+            query TEXT,
+            label TEXT,
+            created_at TEXT
+        )
+    ''')
+
+    # ── Sync log table (used by n8n flows) ───────────────────────────────────
+    cursor.execute(f'''
+        CREATE TABLE IF NOT EXISTS sync_logs (
+            id {_serial},
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            status TEXT,
+            duration_seconds {_real},
+            counts TEXT
+        )
+    ''')
+
+    # ── Column migrations (SQLite only — PG creates all columns upfront) ──────
+    if _USE_SQLITE:
+        for col, definition in [
+            ("payments_pending", "REAL DEFAULT 0"),
+            ("payments_total",   "REAL DEFAULT 0"),
+            ("due_date",         "INTEGER"),
+            ("doc_number",       "TEXT"),
+        ]:
+            try:
+                cursor.execute(f"ALTER TABLE invoices ADD COLUMN {col} {definition}")
+            except Exception:
+                pass  # column already exists
+
+        for tbl in ("purchase_invoices", "estimates"):
+            try:
+                cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN doc_number TEXT")
+            except Exception:
+                pass
+
+        try:
+            cursor.execute("ALTER TABLE amortizations ADD COLUMN product_type TEXT NOT NULL DEFAULT 'alquiler'")
+        except Exception:
+            pass
+    else:
+        # PostgreSQL: ADD COLUMN IF NOT EXISTS (PG 9.6+)
+        for stmt in [
+            "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS payments_pending NUMERIC DEFAULT 0",
+            "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS payments_total NUMERIC DEFAULT 0",
+            "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS due_date INTEGER",
+            "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS doc_number TEXT",
+            "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS doc_number TEXT",
+            "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS doc_number TEXT",
+            "ALTER TABLE amortizations ADD COLUMN IF NOT EXISTS product_type TEXT NOT NULL DEFAULT 'alquiler'",
+        ]:
+            try:
+                cursor.execute(stmt)
+            except Exception:
+                pass
+
+    # ── Seed product_type_rules (never overwrites user edits) ────────────────
+    default_rules = [
+        ('alquiler', 'Alquiler',        19.0, 0, 'Equipamiento cedido en uso. IRPF retención 19%.'),
+        ('venta',    'Venta',            0.0, 0, 'Venta de producto. Sin retención IRPF. Match 1-to-1 compra→venta.'),
+        ('servicio', 'Servicio / Fee',  15.0, 0, 'Honorarios profesionales. IRPF retención 15%.'),
+        ('gasto',    'Gasto',            0.0, 1, 'Gasto deducible / suplido. No genera ingreso directo.'),
+    ]
+    for rule in default_rules:
+        if _USE_SQLITE:
+            cursor.execute(
+                "INSERT OR IGNORE INTO product_type_rules "
+                "(type_key, label, irpf_pct, is_expense, description) VALUES (?,?,?,?,?)",
+                rule
+            )
+        else:
+            cursor.execute(
+                "INSERT INTO product_type_rules "
+                "(type_key, label, irpf_pct, is_expense, description) VALUES (%s,%s,%s,%s,%s) "
+                "ON CONFLICT (type_key) DO NOTHING",
+                rule
+            )
+
+    # ── Data migration: populate amortization_purchases from legacy notes ─────
+    # Only runs in SQLite mode (Supabase starts fresh, no legacy data to migrate)
+    if _USE_SQLITE:
+        cursor.execute('''
+            INSERT OR IGNORE INTO amortization_purchases (amortization_id, purchase_id, cost_override, allocation_note)
+            SELECT
+                a.id,
+                CASE
+                    WHEN a.notes LIKE 'Auto-detected from purchase %'
+                    THEN TRIM(SUBSTR(a.notes, 27, INSTR(SUBSTR(a.notes,27),' ')-1))
+                    ELSE NULL
+                END AS purchase_id,
+                a.purchase_price,
+                'Migrado automáticamente'
+            FROM amortizations a
+            WHERE a.id NOT IN (SELECT DISTINCT amortization_id FROM amortization_purchases)
+              AND a.purchase_price > 0
+        ''')
+
+    # ── Indexes ───────────────────────────────────────────────────────────────
+    for idx_sql in [
+        'CREATE INDEX IF NOT EXISTS idx_invoices_contact ON invoices(contact_id)',
+        'CREATE INDEX IF NOT EXISTS idx_invoices_date ON invoices(date)',
+        'CREATE INDEX IF NOT EXISTS idx_purchases_contact ON purchase_invoices(contact_id)',
+        'CREATE INDEX IF NOT EXISTS idx_purchases_date ON purchase_invoices(date)',
+        'CREATE INDEX IF NOT EXISTS idx_inv_items_product ON invoice_items(product_id)',
+        'CREATE INDEX IF NOT EXISTS idx_inv_items_invoice ON invoice_items(invoice_id)',
+        'CREATE INDEX IF NOT EXISTS idx_pur_items_product ON purchase_items(product_id)',
+        'CREATE INDEX IF NOT EXISTS idx_pur_items_purchase ON purchase_items(purchase_id)',
+        'CREATE INDEX IF NOT EXISTS idx_ai_history_conv ON ai_history(conversation_id, timestamp)',
+    ]:
+        cursor.execute(idx_sql)
 
     conn.commit()
     conn.close()
