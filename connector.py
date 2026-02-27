@@ -552,53 +552,94 @@ def fetch_data(endpoint, params=None):
 
     return all_data
 
+def _row_val(row, key, idx):
+    """Retrieve a value from a DB row that may be a dict (PG) or tuple (SQLite)."""
+    if isinstance(row, dict):
+        return row.get(key)
+    return row[idx]
+
+
 def sync_documents(doc_type, table, items_table, fk_column):
     logger.info(f"Syncing {doc_type}s (Historical)...")
     params = {"starttmp": 1262304000, "endtmp": int(time.time())}
     data = fetch_data(f"/invoicing/v1/documents/{doc_type}", params=params)
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db()
     try:
-        cursor = conn.cursor()
+        cursor = _cursor(conn)
         cursor.execute("SELECT id, name, num FROM ledger_accounts")
-        acc_map = {row[0]: f"{row[1]} ({row[2]})" if row[2] else row[1] for row in cursor.fetchall()}
+        rows = cursor.fetchall()
+        if _USE_SQLITE:
+            acc_map = {row[0]: f"{row[1]} ({row[2]})" if row[2] else row[1] for row in rows}
+        else:
+            acc_map = {r["id"]: f"{r['name']} ({r['num']})" if r["num"] else r["name"] for r in rows}
 
         for item in data:
             doc_id = item.get('id')
             if table == 'invoices':
-                cursor.execute(f'''
-                    INSERT OR REPLACE INTO {table}
-                        (id, contact_id, contact_name, desc, date, amount, status,
-                         payments_pending, payments_total, due_date, doc_number)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (doc_id, item.get('contact'), item.get('contactName'), item.get('desc'),
-                      item.get('date'), item.get('total'), item.get('status'),
-                      item.get('paymentsPending', 0), item.get('paymentsTotal', 0),
-                      item.get('dueDate'), item.get('docNumber')))
+                vals = (doc_id, item.get('contact'), item.get('contactName'), item.get('desc'),
+                        item.get('date'), item.get('total'), item.get('status'),
+                        item.get('paymentsPending', 0), item.get('paymentsTotal', 0),
+                        item.get('dueDate'), item.get('docNumber'))
+                if _USE_SQLITE:
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO invoices
+                            (id, contact_id, contact_name, desc, date, amount, status,
+                             payments_pending, payments_total, due_date, doc_number)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    ''', vals)
+                else:
+                    cursor.execute('''
+                        INSERT INTO invoices
+                            (id, contact_id, contact_name, desc, date, amount, status,
+                             payments_pending, payments_total, due_date, doc_number)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT (id) DO UPDATE SET
+                            contact_id=EXCLUDED.contact_id, contact_name=EXCLUDED.contact_name,
+                            desc=EXCLUDED.desc, date=EXCLUDED.date, amount=EXCLUDED.amount,
+                            status=EXCLUDED.status, payments_pending=EXCLUDED.payments_pending,
+                            payments_total=EXCLUDED.payments_total, due_date=EXCLUDED.due_date,
+                            doc_number=EXCLUDED.doc_number
+                    ''', vals)
             else:
-                cursor.execute(f'''
-                    INSERT OR REPLACE INTO {table} (id, contact_id, contact_name, desc, date, amount, status, doc_number)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (doc_id, item.get('contact'), item.get('contactName'), item.get('desc'),
-                      item.get('date'), item.get('total'), item.get('status'), item.get('docNumber')))
+                vals = (doc_id, item.get('contact'), item.get('contactName'), item.get('desc'),
+                        item.get('date'), item.get('total'), item.get('status'), item.get('docNumber'))
+                if _USE_SQLITE:
+                    cursor.execute(f'''
+                        INSERT OR REPLACE INTO {table}
+                            (id, contact_id, contact_name, desc, date, amount, status, doc_number)
+                        VALUES (?,?,?,?,?,?,?,?)
+                    ''', vals)
+                else:
+                    cursor.execute(f'''
+                        INSERT INTO {table}
+                            (id, contact_id, contact_name, desc, date, amount, status, doc_number)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT (id) DO UPDATE SET
+                            contact_id=EXCLUDED.contact_id, contact_name=EXCLUDED.contact_name,
+                            desc=EXCLUDED.desc, date=EXCLUDED.date, amount=EXCLUDED.amount,
+                            status=EXCLUDED.status, doc_number=EXCLUDED.doc_number
+                    ''', vals)
 
-            cursor.execute(f'DELETE FROM {items_table} WHERE {fk_column} = ?', (doc_id,))
+            # Items: delete + re-insert (simpler than upsert for SERIAL-keyed rows)
+            cursor.execute(_q(f'DELETE FROM {items_table} WHERE {fk_column} = ?'), (doc_id,))
             for prod in item.get('products', []):
                 retention = extract_ret(prod)
                 acc_id = prod.get('accountCode') or prod.get('accountName') or prod.get('account')
                 account = acc_map.get(acc_id, acc_id)
-
-                cursor.execute(f'''
-                    INSERT INTO {items_table} ({fk_column}, product_id, name, sku, units, price, subtotal, discount, tax, retention, account)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (doc_id, prod.get('productId'), prod.get('name'), prod.get('sku'),
-                      prod.get('units'), prod.get('price'), prod.get('subtotal'),
-                      prod.get('discount'), prod.get('tax'), retention, account))
+                cursor.execute(_q(f'''
+                    INSERT INTO {items_table}
+                        ({fk_column}, product_id, name, sku, units, price, subtotal, discount, tax, retention, account)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                '''), (doc_id, prod.get('productId'), prod.get('name'), prod.get('sku'),
+                       prod.get('units'), prod.get('price'), prod.get('subtotal'),
+                       prod.get('discount'), prod.get('tax'), retention, account))
 
         conn.commit()
     finally:
         conn.close()
     logger.info(f"Synced {len(data)} {doc_type}s and their line items.")
+
 
 def sync_invoices():
     sync_documents("invoice", "invoices", "invoice_items", "invoice_id")
@@ -609,82 +650,132 @@ def sync_purchases():
 def sync_estimates():
     sync_documents("estimate", "estimates", "estimate_items", "estimate_id")
 
+
 def sync_accounts():
     logger.info("Syncing Ledger Accounts (Chart of Accounts)...")
     data = fetch_data("/accounting/v1/chartofaccounts")
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db()
     try:
-        cursor = conn.cursor()
+        cursor = _cursor(conn)
         accounts = data if isinstance(data, list) else data.get('accounts', [])
         for item in accounts:
-            cursor.execute('''
-                INSERT OR REPLACE INTO ledger_accounts (id, name, num)
-                VALUES (?, ?, ?)
-            ''', (item.get('id'), item.get('name'), item.get('num')))
+            vals = (item.get('id'), item.get('name'), item.get('num'))
+            if _USE_SQLITE:
+                cursor.execute("INSERT OR REPLACE INTO ledger_accounts (id, name, num) VALUES (?,?,?)", vals)
+            else:
+                cursor.execute("""
+                    INSERT INTO ledger_accounts (id, name, num) VALUES (%s,%s,%s)
+                    ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, num=EXCLUDED.num
+                """, vals)
         conn.commit()
     finally:
         conn.close()
     logger.info(f"Synced {len(accounts)} ledger accounts.")
 
+
 def sync_products():
     logger.info("Syncing Products (Inventory)...")
     data = fetch_data("/invoicing/v1/products")
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db()
     try:
-        cursor = conn.cursor()
+        cursor = _cursor(conn)
         for item in data:
-            cursor.execute('''
-                INSERT OR REPLACE INTO products (id, name, desc, price, stock, sku)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (item.get('id'), item.get('name'), item.get('desc'), item.get('price'), item.get('stock'), item.get('sku')))
+            vals = (item.get('id'), item.get('name'), item.get('desc'),
+                    item.get('price'), item.get('stock'), item.get('sku'))
+            if _USE_SQLITE:
+                cursor.execute("INSERT OR REPLACE INTO products (id, name, desc, price, stock, sku) VALUES (?,?,?,?,?,?)", vals)
+            else:
+                cursor.execute("""
+                    INSERT INTO products (id, name, desc, price, stock, sku) VALUES (%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        name=EXCLUDED.name, desc=EXCLUDED.desc, price=EXCLUDED.price,
+                        stock=EXCLUDED.stock, sku=EXCLUDED.sku
+                """, vals)
         conn.commit()
     finally:
         conn.close()
     logger.info(f"Synced {len(data)} products.")
 
+
 def sync_contacts():
     logger.info("Syncing Contacts...")
     data = fetch_data("/invoicing/v1/contacts")
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db()
     try:
-        cursor = conn.cursor()
+        cursor = _cursor(conn)
         for item in data:
-            cursor.execute('''
-                INSERT OR REPLACE INTO contacts (id, name, email, type, code, vat, phone, mobile)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (item.get('id'), item.get('name'), item.get('email'), item.get('type'), item.get('code'), item.get('vat'), item.get('phone'), item.get('mobile')))
+            vals = (item.get('id'), item.get('name'), item.get('email'), item.get('type'),
+                    item.get('code'), item.get('vat'), item.get('phone'), item.get('mobile'))
+            if _USE_SQLITE:
+                cursor.execute("""
+                    INSERT OR REPLACE INTO contacts (id, name, email, type, code, vat, phone, mobile)
+                    VALUES (?,?,?,?,?,?,?,?)
+                """, vals)
+            else:
+                cursor.execute("""
+                    INSERT INTO contacts (id, name, email, type, code, vat, phone, mobile)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        name=EXCLUDED.name, email=EXCLUDED.email, type=EXCLUDED.type,
+                        code=EXCLUDED.code, vat=EXCLUDED.vat, phone=EXCLUDED.phone,
+                        mobile=EXCLUDED.mobile
+                """, vals)
         conn.commit()
     finally:
         conn.close()
     logger.info(f"Synced {len(data)} contacts.")
 
+
 def sync_projects():
     logger.info("Syncing Projects...")
     data = fetch_data("/projects/v1/projects")
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db()
     try:
-        cursor = conn.cursor()
+        cursor = _cursor(conn)
         for item in data:
-            cursor.execute('''
-                INSERT OR REPLACE INTO projects (id, name, desc, status, customer_id, budget)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (item.get('id'), item.get('name'), item.get('desc'), item.get('status'), item.get('customer'), item.get('budget')))
+            vals = (item.get('id'), item.get('name'), item.get('desc'),
+                    item.get('status'), item.get('customer'), item.get('budget'))
+            if _USE_SQLITE:
+                cursor.execute("""
+                    INSERT OR REPLACE INTO projects (id, name, desc, status, customer_id, budget)
+                    VALUES (?,?,?,?,?,?)
+                """, vals)
+            else:
+                cursor.execute("""
+                    INSERT INTO projects (id, name, desc, status, customer_id, budget)
+                    VALUES (%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        name=EXCLUDED.name, desc=EXCLUDED.desc, status=EXCLUDED.status,
+                        customer_id=EXCLUDED.customer_id, budget=EXCLUDED.budget
+                """, vals)
         conn.commit()
     finally:
         conn.close()
     logger.info(f"Synced {len(data)} projects.")
 
+
 def sync_payments():
     logger.info("Syncing Payments...")
     data = fetch_data("/invoicing/v1/payments")
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db()
     try:
-        cursor = conn.cursor()
+        cursor = _cursor(conn)
         for item in data:
-            cursor.execute('''
-                INSERT OR REPLACE INTO payments (id, document_id, amount, date, method, type)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (item.get('id'), item.get('documentId'), item.get('amount'), item.get('date'), item.get('paymentMethod'), item.get('type')))
+            vals = (item.get('id'), item.get('documentId'), item.get('amount'),
+                    item.get('date'), item.get('paymentMethod'), item.get('type'))
+            if _USE_SQLITE:
+                cursor.execute("""
+                    INSERT OR REPLACE INTO payments (id, document_id, amount, date, method, type)
+                    VALUES (?,?,?,?,?,?)
+                """, vals)
+            else:
+                cursor.execute("""
+                    INSERT INTO payments (id, document_id, amount, date, method, type)
+                    VALUES (%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (id) DO UPDATE SET
+                        document_id=EXCLUDED.document_id, amount=EXCLUDED.amount,
+                        date=EXCLUDED.date, method=EXCLUDED.method, type=EXCLUDED.type
+                """, vals)
         conn.commit()
     finally:
         conn.close()
