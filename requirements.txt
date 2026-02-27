@@ -3,10 +3,9 @@ python-dotenv
 fastapi
 uvicorn
 aiofiles
-pyinstaller
-pywebview
 pandas
 openpyxl
 fpdf2
 python-multipart
 anthropic
+psycopg2-binary>=2.9.9
