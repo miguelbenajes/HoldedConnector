@@ -1085,28 +1085,37 @@ def categorize_by_rules(desc: str, contact_name: str, item_names: list):
     return None
 
 
+def _fetch_one_val(cursor, key):
+    """Fetch a single scalar value from a row, works for both dict and tuple cursors."""
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    return row[key] if isinstance(row, dict) else row[0]
+
+
 def get_unanalyzed_purchases(limit: int = 10) -> list:
     """Return up to `limit` purchase invoices not yet in purchase_analysis."""
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
+    # Aggregate item names — SQLite uses GROUP_CONCAT, PostgreSQL uses STRING_AGG
+    agg = "GROUP_CONCAT(pit.name, '||')" if _USE_SQLITE else "STRING_AGG(pit.name, '||')"
+    conn = get_db()
     try:
-        cursor = conn.cursor()
-        cursor.execute('''
+        cursor = _cursor(conn)
+        cursor.execute(_q(f'''
             SELECT pi.id, pi.contact_name, pi.desc, pi.date, pi.amount,
-                   GROUP_CONCAT(pit.name, '||') as item_names
+                   {agg} AS item_names
             FROM purchase_invoices pi
             LEFT JOIN purchase_items pit ON pit.purchase_id = pi.id
             LEFT JOIN purchase_analysis pa ON pa.purchase_id = pi.id
             WHERE pa.id IS NULL
-            GROUP BY pi.id
+            GROUP BY pi.id, pi.contact_name, pi.desc, pi.date, pi.amount
             ORDER BY pi.date DESC
             LIMIT ?
-        ''', (limit,))
+        '''), (limit,))
         rows = cursor.fetchall()
         result = []
         for row in rows:
             d = dict(row)
-            d['item_names'] = [n for n in (d['item_names'] or '').split('||') if n]
+            d['item_names'] = [n for n in (d.get('item_names') or '').split('||') if n]
             result.append(d)
         return result
     finally:
@@ -1116,14 +1125,26 @@ def get_unanalyzed_purchases(limit: int = 10) -> list:
 def save_purchase_analysis(purchase_id: str, category: str, subcategory: str,
                            confidence: str, method: str, reasoning: str):
     """Persist the analysis result for a purchase invoice."""
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db()
     try:
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR REPLACE INTO purchase_analysis
-                (purchase_id, category, subcategory, confidence, method, reasoning)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (purchase_id, category, subcategory, confidence, method, reasoning))
+        cursor = _cursor(conn)
+        vals = (purchase_id, category, subcategory, confidence, method, reasoning)
+        if _USE_SQLITE:
+            cursor.execute('''
+                INSERT OR REPLACE INTO purchase_analysis
+                    (purchase_id, category, subcategory, confidence, method, reasoning)
+                VALUES (?,?,?,?,?,?)
+            ''', vals)
+        else:
+            cursor.execute('''
+                INSERT INTO purchase_analysis
+                    (purchase_id, category, subcategory, confidence, method, reasoning)
+                VALUES (%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (purchase_id) DO UPDATE SET
+                    category=EXCLUDED.category, subcategory=EXCLUDED.subcategory,
+                    confidence=EXCLUDED.confidence, method=EXCLUDED.method,
+                    reasoning=EXCLUDED.reasoning
+            ''', vals)
         conn.commit()
     finally:
         conn.close()
@@ -1132,18 +1153,18 @@ def save_purchase_analysis(purchase_id: str, category: str, subcategory: str,
 def get_analyzed_invoices(limit: int = 50, offset: int = 0, category: str = None, q: str = None) -> list:
     """List categorized purchase invoices with their analysis, newest first.
     Optional q= for full-text search across contact_name, desc, category, subcategory."""
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
+    conn = get_db()
     try:
-        cursor = conn.cursor()
+        cursor = _cursor(conn)
+        ph = '%s' if not _USE_SQLITE else '?'
         where = "WHERE pa.id IS NOT NULL"
         params = []
         if category:
-            where += " AND pa.category = ?"
+            where += f" AND pa.category = {ph}"
             params.append(category)
         if q:
-            where += " AND (pi.contact_name LIKE ? OR pi.desc LIKE ? OR pa.category LIKE ? OR pa.subcategory LIKE ?)"
             like = f"%{q}%"
+            where += f" AND (pi.contact_name LIKE {ph} OR pi.desc LIKE {ph} OR pa.category LIKE {ph} OR pa.subcategory LIKE {ph})"
             params += [like, like, like, like]
         cursor.execute(f'''
             SELECT pi.id, pi.contact_name, pi.desc, pi.amount, pi.date, pi.status,
@@ -1152,7 +1173,7 @@ def get_analyzed_invoices(limit: int = 50, offset: int = 0, category: str = None
             JOIN purchase_analysis pa ON pi.id = pa.purchase_id
             {where}
             ORDER BY pi.date DESC
-            LIMIT ? OFFSET ?
+            LIMIT {ph} OFFSET {ph}
         ''', params + [limit, offset])
         return [dict(r) for r in cursor.fetchall()]
     finally:
@@ -1161,30 +1182,29 @@ def get_analyzed_invoices(limit: int = 50, offset: int = 0, category: str = None
 
 def get_analysis_stats() -> dict:
     """Summary of analysis progress."""
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
+    conn = get_db()
     try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) as total FROM purchase_invoices")
-        total = cursor.fetchone()["total"]
-        cursor.execute("SELECT COUNT(*) as analyzed FROM purchase_analysis")
-        analyzed = cursor.fetchone()["analyzed"]
+        cursor = _cursor(conn)
+        cursor.execute("SELECT COUNT(*) AS total FROM purchase_invoices")
+        total = _fetch_one_val(cursor, "total") or 0
+        cursor.execute("SELECT COUNT(*) AS analyzed FROM purchase_analysis")
+        analyzed = _fetch_one_val(cursor, "analyzed") or 0
         cursor.execute('''
-            SELECT category, COUNT(*) as count, SUM(pi.amount) as total_amount
+            SELECT category, COUNT(*) AS count, SUM(pi.amount) AS total_amount
             FROM purchase_analysis pa
             JOIN purchase_invoices pi ON pi.id = pa.purchase_id
             GROUP BY category ORDER BY total_amount DESC
         ''')
         by_category = [dict(r) for r in cursor.fetchall()]
-        cursor.execute("SELECT MAX(analyzed_at) as last_run FROM purchase_analysis")
-        last_run = cursor.fetchone()["last_run"]  # e.g. "2026-02-20 20:10:16" or None
+        cursor.execute("SELECT MAX(analyzed_at) AS last_run FROM purchase_analysis")
+        last_run = _fetch_one_val(cursor, "last_run")
         return {
             "total": total,
             "analyzed": analyzed,
             "pending": total - analyzed,
             "pct": round(analyzed / total * 100, 1) if total > 0 else 0,
             "by_category": by_category,
-            "last_run_db": last_run,  # always reflects reality, survives server restarts
+            "last_run_db": last_run,
         }
     finally:
         conn.close()
@@ -1255,18 +1275,17 @@ def find_inventory_in_purchases() -> list:
             None, pname_clean, iname_clean[:len(pname_clean) + 25]
         ).ratio()
 
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
+    conn = get_db()
     try:
-        cursor = conn.cursor()
+        cursor = _cursor(conn)
 
         cursor.execute("SELECT id, name FROM products")
         products = [dict(r) for r in cursor.fetchall()]
 
         # Load ALL purchase items with a real price
         cursor.execute('''
-            SELECT pit.id as item_id, pit.purchase_id, pit.product_id,
-                   pit.name as item_name, pit.price, pit.units,
+            SELECT pit.id AS item_id, pit.purchase_id, pit.product_id,
+                   pit.name AS item_name, pit.price, pit.units,
                    pi.date, pi.contact_name
             FROM purchase_items pit
             JOIN purchase_invoices pi ON pi.id = pit.purchase_id
@@ -1288,9 +1307,9 @@ def find_inventory_in_purchases() -> list:
 
         # Products already handled — skip them
         cursor.execute("SELECT product_id FROM amortizations")
-        already_amort = set(r[0] for r in cursor.fetchall())
+        already_amort = set(r['product_id'] if isinstance(r, dict) else r[0] for r in cursor.fetchall())
         cursor.execute("SELECT product_id FROM inventory_matches")
-        already_matched = set(r[0] for r in cursor.fetchall())
+        already_matched = set(r['product_id'] if isinstance(r, dict) else r[0] for r in cursor.fetchall())
         skip_ids = already_amort | already_matched
 
         matches = []
@@ -1344,33 +1363,50 @@ def find_inventory_in_purchases() -> list:
 def save_inventory_match(purchase_id, purchase_item_id, product_id,
                          product_name, matched_price, matched_date, match_method):
     """Persist a pending inventory match for user review."""
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db()
     try:
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT OR IGNORE INTO inventory_matches
-                (purchase_id, purchase_item_id, product_id, product_name,
-                 matched_price, matched_date, match_method, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
-        ''', (purchase_id, purchase_item_id, product_id, product_name,
-              matched_price, matched_date, match_method))
+        cursor = _cursor(conn)
+        vals = (purchase_id, purchase_item_id, product_id, product_name,
+                matched_price, matched_date, match_method)
+        if _USE_SQLITE:
+            cursor.execute('''
+                INSERT OR IGNORE INTO inventory_matches
+                    (purchase_id, purchase_item_id, product_id, product_name,
+                     matched_price, matched_date, match_method, status)
+                VALUES (?,?,?,?,?,?,?,'pending')
+            ''', vals)
+            new_id = cursor.lastrowid
+        else:
+            cursor.execute('''
+                INSERT INTO inventory_matches
+                    (purchase_id, purchase_item_id, product_id, product_name,
+                     matched_price, matched_date, match_method, status)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,'pending')
+                ON CONFLICT (purchase_id, product_id) DO NOTHING
+                RETURNING id
+            ''', vals)
+            row = cursor.fetchone()
+            new_id = row['id'] if row else None
         conn.commit()
-        return cursor.lastrowid
+        return new_id
     finally:
         conn.close()
 
 
 def get_pending_matches() -> list:
     """Return all inventory matches awaiting user confirmation."""
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
+    # epoch → readable date differs by dialect
+    date_col = ("datetime(pi.date, 'unixepoch') AS invoice_date_full"
+                if _USE_SQLITE else
+                "to_timestamp(pi.date)::text AS invoice_date_full")
+    conn = get_db()
     try:
-        cursor = conn.cursor()
-        cursor.execute('''
+        cursor = _cursor(conn)
+        cursor.execute(f'''
             SELECT im.*,
-                   pi.contact_name as supplier,
-                   datetime(pi.date, 'unixepoch') as invoice_date_full,
-                   pit.name as item_name_found
+                   pi.contact_name AS supplier,
+                   {date_col},
+                   pit.name AS item_name_found
             FROM inventory_matches im
             JOIN purchase_invoices pi ON pi.id = im.purchase_id
             LEFT JOIN purchase_items pit ON pit.id = im.purchase_item_id
@@ -1393,51 +1429,59 @@ def confirm_inventory_match(match_id: int, confirmed: bool, custom_price=None,
     custom_price: overrides auto-detected price for this specific purchase link
     allocation_note: e.g. "1/3 del pack" — stored on the purchase link
     """
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
+    conn = get_db()
     try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM inventory_matches WHERE id=?", (match_id,))
+        cursor = _cursor(conn)
+        cursor.execute(_q("SELECT * FROM inventory_matches WHERE id=?"), (match_id,))
         match = cursor.fetchone()
         if not match:
             return {"ok": False, "error": "Match not found"}
 
         if not confirmed:
-            cursor.execute("UPDATE inventory_matches SET status='rejected' WHERE id=?", (match_id,))
+            cursor.execute(_q("UPDATE inventory_matches SET status='rejected' WHERE id=?"), (match_id,))
             conn.commit()
             return {"ok": True, "action": "rejected"}
 
         # Mark match as confirmed
-        cursor.execute("UPDATE inventory_matches SET status='confirmed' WHERE id=?", (match_id,))
+        cursor.execute(_q("UPDATE inventory_matches SET status='confirmed' WHERE id=?"), (match_id,))
 
         final_price = float(custom_price) if custom_price and float(custom_price) > 0 else match['matched_price']
         ptype = product_type or 'alquiler'
 
         # Upsert amortization — INSERT OR IGNORE so existing products are not overwritten
-        cursor.execute('''
-            INSERT OR IGNORE INTO amortizations
-                (product_id, product_name, purchase_price, purchase_date, notes, product_type)
-            VALUES (?, ?, 0, ?, ?, ?)
-        ''', (match['product_id'], match['product_name'],
-              match['matched_date'],
-              f"Vinculado desde inventory_matches via {match['match_method']}",
-              ptype))
+        amort_vals = (match['product_id'], match['product_name'],
+                      match['matched_date'],
+                      f"Vinculado desde inventory_matches via {match['match_method']}",
+                      ptype)
+        if _USE_SQLITE:
+            cursor.execute('''
+                INSERT OR IGNORE INTO amortizations
+                    (product_id, product_name, purchase_price, purchase_date, notes, product_type)
+                VALUES (?,?,0,?,?,?)
+            ''', amort_vals)
+        else:
+            cursor.execute('''
+                INSERT INTO amortizations
+                    (product_id, product_name, purchase_price, purchase_date, notes, product_type)
+                VALUES (%s,%s,0,%s,%s,%s)
+                ON CONFLICT (product_id) DO NOTHING
+            ''', amort_vals)
 
         # Retrieve the amortization id (whether just created or pre-existing)
-        cursor.execute("SELECT id FROM amortizations WHERE product_id=?", (match['product_id'],))
+        cursor.execute(_q("SELECT id FROM amortizations WHERE product_id=?"), (match['product_id'],))
         amort_row = cursor.fetchone()
         if not amort_row:
             conn.rollback()
             return {"ok": False, "error": "Could not create or find amortization"}
-        amort_id = amort_row[0]
+        amort_id = amort_row['id'] if isinstance(amort_row, dict) else amort_row[0]
 
         # Add the purchase link
         note = allocation_note or f"Auto desde match #{match_id} ({match['match_method']})"
-        cursor.execute('''
+        cursor.execute(_q('''
             INSERT INTO amortization_purchases
                 (amortization_id, purchase_id, purchase_item_id, cost_override, allocation_note)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (amort_id, match['purchase_id'], match['purchase_item_id'], final_price, note))
+            VALUES (?,?,?,?,?)
+        '''), (amort_id, match['purchase_id'], match['purchase_item_id'], final_price, note))
 
         # Recalculate purchase_price
         _recalc_purchase_price(cursor, amort_id)
@@ -1454,23 +1498,23 @@ def confirm_inventory_match(match_id: int, confirmed: bool, custom_price=None,
 def _recalc_purchase_price(cursor, amortization_id):
     """Recompute amortizations.purchase_price = SUM(cost_override) from amortization_purchases."""
     cursor.execute(
-        "SELECT COALESCE(SUM(cost_override), 0) FROM amortization_purchases WHERE amortization_id=?",
+        _q("SELECT COALESCE(SUM(cost_override), 0) AS total FROM amortization_purchases WHERE amortization_id=?"),
         (amortization_id,)
     )
-    total = cursor.fetchone()[0]
+    total = _fetch_one_val(cursor, "total") or 0
+    now_expr = "datetime('now')" if _USE_SQLITE else "NOW()"
     cursor.execute(
-        "UPDATE amortizations SET purchase_price=?, updated_at=datetime('now') WHERE id=?",
+        _q(f"UPDATE amortizations SET purchase_price=?, updated_at={now_expr} WHERE id=?"),
         (total, amortization_id)
     )
 
 
 def get_amortization_purchases(amortization_id):
     """Return all purchase links for one amortization, with purchase invoice details."""
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
+    conn = get_db()
     try:
-        cursor = conn.cursor()
-        cursor.execute('''
+        cursor = _cursor(conn)
+        cursor.execute(_q('''
             SELECT
                 ap.id,
                 ap.amortization_id,
@@ -1491,7 +1535,7 @@ def get_amortization_purchases(amortization_id):
             LEFT JOIN purchase_items    pit ON pit.id = ap.purchase_item_id
             WHERE ap.amortization_id = ?
             ORDER BY ap.created_at
-        ''', (amortization_id,))
+        '''), (amortization_id,))
         return [dict(r) for r in cursor.fetchall()]
     finally:
         conn.close()
@@ -1500,16 +1544,27 @@ def get_amortization_purchases(amortization_id):
 def add_amortization_purchase(amortization_id, cost_override, allocation_note="",
                                purchase_id=None, purchase_item_id=None):
     """Link a purchase invoice/item to an amortization with a specific cost."""
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db()
     try:
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO amortization_purchases
-                (amortization_id, purchase_id, purchase_item_id, cost_override, allocation_note)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (amortization_id, purchase_id, purchase_item_id,
-              float(cost_override), allocation_note))
-        new_id = cursor.lastrowid
+        cursor = _cursor(conn)
+        vals = (amortization_id, purchase_id, purchase_item_id,
+                float(cost_override), allocation_note)
+        if _USE_SQLITE:
+            cursor.execute('''
+                INSERT INTO amortization_purchases
+                    (amortization_id, purchase_id, purchase_item_id, cost_override, allocation_note)
+                VALUES (?,?,?,?,?)
+            ''', vals)
+            new_id = cursor.lastrowid
+        else:
+            cursor.execute('''
+                INSERT INTO amortization_purchases
+                    (amortization_id, purchase_id, purchase_item_id, cost_override, allocation_note)
+                VALUES (%s,%s,%s,%s,%s)
+                RETURNING id
+            ''', vals)
+            row = cursor.fetchone()
+            new_id = row['id'] if row else None
         _recalc_purchase_price(cursor, amortization_id)
         conn.commit()
         return new_id
@@ -1520,27 +1575,29 @@ def add_amortization_purchase(amortization_id, cost_override, allocation_note=""
 def update_amortization_purchase(purchase_link_id, cost_override=None, allocation_note=None,
                                   purchase_id=None, purchase_item_id=None):
     """Edit a purchase link (cost or note). Recalculates parent purchase_price."""
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db()
     try:
-        cursor = conn.cursor()
+        cursor = _cursor(conn)
+        ph = '%s' if not _USE_SQLITE else '?'
         fields, values = [], []
         if cost_override is not None:
-            fields.append("cost_override=?"); values.append(float(cost_override))
+            fields.append(f"cost_override={ph}"); values.append(float(cost_override))
         if allocation_note is not None:
-            fields.append("allocation_note=?"); values.append(allocation_note)
+            fields.append(f"allocation_note={ph}"); values.append(allocation_note)
         if purchase_id is not None:
-            fields.append("purchase_id=?"); values.append(purchase_id)
+            fields.append(f"purchase_id={ph}"); values.append(purchase_id)
         if purchase_item_id is not None:
-            fields.append("purchase_item_id=?"); values.append(purchase_item_id)
+            fields.append(f"purchase_item_id={ph}"); values.append(purchase_item_id)
         if not fields:
             return False
         values.append(purchase_link_id)
-        cursor.execute(f"UPDATE amortization_purchases SET {', '.join(fields)} WHERE id=?", values)
+        cursor.execute(f"UPDATE amortization_purchases SET {', '.join(fields)} WHERE id={ph}", values)
         # Get parent amortization_id to recalc
-        cursor.execute("SELECT amortization_id FROM amortization_purchases WHERE id=?", (purchase_link_id,))
+        cursor.execute(_q("SELECT amortization_id FROM amortization_purchases WHERE id=?"), (purchase_link_id,))
         row = cursor.fetchone()
         if row:
-            _recalc_purchase_price(cursor, row[0])
+            parent_id = row['amortization_id'] if isinstance(row, dict) else row[0]
+            _recalc_purchase_price(cursor, parent_id)
         conn.commit()
         return cursor.rowcount > 0
     finally:
@@ -1549,15 +1606,15 @@ def update_amortization_purchase(purchase_link_id, cost_override=None, allocatio
 
 def delete_amortization_purchase(purchase_link_id):
     """Remove a purchase link and recalculate parent purchase_price."""
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db()
     try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT amortization_id FROM amortization_purchases WHERE id=?", (purchase_link_id,))
+        cursor = _cursor(conn)
+        cursor.execute(_q("SELECT amortization_id FROM amortization_purchases WHERE id=?"), (purchase_link_id,))
         row = cursor.fetchone()
         if not row:
             return False
-        amort_id = row[0]
-        cursor.execute("DELETE FROM amortization_purchases WHERE id=?", (purchase_link_id,))
+        amort_id = row['amortization_id'] if isinstance(row, dict) else row[0]
+        cursor.execute(_q("DELETE FROM amortization_purchases WHERE id=?"), (purchase_link_id,))
         _recalc_purchase_price(cursor, amort_id)
         conn.commit()
         return True
@@ -1567,10 +1624,9 @@ def delete_amortization_purchase(purchase_link_id):
 
 def get_product_type_rules() -> list:
     """Return all product type fiscal rules."""
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
+    conn = get_db()
     try:
-        cursor = conn.cursor()
+        cursor = _cursor(conn)
         cursor.execute("SELECT * FROM product_type_rules ORDER BY is_expense, irpf_pct DESC")
         return [dict(r) for r in cursor.fetchall()]
     finally:
@@ -1583,10 +1639,9 @@ def get_amortizations():
     Revenue = SUM of (units * price) per invoice_item where product_id matches.
     Also returns product_type and its fiscal rule (irpf_pct).
     """
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
+    conn = get_db()
     try:
-        cursor = conn.cursor()
+        cursor = _cursor(conn)
         cursor.execute('''
             SELECT
                 a.id,
@@ -1610,7 +1665,9 @@ def get_amortizations():
             FROM amortizations a
             LEFT JOIN invoice_items ii  ON ii.product_id  = a.product_id
             LEFT JOIN product_type_rules ptr ON ptr.type_key = a.product_type
-            GROUP BY a.id
+            GROUP BY a.id, a.product_id, a.product_name, a.purchase_price,
+                     a.purchase_date, a.notes, a.product_type, a.created_at,
+                     ptr.label, ptr.irpf_pct, ptr.is_expense
             ORDER BY a.purchase_date DESC
         ''')
         rows = cursor.fetchall()
@@ -1629,18 +1686,31 @@ def get_amortizations():
 def add_amortization(product_id, product_name, purchase_price, purchase_date,
                      notes="", product_type="alquiler"):
     """Add a product to amortization tracking. Returns new id or None if duplicate."""
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db()
     try:
-        cursor = conn.cursor()
-        cursor.execute('''
-            INSERT INTO amortizations
-                (product_id, product_name, purchase_price, purchase_date, notes, product_type)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (product_id, product_name, purchase_price, purchase_date, notes, product_type))
+        cursor = _cursor(conn)
+        vals = (product_id, product_name, purchase_price, purchase_date, notes, product_type)
+        if _USE_SQLITE:
+            cursor.execute('''
+                INSERT INTO amortizations
+                    (product_id, product_name, purchase_price, purchase_date, notes, product_type)
+                VALUES (?,?,?,?,?,?)
+            ''', vals)
+            new_id = cursor.lastrowid
+        else:
+            cursor.execute('''
+                INSERT INTO amortizations
+                    (product_id, product_name, purchase_price, purchase_date, notes, product_type)
+                VALUES (%s,%s,%s,%s,%s,%s)
+                RETURNING id
+            ''', vals)
+            row = cursor.fetchone()
+            new_id = row['id'] if row else None
         conn.commit()
-        return cursor.lastrowid
-    except sqlite3.IntegrityError:
-        return None  # product already tracked
+        return new_id
+    except Exception:
+        conn.rollback()
+        return None  # likely duplicate product_id (UNIQUE constraint)
     finally:
         conn.close()
 
@@ -1648,37 +1718,37 @@ def add_amortization(product_id, product_name, purchase_price, purchase_date,
 def update_amortization(amort_id, purchase_price=None, purchase_date=None,
                         notes=None, product_type=None):
     """Update fields for an amortization entry. Pass only the fields to change."""
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db()
     try:
-        cursor = conn.cursor()
-        fields = []
-        values = []
+        cursor = _cursor(conn)
+        ph = '%s' if not _USE_SQLITE else '?'
+        fields, values = [], []
         if purchase_price is not None:
-            fields.append("purchase_price=?"); values.append(purchase_price)
+            fields.append(f"purchase_price={ph}"); values.append(purchase_price)
         if purchase_date is not None:
-            fields.append("purchase_date=?"); values.append(purchase_date)
+            fields.append(f"purchase_date={ph}"); values.append(purchase_date)
         if notes is not None:
-            fields.append("notes=?"); values.append(notes)
+            fields.append(f"notes={ph}"); values.append(notes)
         if product_type is not None:
-            fields.append("product_type=?"); values.append(product_type)
+            fields.append(f"product_type={ph}"); values.append(product_type)
         if not fields:
             return False
-        fields.append("updated_at=datetime('now')")
+        now_expr = "datetime('now')" if _USE_SQLITE else "NOW()"
+        fields.append(f"updated_at={now_expr}")
         values.append(amort_id)
-        cursor.execute(
-            f"UPDATE amortizations SET {', '.join(fields)} WHERE id=?", values
-        )
+        cursor.execute(f"UPDATE amortizations SET {', '.join(fields)} WHERE id={ph}", values)
         conn.commit()
         return cursor.rowcount > 0
     finally:
         conn.close()
 
+
 def delete_amortization(amort_id):
     """Remove a product from amortization tracking."""
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_db()
     try:
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM amortizations WHERE id=?", (amort_id,))
+        cursor = _cursor(conn)
+        cursor.execute(_q("DELETE FROM amortizations WHERE id=?"), (amort_id,))
         conn.commit()
         return cursor.rowcount > 0
     finally:
