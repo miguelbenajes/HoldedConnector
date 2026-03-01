@@ -25,8 +25,19 @@ ai_analysis.pdf
 # Logs
 server.log
 
+# Local backups
+BACKUPS/
+
 # macOS
 .DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Python packaging
+*.egg-info/
 
 # Claude
 .claude/
