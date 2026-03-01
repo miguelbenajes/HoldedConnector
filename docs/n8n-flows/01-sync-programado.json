@@ -54,6 +54,31 @@
           }
         }
       }
+    },
+    {
+      "id": "a1b2c3d4-0001-0001-0001-a1b2c3d40004",
+      "name": "Registrar sync",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [900, 300],
+      "parameters": {
+        "operation": "create",
+        "tableId": "sync_logs",
+        "fieldsUi": {
+          "fieldValues": [
+            {"fieldId": "started_at", "fieldValue": "={{ new Date().toISOString() }}"},
+            {"fieldId": "finished_at", "fieldValue": "={{ new Date().toISOString() }}"},
+            {"fieldId": "status", "fieldValue": "ok"},
+            {"fieldId": "counts", "fieldValue": "={{ JSON.stringify($json.record_counts) }}"}
+          ]
+        }
+      },
+      "credentials": {
+        "supabaseApi": {
+          "id": "SUPABASE_CREDENTIAL_ID",
+          "name": "Supabase account"
+        }
+      }
     }
   ],
   "connections": {
@@ -73,6 +98,17 @@
         [
           {
             "node": "GET /api/backup/status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET /api/backup/status": {
+      "main": [
+        [
+          {
+            "node": "Registrar sync",
             "type": "main",
             "index": 0
           }
