@@ -1,0 +1,37 @@
+# Secrets & local config
+.env
+*.db
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# Generated files
+uploads/
+reports/
+server.log
+ai_report_*.pdf
+ai_analysis.pdf
+
+# Local data
+BACKUPS/
+
+# Dev tools
+.vscode/
+.idea/
+.claude/
+
+# macOS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore

@@ -1,0 +1,164 @@
+{
+  "name": "03 - Recordatorio cobro a clientes",
+  "nodes": [
+    {
+      "id": "c3d4e5f6-0003-0003-0003-c3d4e5f60001",
+      "name": "Diario a las 08:30",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "30 8 * * *"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "c3d4e5f6-0003-0003-0003-c3d4e5f60002",
+      "name": "Facturas próximas a vencer",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [460, 300],
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "invoices",
+        "returnAll": true,
+        "filterType": "string",
+        "filterString": "status=in.(1,2)&due_date=not.is.null"
+      },
+      "credentials": {
+        "supabaseApi": {
+          "id": "SUPABASE_CREDENTIAL_ID",
+          "name": "Supabase account"
+        }
+      }
+    },
+    {
+      "id": "c3d4e5f6-0003-0003-0003-c3d4e5f60003",
+      "name": "Filtrar vencimientos relevantes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300],
+      "parameters": {
+        "jsCode": "const today = new Date();\ntoday.setHours(0, 0, 0, 0);\n\nconst TARGET_DAYS = [5, 0, -3]; // +5 días antes, día exacto, -3 días después\n\nconst relevant = $input.all().filter(item => {\n  const inv = item.json;\n  if (!inv.due_date) return false;\n  const due = new Date(inv.due_date);\n  due.setHours(0, 0, 0, 0);\n  const diff = Math.round((due - today) / (1000 * 60 * 60 * 24));\n  return TARGET_DAYS.includes(diff);\n}).map(item => {\n  const due = new Date(item.json.due_date);\n  due.setHours(0, 0, 0, 0);\n  const diff = Math.round((due - today) / (1000 * 60 * 60 * 24));\n  return {\n    json: {\n      ...item.json,\n      days_until_due: diff,\n      reminder_type: diff > 0 ? 'previo' : diff === 0 ? 'vencimiento' : 'seguimiento'\n    }\n  };\n});\n\nreturn relevant;"
+      }
+    },
+    {
+      "id": "c3d4e5f6-0003-0003-0003-c3d4e5f60004",
+      "name": "¿Hay recordatorios?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 300],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "id": "condition1",
+              "leftValue": "={{ $input.all().length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "c3d4e5f6-0003-0003-0003-c3d4e5f60005",
+      "name": "Loop por factura",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [1120, 220],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      }
+    },
+    {
+      "id": "c3d4e5f6-0003-0003-0003-c3d4e5f60006",
+      "name": "Preparar borrador recordatorio",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 220],
+      "parameters": {
+        "jsCode": "const inv = $json;\n\nconst dueFormatted = inv.due_date ? new Date(inv.due_date).toLocaleDateString('es-ES') : 'N/D';\nconst amount = Number(inv.amount).toFixed(2);\n\nlet subjectPrefix, intro;\nif (inv.days_until_due > 0) {\n  subjectPrefix = `Recordatorio: factura vence en ${inv.days_until_due} días`;\n  intro = `Le recordamos que la siguiente factura vence en ${inv.days_until_due} días.`;\n} else if (inv.days_until_due === 0) {\n  subjectPrefix = `Aviso: factura vence hoy`;\n  intro = `Le informamos que la siguiente factura vence hoy.`;\n} else {\n  subjectPrefix = `Seguimiento: factura vencida hace ${Math.abs(inv.days_until_due)} días`;\n  intro = `Nos ponemos en contacto para hacer seguimiento de la siguiente factura, que venció hace ${Math.abs(inv.days_until_due)} días.`;\n}\n\nconst subject = `${subjectPrefix} — ${inv.doc_number || inv.id}`;\nconst html = `\n<p>Estimado/a ${inv.contact_name || 'cliente'},</p>\n<p>${intro}</p>\n<table border=\"1\" cellpadding=\"8\" cellspacing=\"0\" style=\"border-collapse:collapse;font-family:Arial,sans-serif\">\n  <tr><td><strong>Nº Factura</strong></td><td>${inv.doc_number || inv.id}</td></tr>\n  <tr><td><strong>Importe pendiente</strong></td><td>${amount} €</td></tr>\n  <tr><td><strong>Fecha de vencimiento</strong></td><td>${dueFormatted}</td></tr>\n</table>\n<p>Quedo a su disposición para cualquier consulta.</p>\n<p>Atentamente</p>\n<hr style=\"margin-top:24px\"/>\n<p style=\"color:#888;font-size:11px\">Aviso generado automáticamente por HoldedConnector.</p>\n`;\n\nreturn [{ json: { subject, html, contact_name: inv.contact_name } }];"
+      }
+    },
+    {
+      "id": "c3d4e5f6-0003-0003-0003-c3d4e5f60007",
+      "name": "Gmail — Crear Borrador",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1560, 220],
+      "parameters": {
+        "operation": "create",
+        "resource": "draft",
+        "subject": "={{ $json.subject }}",
+        "emailType": "html",
+        "message": "={{ $json.html }}",
+        "options": {}
+      },
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "GMAIL_CREDENTIAL_ID",
+          "name": "Gmail account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Diario a las 08:30": {
+      "main": [
+        [{ "node": "Facturas próximas a vencer", "type": "main", "index": 0 }]
+      ]
+    },
+    "Facturas próximas a vencer": {
+      "main": [
+        [{ "node": "Filtrar vencimientos relevantes", "type": "main", "index": 0 }]
+      ]
+    },
+    "Filtrar vencimientos relevantes": {
+      "main": [
+        [{ "node": "¿Hay recordatorios?", "type": "main", "index": 0 }]
+      ]
+    },
+    "¿Hay recordatorios?": {
+      "main": [
+        [{ "node": "Loop por factura", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Loop por factura": {
+      "main": [
+        [{ "node": "Preparar borrador recordatorio", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Preparar borrador recordatorio": {
+      "main": [
+        [{ "node": "Gmail — Crear Borrador", "type": "main", "index": 0 }]
+      ]
+    },
+    "Gmail — Crear Borrador": {
+      "main": [
+        [{ "node": "Loop por factura", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "instanceId": ""
+  },
+  "tags": ["holded", "recordatorios", "cobro"]
+}
