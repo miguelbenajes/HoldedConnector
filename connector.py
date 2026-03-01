@@ -147,7 +147,7 @@ def init_db():
             id TEXT PRIMARY KEY,
             contact_id TEXT,
             contact_name TEXT,
-            desc TEXT,
+            "desc" TEXT,
             date INTEGER,
             amount {_real},
             status INTEGER,
@@ -163,7 +163,7 @@ def init_db():
             id TEXT PRIMARY KEY,
             contact_id TEXT,
             contact_name TEXT,
-            desc TEXT,
+            "desc" TEXT,
             date INTEGER,
             amount {_real},
             status INTEGER,
@@ -176,7 +176,7 @@ def init_db():
             id TEXT PRIMARY KEY,
             contact_id TEXT,
             contact_name TEXT,
-            desc TEXT,
+            "desc" TEXT,
             date INTEGER,
             amount {_real},
             status INTEGER,
@@ -188,7 +188,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS products (
             id TEXT PRIMARY KEY,
             name TEXT,
-            desc TEXT,
+            "desc" TEXT,
             price {_real},
             stock {_real},
             sku TEXT
@@ -271,7 +271,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS projects (
             id TEXT PRIMARY KEY,
             name TEXT,
-            desc TEXT,
+            "desc" TEXT,
             status TEXT,
             customer_id TEXT,
             budget {_real}
@@ -584,19 +584,19 @@ def sync_documents(doc_type, table, items_table, fk_column):
                 if _USE_SQLITE:
                     cursor.execute('''
                         INSERT OR REPLACE INTO invoices
-                            (id, contact_id, contact_name, desc, date, amount, status,
+                            (id, contact_id, contact_name, "desc", date, amount, status,
                              payments_pending, payments_total, due_date, doc_number)
                         VALUES (?,?,?,?,?,?,?,?,?,?,?)
                     ''', vals)
                 else:
                     cursor.execute('''
                         INSERT INTO invoices
-                            (id, contact_id, contact_name, desc, date, amount, status,
+                            (id, contact_id, contact_name, "desc", date, amount, status,
                              payments_pending, payments_total, due_date, doc_number)
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                         ON CONFLICT (id) DO UPDATE SET
                             contact_id=EXCLUDED.contact_id, contact_name=EXCLUDED.contact_name,
-                            desc=EXCLUDED.desc, date=EXCLUDED.date, amount=EXCLUDED.amount,
+                            "desc"=EXCLUDED."desc", date=EXCLUDED.date, amount=EXCLUDED.amount,
                             status=EXCLUDED.status, payments_pending=EXCLUDED.payments_pending,
                             payments_total=EXCLUDED.payments_total, due_date=EXCLUDED.due_date,
                             doc_number=EXCLUDED.doc_number
@@ -607,17 +607,17 @@ def sync_documents(doc_type, table, items_table, fk_column):
                 if _USE_SQLITE:
                     cursor.execute(f'''
                         INSERT OR REPLACE INTO {table}
-                            (id, contact_id, contact_name, desc, date, amount, status, doc_number)
+                            (id, contact_id, contact_name, "desc", date, amount, status, doc_number)
                         VALUES (?,?,?,?,?,?,?,?)
                     ''', vals)
                 else:
                     cursor.execute(f'''
                         INSERT INTO {table}
-                            (id, contact_id, contact_name, desc, date, amount, status, doc_number)
+                            (id, contact_id, contact_name, "desc", date, amount, status, doc_number)
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
                         ON CONFLICT (id) DO UPDATE SET
                             contact_id=EXCLUDED.contact_id, contact_name=EXCLUDED.contact_name,
-                            desc=EXCLUDED.desc, date=EXCLUDED.date, amount=EXCLUDED.amount,
+                            "desc"=EXCLUDED."desc", date=EXCLUDED.date, amount=EXCLUDED.amount,
                             status=EXCLUDED.status, doc_number=EXCLUDED.doc_number
                     ''', vals)
 
@@ -683,12 +683,12 @@ def sync_products():
             vals = (item.get('id'), item.get('name'), item.get('desc'),
                     item.get('price'), item.get('stock'), item.get('sku'))
             if _USE_SQLITE:
-                cursor.execute("INSERT OR REPLACE INTO products (id, name, desc, price, stock, sku) VALUES (?,?,?,?,?,?)", vals)
+                cursor.execute('INSERT OR REPLACE INTO products (id, name, "desc", price, stock, sku) VALUES (?,?,?,?,?,?)', vals)
             else:
                 cursor.execute("""
-                    INSERT INTO products (id, name, desc, price, stock, sku) VALUES (%s,%s,%s,%s,%s,%s)
+                    INSERT INTO products (id, name, "desc", price, stock, sku) VALUES (%s,%s,%s,%s,%s,%s)
                     ON CONFLICT (id) DO UPDATE SET
-                        name=EXCLUDED.name, desc=EXCLUDED.desc, price=EXCLUDED.price,
+                        name=EXCLUDED.name, "desc"=EXCLUDED."desc", price=EXCLUDED.price,
                         stock=EXCLUDED.stock, sku=EXCLUDED.sku
                 """, vals)
         conn.commit()
@@ -737,15 +737,15 @@ def sync_projects():
                     item.get('status'), item.get('customer'), item.get('budget'))
             if _USE_SQLITE:
                 cursor.execute("""
-                    INSERT OR REPLACE INTO projects (id, name, desc, status, customer_id, budget)
+                    INSERT OR REPLACE INTO projects (id, name, "desc", status, customer_id, budget)
                     VALUES (?,?,?,?,?,?)
                 """, vals)
             else:
                 cursor.execute("""
-                    INSERT INTO projects (id, name, desc, status, customer_id, budget)
+                    INSERT INTO projects (id, name, "desc", status, customer_id, budget)
                     VALUES (%s,%s,%s,%s,%s,%s)
                     ON CONFLICT (id) DO UPDATE SET
-                        name=EXCLUDED.name, desc=EXCLUDED.desc, status=EXCLUDED.status,
+                        name=EXCLUDED.name, "desc"=EXCLUDED."desc", status=EXCLUDED.status,
                         customer_id=EXCLUDED.customer_id, budget=EXCLUDED.budget
                 """, vals)
         conn.commit()
@@ -1101,13 +1101,13 @@ def get_unanalyzed_purchases(limit: int = 10) -> list:
     try:
         cursor = _cursor(conn)
         cursor.execute(_q(f'''
-            SELECT pi.id, pi.contact_name, pi.desc, pi.date, pi.amount,
+            SELECT pi.id, pi.contact_name, pi."desc", pi.date, pi.amount,
                    {agg} AS item_names
             FROM purchase_invoices pi
             LEFT JOIN purchase_items pit ON pit.purchase_id = pi.id
             LEFT JOIN purchase_analysis pa ON pa.purchase_id = pi.id
             WHERE pa.id IS NULL
-            GROUP BY pi.id, pi.contact_name, pi.desc, pi.date, pi.amount
+            GROUP BY pi.id, pi.contact_name, pi."desc", pi.date, pi.amount
             ORDER BY pi.date DESC
             LIMIT ?
         '''), (limit,))
@@ -1164,10 +1164,10 @@ def get_analyzed_invoices(limit: int = 50, offset: int = 0, category: str = None
             params.append(category)
         if q:
             like = f"%{q}%"
-            where += f" AND (pi.contact_name LIKE {ph} OR pi.desc LIKE {ph} OR pa.category LIKE {ph} OR pa.subcategory LIKE {ph})"
+            where += f' AND (pi.contact_name LIKE {ph} OR pi."desc" LIKE {ph} OR pa.category LIKE {ph} OR pa.subcategory LIKE {ph})'
             params += [like, like, like, like]
         cursor.execute(f'''
-            SELECT pi.id, pi.contact_name, pi.desc, pi.amount, pi.date, pi.status,
+            SELECT pi.id, pi.contact_name, pi."desc", pi.amount, pi.date, pi.status,
                    pa.category, pa.subcategory, pa.confidence, pa.method, pa.reasoning
             FROM purchase_invoices pi
             JOIN purchase_analysis pa ON pi.id = pa.purchase_id
@@ -1524,9 +1524,9 @@ def get_amortization_purchases(amortization_id):
                 ap.allocation_note,
                 ap.created_at,
                 pi.contact_name  AS supplier,
-                pi.desc          AS invoice_desc,
+                pi."desc"        AS invoice_desc,
                 pi.date          AS invoice_date,
-                pi.desc          AS doc_number,
+                pi."desc"        AS doc_number,
                 pit.name         AS item_name,
                 pit.price        AS item_unit_price,
                 pit.units        AS item_units
