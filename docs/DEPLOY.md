@@ -108,7 +108,7 @@ docker compose logs -f n8n
 
 Comprobación rápida:
 ```bash
-curl http://localhost:8000/api/status
+curl http://localhost:8000/api/backup/status
 # Debe devolver JSON con counts de tablas
 ```
 
