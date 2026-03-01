@@ -446,6 +446,11 @@ def get_unpaid_invoices():
 
 @app.get("/api/stats/monthly")
 def get_monthly_stats(start: Optional[int] = None, end: Optional[int] = None):
+    if connector._USE_SQLITE:
+        month_expr = "strftime('%Y-%m', datetime(date, 'unixepoch'))"
+    else:
+        month_expr = "TO_CHAR(TO_TIMESTAMP(date), 'YYYY-MM')"
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
 
@@ -457,27 +462,27 @@ def get_monthly_stats(start: Optional[int] = None, end: Optional[int] = None):
 
         cursor.execute(f"""
             SELECT
-                strftime('%Y-%m', datetime(date, 'unixepoch')) as month,
+                {month_expr} as month,
                 SUM(amount) as total
             FROM invoices
             {where_clause}
             GROUP BY month
             ORDER BY month DESC
             LIMIT 12
-        """, params)
+        """, params or None)
         income = [dict(row) for row in cursor.fetchall()]
         income.reverse()
 
         cursor.execute(f"""
             SELECT
-                strftime('%Y-%m', datetime(date, 'unixepoch')) as month,
+                {month_expr} as month,
                 SUM(amount) as total
             FROM purchase_invoices
             {where_clause}
             GROUP BY month
             ORDER BY month DESC
             LIMIT 12
-        """, params)
+        """, params or None)
         expenses = [dict(row) for row in cursor.fetchall()]
         expenses.reverse()
 
