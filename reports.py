@@ -53,16 +53,13 @@ def get_financial_summary_data():
     """
     Gathers a flat list of financial records for Excel export.
     """
-    import sqlite3
-    # Use the same DB path constant as connector
-    conn = sqlite3.connect(connector.DB_NAME)
+    conn = connector.get_db()
     try:
-        # Get invoices and purchase invoices
         df_invoices = pd.read_sql_query("SELECT id, contact_name, date, amount, status FROM invoices", conn)
         df_purchases = pd.read_sql_query("SELECT id, contact_name, date, amount, status FROM purchase_invoices", conn)
-        conn.close()
         return {"Invoices": df_invoices, "Purchases": df_purchases}
     except Exception as e:
-        conn.close()
         logger.error(f"Excel data gather error: {e}")
         return {}
+    finally:
+        conn.close()
