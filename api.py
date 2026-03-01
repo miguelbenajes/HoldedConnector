@@ -4,7 +4,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
 from typing import Optional
 from contextlib import contextmanager
-import sqlite3
 import os
 import time
 import logging
@@ -206,12 +205,36 @@ def on_startup():
     _scheduler_thread.start()
     logger.info("Daily analysis scheduler started")
 
+class _CompatCursor:
+    """Cursor wrapper: auto-converts ? placeholders for PostgreSQL and returns dict-like rows."""
+    def __init__(self, inner):
+        self._cur = inner
+    def execute(self, sql, params=None):
+        if not connector._USE_SQLITE:
+            sql = sql.replace("?", "%s")
+        self._cur.execute(sql, params) if params is not None else self._cur.execute(sql)
+    def fetchone(self):      return self._cur.fetchone()
+    def fetchall(self):      return self._cur.fetchall()
+    def fetchmany(self, n):  return self._cur.fetchmany(n)
+    @property
+    def description(self):  return self._cur.description
+    @property
+    def rowcount(self):      return self._cur.rowcount
+
+class _ConnProxy:
+    """Connection proxy: .cursor() returns a _CompatCursor backed by connector._cursor()."""
+    def __init__(self, conn):
+        self._conn = conn
+    def cursor(self):    return _CompatCursor(connector._cursor(self._conn))
+    def commit(self):    self._conn.commit()
+    def rollback(self):  self._conn.rollback()
+    def close(self):     self._conn.close()
+
 @contextmanager
 def get_db_connection():
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
+    conn = connector.get_db()
     try:
-        yield conn
+        yield _ConnProxy(conn)
     finally:
         conn.close()
 
@@ -619,16 +642,15 @@ def get_document_pdf(doc_type: str, doc_id: str):
             db_table = {"invoices": "invoices", "purchases": "purchase_invoices", "estimates": "estimates"}.get(doc_type)
             if not db_table:
                 return f"document_{doc_id}.pdf"
-            conn = sqlite3.connect(DB_NAME)
-            conn.row_factory = sqlite3.Row
-            cur = conn.cursor()
-            cur.execute(f"SELECT contact_name, doc_number FROM {db_table} WHERE id = ?", (doc_id,))
+            conn = connector.get_db()
+            cur = connector._cursor(conn)
+            cur.execute(connector._q(f"SELECT contact_name, doc_number FROM {db_table} WHERE id = ?"), (doc_id,))
             row = cur.fetchone()
             conn.close()
             if not row:
                 return f"document_{doc_id}.pdf"
-            contact_name = row["contact_name"]
-            doc_number = row["doc_number"]
+            contact_name = row["contact_name"] if isinstance(row, dict) else row[0]
+            doc_number = row["doc_number"] if isinstance(row, dict) else row[1]
             # Slugify: keep alphanumeric + spaces/slash, map to underscores
             def slug(s):
                 if not s:
@@ -1117,15 +1139,20 @@ def backup_data_json():
         "ai_favorites", "settings",
     ]
     export: dict = {"exported_at": datetime.now().isoformat(), "tables": {}}
-    conn = sqlite3.connect(connector.DB_NAME)
+    conn = connector.get_db()
     try:
         for tbl in tables:
             try:
-                cur = conn.execute(f"SELECT * FROM {tbl}")
-                cols = [d[0] for d in cur.description]
-                export["tables"][tbl] = [dict(zip(cols, row)) for row in cur.fetchall()]
+                cur = connector._cursor(conn)
+                cur.execute(f"SELECT * FROM {tbl}")
+                rows = cur.fetchall()
+                if connector._USE_SQLITE:
+                    rows = [dict(r) for r in rows]
+                export["tables"][tbl] = list(rows)
             except Exception:
-                export["tables"][tbl] = []  # table may not exist yet
+                if not connector._USE_SQLITE:
+                    conn.rollback()
+                export["tables"][tbl] = []
     finally:
         conn.close()
 
@@ -1183,18 +1210,27 @@ def backup_code_zip():
 def backup_status():
     """Return metadata about what will be backed up (sizes, record counts, last commit)."""
     import os, subprocess
-    db_path = os.path.abspath("holded.db")
-    db_size = os.path.getsize(db_path) if os.path.exists(db_path) else 0
+    if connector._USE_SQLITE:
+        db_path = os.path.abspath(connector.DB_NAME)
+        db_size = os.path.getsize(db_path) if os.path.exists(db_path) else 0
+    else:
+        db_size = 0  # PostgreSQL — no local file
 
     # record counts
     counts: dict = {}
-    conn = sqlite3.connect(connector.DB_NAME)
+    conn = connector.get_db()
+    cur = connector._cursor(conn)
     try:
         for tbl in ["invoices", "purchase_invoices", "contacts", "products",
                     "amortizations", "purchase_analysis", "inventory_matches"]:
             try:
-                counts[tbl] = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+                cur.execute(f"SELECT COUNT(*) AS cnt FROM {tbl}")
+                row = cur.fetchone()
+                counts[tbl] = row["cnt"] if isinstance(row, dict) else row[0]
             except Exception:
+                if not connector._USE_SQLITE:
+                    conn.rollback()
+                cur = connector._cursor(conn)
                 counts[tbl] = 0
     finally:
         conn.close()
