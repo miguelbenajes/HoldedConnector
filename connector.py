@@ -559,6 +559,17 @@ def _row_val(row, key, idx):
     return row[idx]
 
 
+def _num(val):
+    """Sanitize a value for a NUMERIC column: empty strings → None (NULL).
+    PostgreSQL rejects empty strings in NUMERIC columns; SQLite accepts them silently."""
+    if val is None or val == '':
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
 def sync_documents(doc_type, table, items_table, fk_column):
     logger.info(f"Syncing {doc_type}s (Historical)...")
     params = {"starttmp": 1262304000, "endtmp": int(time.time())}
@@ -578,8 +589,8 @@ def sync_documents(doc_type, table, items_table, fk_column):
             doc_id = item.get('id')
             if table == 'invoices':
                 vals = (doc_id, item.get('contact'), item.get('contactName'), item.get('desc'),
-                        item.get('date'), item.get('total'), item.get('status'),
-                        item.get('paymentsPending', 0), item.get('paymentsTotal', 0),
+                        item.get('date'), _num(item.get('total')), item.get('status'),
+                        _num(item.get('paymentsPending', 0)), _num(item.get('paymentsTotal', 0)),
                         item.get('dueDate'), item.get('docNumber'))
                 if _USE_SQLITE:
                     cursor.execute('''
@@ -603,7 +614,7 @@ def sync_documents(doc_type, table, items_table, fk_column):
                     ''', vals)
             else:
                 vals = (doc_id, item.get('contact'), item.get('contactName'), item.get('desc'),
-                        item.get('date'), item.get('total'), item.get('status'), item.get('docNumber'))
+                        item.get('date'), _num(item.get('total')), item.get('status'), item.get('docNumber'))
                 if _USE_SQLITE:
                     cursor.execute(f'''
                         INSERT OR REPLACE INTO {table}
@@ -632,8 +643,8 @@ def sync_documents(doc_type, table, items_table, fk_column):
                         ({fk_column}, product_id, name, sku, units, price, subtotal, discount, tax, retention, account)
                     VALUES (?,?,?,?,?,?,?,?,?,?,?)
                 '''), (doc_id, prod.get('productId'), prod.get('name'), prod.get('sku'),
-                       prod.get('units'), prod.get('price'), prod.get('subtotal'),
-                       prod.get('discount'), prod.get('tax'), retention, account))
+                       _num(prod.get('units')), _num(prod.get('price')), _num(prod.get('subtotal')),
+                       _num(prod.get('discount')), _num(prod.get('tax')), _num(retention), account))
 
         conn.commit()
     finally:
@@ -681,7 +692,7 @@ def sync_products():
         cursor = _cursor(conn)
         for item in data:
             vals = (item.get('id'), item.get('name'), item.get('desc'),
-                    item.get('price'), item.get('stock'), item.get('sku'))
+                    _num(item.get('price')), _num(item.get('stock')), item.get('sku'))
             if _USE_SQLITE:
                 cursor.execute('INSERT OR REPLACE INTO products (id, name, "desc", price, stock, sku) VALUES (?,?,?,?,?,?)', vals)
             else:
@@ -734,7 +745,7 @@ def sync_projects():
         cursor = _cursor(conn)
         for item in data:
             vals = (item.get('id'), item.get('name'), item.get('desc'),
-                    item.get('status'), item.get('customer'), item.get('budget'))
+                    item.get('status'), item.get('customer'), _num(item.get('budget')))
             if _USE_SQLITE:
                 cursor.execute("""
                     INSERT OR REPLACE INTO projects (id, name, "desc", status, customer_id, budget)
@@ -761,7 +772,7 @@ def sync_payments():
     try:
         cursor = _cursor(conn)
         for item in data:
-            vals = (item.get('id'), item.get('documentId'), item.get('amount'),
+            vals = (item.get('id'), item.get('documentId'), _num(item.get('amount')),
                     item.get('date'), item.get('paymentMethod'), item.get('type'))
             if _USE_SQLITE:
                 cursor.execute("""
