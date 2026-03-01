@@ -1,57 +1,78 @@
-# Holded Dashboard Connector 📊🚀
+# HoldedConnector
 
-Este proyecto es un conector y panel de control para visualizar tus datos de Holded (Facturas, Gastos, Presupuestos y Contactos) de forma local, rápida y con una interfaz premium.
+Dashboard financiero que sincroniza datos de Holded API a PostgreSQL (Supabase) con asistente virtual IA integrado.
 
-## 🚀 Cómo ejecutarlo en cualquier máquina
+## Stack
 
-La mejor manera de ejecutar esta aplicación de forma idéntica en cualquier sistema (Windows, Mac, Linux) es usando **Docker**.
+- **Backend:** FastAPI + Python 3.9+
+- **Base de datos:** PostgreSQL (Supabase) / SQLite (desarrollo local)
+- **IA:** Claude API (tool_use) con 19 herramientas y respuestas en streaming
+- **Frontend:** Vanilla JS + Chart.js + PWA instalable
+- **Integraciones:** Holded API (facturación, CRM, contabilidad)
 
-### Opción 1: Docker (Recomendado)
+## Funcionalidades
 
-Si tienes Docker instalado, solo necesitas ejecutar un comando:
+- **Sync de datos:** Facturas, gastos, presupuestos, contactos, productos, pagos, proyectos
+- **Dashboard:** Vista general con ingresos/gastos/balance, tendencias mensuales, top clientes
+- **Asistente IA:** Chat con Claude que consulta y analiza datos financieros en tiempo real
+  - Consultas SQL seguras (solo SELECT)
+  - Creacion de facturas y presupuestos con confirmacion
+  - Graficos inline (Chart.js)
+  - Historial de conversaciones y favoritos
+- **Amortizaciones:** Tracking de ROI para productos alquilados
+- **Analisis de compras:** Categorizacion automatica con IA
+- **PWA:** Instalable en movil y escritorio
+- **Tema claro/oscuro**
 
-1. Crea o asegúrate de tener el archivo `.env` con tu clave de API:
-   ```env
-   HOLDED_API_KEY=tu_clave_aqui
-   HOLDED_SAFE_MODE=true
-   ```
-2. Ejecuta el comando:
-   ```bash
-   docker-compose up -d --build
-   ```
-3. Abre tu navegador en: `http://localhost:8000`
+## Setup rapido
 
-### Opción 2: Instalación Manual (Python)
+```bash
+git clone https://github.com/miguelbenajes/HoldedConnector.git
+cd HoldedConnector
+pip install -r requirements.txt
+cp .env.example .env
+# Editar .env con tus claves
+python3 api.py
+```
 
-Si prefieres ejecutarlo nativamente sin Docker:
+Abrir `http://localhost:8000`
 
-1. **Instala las dependencias**:
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. **Inicia el servidor**:
-   ```bash
-   python api.py
-   ```
-3. Abre tu navegador en: `http://localhost:8000`
+## Configuracion (.env)
 
----
+```bash
+HOLDED_API_KEY=tu_clave_holded
+ANTHROPIC_API_KEY=sk-ant-...       # Opcional, se puede configurar desde la UI
+HOLDED_SAFE_MODE=true              # true = modo prueba para operaciones de escritura
 
-## 🛠️ Tecnologías utilizadas
+# PostgreSQL (Supabase) — dejar vacio para SQLite local
+DATABASE_URL=postgresql://postgres.[ref]:[pass]@pooler.supabase.com:5432/postgres
+```
 
-- **Backend**: Python (FastAPI + SQLite)
-- **Frontend**: Vanilla HTML / JS / CSS (Rich aesthetics & Micro-animations)
-- **Integración**: API de Holded (Invoicing, Accounting, CRM)
+## Arquitectura
 
----
+```
+Holded API  --->  connector.py  --->  PostgreSQL (Supabase)
+                      |                      |
+                  api.py (FastAPI)  <---------+
+                  /    |     \
+            static/  ai_agent.py  reports.py
+            (SPA)    (Claude)     (PDF/Excel)
+```
 
-## 🏛️ Características principales
+- `connector.py` — Capa de datos: sync, queries, helpers DB (dual SQLite/PostgreSQL)
+- `api.py` — Servidor HTTP, todos los endpoints REST
+- `ai_agent.py` — Agente Claude con 19 herramientas y streaming SSE
+- `reports.py` — Generacion de informes PDF y Excel
+- `static/` — Frontend SPA (HTML + JS + CSS)
 
-- ✅ **Sincronización Inteligente**: Descarga facturas, gastos y presupuestos.
-- ✅ **Mapeo Contable**: Resuelve IDs de cuentas a nombres reales (ej: Ventas de mercaderías).
-- ✅ **Vista Detallada**: Desglose de productos con IVA e IRPF desglosado.
-- ✅ **Previsualización de PDFs**: Visualiza y comparte tus facturas sin salir del dashboard.
-- ✅ **Filtros Avanzados**: Búsqueda en tiempo real y filtrado por fechas.
-- ✅ **UX Premium**: Modales con cierre inteligente (clic fuera) y diseño con desenfoques (glassmorphism).
+## Docker
 
-Desarrollado con ❤️ para Miguel.
+```bash
+docker-compose up -d --build
+```
+
+Servicios: `holded-api` (puerto 8000) + `n8n` (puerto 5678, automatizaciones)
+
+## Licencia
+
+Proyecto privado.
