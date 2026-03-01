@@ -1,5 +1,4 @@
 import json
-import sqlite3
 import logging
 import time
 import uuid
@@ -12,7 +11,12 @@ import reports
 
 logger = logging.getLogger(__name__)
 
-DB_NAME = "holded.db"
+
+def _month_fmt(col="date"):
+    """SQL expression for YYYY-MM month grouping (SQLite/PostgreSQL compatible)."""
+    if connector._USE_SQLITE:
+        return f"strftime('%Y-%m', datetime({col}, 'unixepoch'))"
+    return f"to_char(to_timestamp({col}), 'YYYY-MM')"
 
 WRITE_TOOLS = {"create_estimate", "create_invoice", "send_document", "create_contact", "update_invoice_status", "upload_file"}
 
@@ -326,10 +330,9 @@ def exec_query_database(params):
     if not _validate_sql(sql):
         return {"error": "Only SELECT queries are allowed."}
     try:
-        conn = sqlite3.connect(DB_NAME)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute(sql)
+        conn = connector.get_db()
+        cursor = connector._cursor(conn)
+        cursor.execute(connector._q(sql))
         rows = [dict(r) for r in cursor.fetchmany(100)]
         conn.close()
         return {"rows": rows, "count": len(rows), "explanation": params.get("explanation", "")}
@@ -340,22 +343,21 @@ def exec_query_database(params):
 def exec_get_contact_details(params):
     search = params["search"]
     include_history = params.get("include_history", False)
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    conn = connector.get_db()
+    cursor = connector._cursor(conn)
 
-    cursor.execute("SELECT * FROM contacts WHERE id = ? OR name LIKE ? LIMIT 10",
+    cursor.execute(connector._q("SELECT * FROM contacts WHERE id = ? OR name LIKE ? LIMIT 10"),
                    (search, f"%{search}%"))
     contacts = [dict(r) for r in cursor.fetchall()]
 
     if include_history and contacts:
         for c in contacts:
             cid = c["id"]
-            cursor.execute("SELECT COUNT(*) as cnt, COALESCE(SUM(amount),0) as total FROM invoices WHERE contact_id=?", (cid,))
+            cursor.execute(connector._q("SELECT COUNT(*) as cnt, COALESCE(SUM(amount),0) as total FROM invoices WHERE contact_id=?"), (cid,))
             inv = dict(cursor.fetchone())
-            cursor.execute("SELECT COUNT(*) as cnt, COALESCE(SUM(amount),0) as total FROM purchase_invoices WHERE contact_id=?", (cid,))
+            cursor.execute(connector._q("SELECT COUNT(*) as cnt, COALESCE(SUM(amount),0) as total FROM purchase_invoices WHERE contact_id=?"), (cid,))
             pur = dict(cursor.fetchone())
-            cursor.execute("SELECT COUNT(*) as cnt, COALESCE(SUM(amount),0) as total FROM estimates WHERE contact_id=?", (cid,))
+            cursor.execute(connector._q("SELECT COUNT(*) as cnt, COALESCE(SUM(amount),0) as total FROM estimates WHERE contact_id=?"), (cid,))
             est = dict(cursor.fetchone())
             c["history"] = {"invoices": inv, "purchases": pur, "estimates": est}
 
@@ -366,35 +368,34 @@ def exec_get_contact_details(params):
 def exec_get_product_pricing(params):
     search = params["search"]
     include_history = params.get("include_history", True)
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    conn = connector.get_db()
+    cursor = connector._cursor(conn)
 
-    cursor.execute("SELECT * FROM products WHERE id = ? OR name LIKE ? OR sku LIKE ? LIMIT 10",
+    cursor.execute(connector._q("SELECT * FROM products WHERE id = ? OR name LIKE ? OR sku LIKE ? LIMIT 10"),
                    (search, f"%{search}%", f"%{search}%"))
     products = [dict(r) for r in cursor.fetchall()]
 
     if include_history and products:
         for p in products:
             pid = p["id"]
-            cursor.execute("""
+            cursor.execute(connector._q("""
                 SELECT COUNT(*) as sales_count,
                        COALESCE(AVG(price),0) as avg_sale_price,
                        COALESCE(MIN(price),0) as min_sale_price,
                        COALESCE(MAX(price),0) as max_sale_price,
                        COALESCE(SUM(subtotal),0) as total_revenue
                 FROM invoice_items WHERE product_id=?
-            """, (pid,))
+            """), (pid,))
             p["sales"] = dict(cursor.fetchone())
 
-            cursor.execute("""
+            cursor.execute(connector._q("""
                 SELECT COUNT(*) as purchase_count,
                        COALESCE(AVG(price),0) as avg_purchase_price,
                        COALESCE(MIN(price),0) as min_purchase_price,
                        COALESCE(MAX(price),0) as max_purchase_price,
                        COALESCE(SUM(subtotal),0) as total_cost
                 FROM purchase_items WHERE product_id=?
-            """, (pid,))
+            """), (pid,))
             p["purchases"] = dict(cursor.fetchone())
 
             avg_sale = p["sales"]["avg_sale_price"]
@@ -425,37 +426,37 @@ def exec_get_financial_summary(params):
     start_epoch = int(start_dt.timestamp())
     end_epoch = int(end_dt.timestamp())
 
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    conn = connector.get_db()
+    cursor = connector._cursor(conn)
 
-    cursor.execute("SELECT COALESCE(SUM(amount),0) as total FROM invoices WHERE date>=? AND date<=?",
+    cursor.execute(connector._q("SELECT COALESCE(SUM(amount),0) as total FROM invoices WHERE date>=? AND date<=?"),
                    (start_epoch, end_epoch))
     income = cursor.fetchone()["total"]
 
-    cursor.execute("SELECT COALESCE(SUM(amount),0) as total FROM purchase_invoices WHERE date>=? AND date<=?",
+    cursor.execute(connector._q("SELECT COALESCE(SUM(amount),0) as total FROM purchase_invoices WHERE date>=? AND date<=?"),
                    (start_epoch, end_epoch))
     expenses = cursor.fetchone()["total"]
 
-    cursor.execute("""
+    cursor.execute(connector._q("""
         SELECT contact_name, SUM(amount) as total FROM invoices
         WHERE date>=? AND date<=? AND contact_name IS NOT NULL AND contact_name != ''
         GROUP BY contact_name ORDER BY total DESC LIMIT 5
-    """, (start_epoch, end_epoch))
+    """), (start_epoch, end_epoch))
     top_clients = [dict(r) for r in cursor.fetchall()]
 
-    cursor.execute("""
-        SELECT strftime('%Y-%m', datetime(date, 'unixepoch')) as month, SUM(amount) as total
+    mf = _month_fmt()
+    cursor.execute(connector._q(f"""
+        SELECT {mf} as month, SUM(amount) as total
         FROM invoices WHERE date>=? AND date<=?
         GROUP BY month ORDER BY month
-    """, (start_epoch, end_epoch))
+    """), (start_epoch, end_epoch))
     monthly_income = [dict(r) for r in cursor.fetchall()]
 
-    cursor.execute("""
-        SELECT strftime('%Y-%m', datetime(date, 'unixepoch')) as month, SUM(amount) as total
+    cursor.execute(connector._q(f"""
+        SELECT {mf} as month, SUM(amount) as total
         FROM purchase_invoices WHERE date>=? AND date<=?
         GROUP BY month ORDER BY month
-    """, (start_epoch, end_epoch))
+    """), (start_epoch, end_epoch))
     monthly_expenses = [dict(r) for r in cursor.fetchall()]
 
     conn.close()
@@ -483,17 +484,16 @@ def exec_get_document_details(params):
         return {"error": f"Unknown doc_type: {doc_type}"}
 
     table, items_table, fk = table_map[doc_type]
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    conn = connector.get_db()
+    cursor = connector._cursor(conn)
 
-    cursor.execute(f"SELECT * FROM {table} WHERE id=?", (doc_id,))
+    cursor.execute(connector._q(f"SELECT * FROM {table} WHERE id=?"), (doc_id,))
     doc = cursor.fetchone()
     if not doc:
         conn.close()
         return {"error": f"Document {doc_id} not found"}
 
-    cursor.execute(f"SELECT * FROM {items_table} WHERE {fk}=?", (doc_id,))
+    cursor.execute(connector._q(f"SELECT * FROM {items_table} WHERE {fk}=?"), (doc_id,))
     items = [dict(r) for r in cursor.fetchall()]
     conn.close()
 
@@ -591,20 +591,19 @@ def exec_create_contact(params):
 def exec_get_overdue_invoices(params):
     inv_type = params.get("type", "both")
     min_amount = params.get("min_amount", 0)
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    conn = connector.get_db()
+    cursor = connector._cursor(conn)
 
     results = []
     if inv_type in ("receivable", "both"):
         cursor.execute(
-            "SELECT id, contact_name, amount, date, status FROM invoices WHERE status = 4 AND amount >= ? ORDER BY amount DESC",
+            connector._q("SELECT id, contact_name, amount, date, status FROM invoices WHERE status = 4 AND amount >= ? ORDER BY amount DESC"),
             (min_amount,))
         results.extend([{**dict(r), "source": "receivable"} for r in cursor.fetchall()])
 
     if inv_type in ("payable", "both"):
         cursor.execute(
-            "SELECT id, contact_name, amount, date, status FROM purchase_invoices WHERE status = 4 AND amount >= ? ORDER BY amount DESC",
+            connector._q("SELECT id, contact_name, amount, date, status FROM purchase_invoices WHERE status = 4 AND amount >= ? ORDER BY amount DESC"),
             (min_amount,))
         results.extend([{**dict(r), "source": "payable"} for r in cursor.fetchall()])
 
@@ -619,9 +618,8 @@ def exec_get_upcoming_payments(params):
     now = int(time.time())
     future = now + days * 86400
 
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    conn = connector.get_db()
+    cursor = connector._cursor(conn)
 
     where_type = ""
     if ptype == "income":
@@ -629,12 +627,12 @@ def exec_get_upcoming_payments(params):
     elif ptype == "expense":
         where_type = "AND type = 'expense'"
 
-    cursor.execute(f"""
+    cursor.execute(connector._q(f"""
         SELECT id, document_id, amount, date, method, type
         FROM payments
         WHERE date >= ? AND date <= ? {where_type}
         ORDER BY date ASC
-    """, (now - 30 * 86400, future))
+    """), (now - 30 * 86400, future))
     payments = [dict(r) for r in cursor.fetchall()]
     conn.close()
 
@@ -647,13 +645,13 @@ def exec_compare_periods(params):
         start_epoch = int(datetime.strptime(start_str, "%Y-%m-%d").timestamp())
         end_epoch = int(datetime.strptime(end_str, "%Y-%m-%d").timestamp()) + 86399
 
-        cursor.execute("SELECT COALESCE(SUM(amount),0) as t FROM invoices WHERE date>=? AND date<=?", (start_epoch, end_epoch))
+        cursor.execute(connector._q("SELECT COALESCE(SUM(amount),0) as t FROM invoices WHERE date>=? AND date<=?"), (start_epoch, end_epoch))
         income = cursor.fetchone()["t"]
-        cursor.execute("SELECT COALESCE(SUM(amount),0) as t FROM purchase_invoices WHERE date>=? AND date<=?", (start_epoch, end_epoch))
+        cursor.execute(connector._q("SELECT COALESCE(SUM(amount),0) as t FROM purchase_invoices WHERE date>=? AND date<=?"), (start_epoch, end_epoch))
         expenses = cursor.fetchone()["t"]
-        cursor.execute("SELECT COUNT(*) as c FROM invoices WHERE date>=? AND date<=?", (start_epoch, end_epoch))
+        cursor.execute(connector._q("SELECT COUNT(*) as c FROM invoices WHERE date>=? AND date<=?"), (start_epoch, end_epoch))
         inv_count = cursor.fetchone()["c"]
-        cursor.execute("SELECT COUNT(*) as c FROM purchase_invoices WHERE date>=? AND date<=?", (start_epoch, end_epoch))
+        cursor.execute(connector._q("SELECT COUNT(*) as c FROM purchase_invoices WHERE date>=? AND date<=?"), (start_epoch, end_epoch))
         pur_count = cursor.fetchone()["c"]
 
         return {
@@ -665,9 +663,8 @@ def exec_compare_periods(params):
             "purchase_count": pur_count
         }
 
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    conn = connector.get_db()
+    cursor = connector._cursor(conn)
 
     p1 = _period_stats(cursor, params["period1_start"], params["period1_end"])
     p2 = _period_stats(cursor, params["period2_start"], params["period2_end"])
@@ -839,12 +836,12 @@ def exec_upload_file(params):
 
     try:
         # Record in ai_history for audit trail
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute("""
+        conn = connector.get_db()
+        cursor = connector._cursor(conn)
+        cursor.execute(connector._q("""
             INSERT INTO ai_history (role, content, conversation_id, tool_calls)
             VALUES (?, ?, ?, ?)
-        """, ("system", f"File uploaded: {filename}", "default", json.dumps({
+        """), ("system", f"File uploaded: {filename}", "default", json.dumps({
             "tool": "upload_file",
             "description": description,
             "filename": filename,
@@ -920,9 +917,8 @@ def load_skills():
         return ""
 
 def build_system_prompt():
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    conn = connector.get_db()
+    cursor = connector._cursor(conn)
 
     stats = {}
     for table in ["invoices", "purchase_invoices", "estimates", "products", "contacts"]:
@@ -942,19 +938,19 @@ def build_system_prompt():
     return f"""You are the financial assistant for this company's Holded accounting system.
 You help analyze financial data, check prices, create estimates/invoices, generate reports, and send documents.
 
-DATABASE (SQLite, read via query_database tool):
-- invoices (id, contact_id, contact_name, desc, date[epoch], amount[EUR], status 0-5)
+DATABASE (PostgreSQL via query_database tool — use standard SQL with %s placeholders or hardcoded values):
+- invoices (id, contact_id, contact_name, "desc", date[epoch], amount[EUR], status 0-5)
 - invoice_items (invoice_id, product_id, name, sku, units, price, subtotal, discount, tax, retention, account)
 - purchase_invoices (same as invoices), purchase_items (purchase_id, ...)
 - estimates (same as invoices), estimate_items (estimate_id, ...)
 - contacts (id, name, email, type, code, vat, phone, mobile)
-- products (id, name, desc, price, stock, sku)
+- products (id, name, "desc", price, stock, sku)
 - payments (id, document_id, amount, date, method, type)
-- projects (id, name, desc, status, customer_id, budget)
+- projects (id, name, "desc", status, customer_id, budget)
 - ledger_accounts (id, name, num)
 
 Status codes - invoices/purchases: 0=draft, 1=issued, 2=partial, 3=paid, 4=overdue, 5=cancelled. Estimates: 0=draft, 1=pending, 2=accepted, 3=rejected, 4=invoiced.
-Dates are Unix epoch. Convert with: datetime(date, 'unixepoch'). Group by month: strftime('%Y-%m', datetime(date, 'unixepoch')).
+Dates are Unix epoch. In SQL: to_timestamp(date) for conversion, to_char(to_timestamp(date), 'YYYY-MM') for month grouping. Note: "desc" is a reserved word — always quote it.
 
 CURRENT DATA: {stats['invoices']} invoices, {stats['purchase_invoices']} purchases, {stats['estimates']} estimates, {stats['contacts']} contacts, {stats['products']} products.
 Total income: {total_income:,.2f} EUR | Total expenses: {total_expenses:,.2f} EUR | Balance: {total_income - total_expenses:,.2f} EUR
@@ -976,51 +972,28 @@ RULES:
 # ─── Conversation History ────────────────────────────────────────────
 
 def _ensure_ai_history_schema():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("""CREATE TABLE IF NOT EXISTS ai_history (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        role TEXT,
-        content TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-        conversation_id TEXT DEFAULT 'default',
-        tool_calls TEXT
-    )""")
-    # Add columns if they don't exist (migration for existing tables)
-    try:
-        cursor.execute("ALTER TABLE ai_history ADD COLUMN conversation_id TEXT DEFAULT 'default'")
-    except sqlite3.OperationalError:
-        pass
-    try:
-        cursor.execute("ALTER TABLE ai_history ADD COLUMN tool_calls TEXT")
-    except sqlite3.OperationalError:
-        pass
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_history_conv ON ai_history(conversation_id, timestamp)")
-    conn.commit()
-    conn.close()
+    pass  # Tables managed by connector.init_db() on server startup
 
 
 def load_history(conversation_id, limit=20):
-    _ensure_ai_history_schema()
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    conn = connector.get_db()
+    cursor = connector._cursor(conn)
     cursor.execute(
-        "SELECT role, content FROM ai_history WHERE conversation_id=? ORDER BY timestamp DESC LIMIT ?",
+        connector._q("SELECT role, content FROM ai_history WHERE conversation_id=? ORDER BY timestamp DESC LIMIT ?"),
         (conversation_id, limit)
     )
     rows = cursor.fetchall()
     conn.close()
+    rows = list(rows)
     rows.reverse()
     return [{"role": r["role"], "content": r["content"]} for r in rows]
 
 
 def save_history(conversation_id, role, content, tool_calls=None):
-    _ensure_ai_history_schema()
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
+    conn = connector.get_db()
+    cursor = connector._cursor(conn)
     cursor.execute(
-        "INSERT INTO ai_history (role, content, conversation_id, tool_calls) VALUES (?, ?, ?, ?)",
+        connector._q("INSERT INTO ai_history (role, content, conversation_id, tool_calls) VALUES (?, ?, ?, ?)"),
         (role, content, conversation_id, json.dumps(tool_calls) if tool_calls else None)
     )
     conn.commit()
@@ -1028,13 +1001,11 @@ def save_history(conversation_id, role, content, tool_calls=None):
 
 
 def get_history(conversation_id=None):
-    _ensure_ai_history_schema()
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    conn = connector.get_db()
+    cursor = connector._cursor(conn)
     if conversation_id:
         cursor.execute(
-            "SELECT role, content, timestamp FROM ai_history WHERE conversation_id=? ORDER BY timestamp ASC",
+            connector._q("SELECT role, content, timestamp FROM ai_history WHERE conversation_id=? ORDER BY timestamp ASC"),
             (conversation_id,)
         )
     else:
@@ -1045,11 +1016,10 @@ def get_history(conversation_id=None):
 
 
 def clear_history(conversation_id=None):
-    _ensure_ai_history_schema()
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
+    conn = connector.get_db()
+    cursor = connector._cursor(conn)
     if conversation_id:
-        cursor.execute("DELETE FROM ai_history WHERE conversation_id=?", (conversation_id,))
+        cursor.execute(connector._q("DELETE FROM ai_history WHERE conversation_id=?"), (conversation_id,))
     else:
         cursor.execute("DELETE FROM ai_history")
     conn.commit()
@@ -1342,51 +1312,43 @@ def chat_stream(user_message, conversation_id=None):
 # ─── Favorites ──────────────────────────────────────────────────────
 
 def _ensure_favorites_schema():
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("""CREATE TABLE IF NOT EXISTS ai_favorites (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        query TEXT NOT NULL,
-        label TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )""")
-    conn.commit()
-    conn.close()
+    pass  # Tables managed by connector.init_db() on server startup
 
 def get_favorites():
-    _ensure_favorites_schema()
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    conn = connector.get_db()
+    cursor = connector._cursor(conn)
     cursor.execute("SELECT id, query, label, created_at FROM ai_favorites ORDER BY created_at DESC")
     rows = [dict(r) for r in cursor.fetchall()]
     conn.close()
     return rows
 
 def add_favorite(query, label=None):
-    _ensure_favorites_schema()
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO ai_favorites (query, label) VALUES (?, ?)", (query, label or query[:50]))
-    conn.commit()
-    fav_id = cursor.lastrowid
+    conn = connector.get_db()
+    cursor = connector._cursor(conn)
+    if connector._USE_SQLITE:
+        cursor.execute(connector._q("INSERT INTO ai_favorites (query, label) VALUES (?, ?)"),
+                       (query, label or query[:50]))
+        conn.commit()
+        fav_id = cursor.lastrowid
+    else:
+        cursor.execute("INSERT INTO ai_favorites (query, label) VALUES (%s, %s) RETURNING id",
+                       (query, label or query[:50]))
+        conn.commit()
+        fav_id = connector._fetch_one_val(cursor, 'id')
     conn.close()
     return fav_id
 
 def remove_favorite(fav_id):
-    _ensure_favorites_schema()
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM ai_favorites WHERE id = ?", (fav_id,))
+    conn = connector.get_db()
+    cursor = connector._cursor(conn)
+    cursor.execute(connector._q("DELETE FROM ai_favorites WHERE id = ?"), (fav_id,))
     conn.commit()
     conn.close()
 
 def get_conversations():
-    _ensure_ai_history_schema()
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("""
+    conn = connector.get_db()
+    cursor = connector._cursor(conn)
+    cursor.execute(connector._q("""
         SELECT conversation_id, MIN(timestamp) as started, MAX(timestamp) as last_msg,
                COUNT(*) as msg_count,
                (SELECT content FROM ai_history h2 WHERE h2.conversation_id = ai_history.conversation_id AND h2.role = 'user' ORDER BY h2.timestamp ASC LIMIT 1) as first_message
@@ -1395,7 +1357,7 @@ def get_conversations():
         GROUP BY conversation_id
         ORDER BY last_msg DESC
         LIMIT 20
-    """)
+    """))
     rows = [dict(r) for r in cursor.fetchall()]
     conn.close()
     return rows
