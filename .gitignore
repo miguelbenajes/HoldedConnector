@@ -28,6 +28,9 @@ server.log
 # Local backups
 BACKUPS/
 
+# n8n local data
+n8n-data/
+
 # macOS
 .DS_Store
 Thumbs.db
