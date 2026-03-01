@@ -117,6 +117,49 @@ Asignar desde n8n UI > Credentials después de importar cada workflow.
 
 ---
 
+### 9. Nodo Merge con 3+ fuentes distintas — usar `append` en lugar de `combine`
+**Problema:** El modo `combine` en el nodo Merge intenta hacer join por campos comunes. Cuando las 3 entradas tienen estructuras distintas (ej: resumen financiero + stats mensuales + facturas), no funciona correctamente.
+**Síntoma:** El nodo "Unir datos" no produce output, o produce output vacío/incorrecto.
+**Solución:** Usar `mode: "append"` para simplemente concatenar todos los items de todos los inputs en un array:
+```json
+{
+  "mode": "append",
+  "options": {}
+}
+```
+El código JS posterior usa `$input.all()` e identifica cada tipo de dato por sus campos propios (`total_income`, `month`, `doc_number`, etc.), por lo que `append` es suficiente.
+**Afecta a:** Workflow 04 — Informe Semanal (nodo "Unir datos").
+
+---
+
+### 10. /api/summary y /api/stats/monthly — estructura real de respuesta
+**Problema:** Los campos devueltos por la API no son planos. El JS del workflow debe acceder correctamente.
+
+**`GET /api/summary` devuelve:**
+```json
+{ "counts": {...}, "totals": { "income": 382206.89, "expenses": 151096.22, "balance": 231110.67 } }
+```
+→ Identificar por `i.json.totals !== undefined`. Usar `item.json.totals.income`, `.expenses`, `.balance`.
+
+**`GET /api/stats/monthly` devuelve:**
+```json
+{ "income": [{"month": "2025-03", "total": 17931.86}, ...], "expenses": [{...}] }
+```
+→ Identificar por `Array.isArray(i.json.income)`. Son dos arrays separados — combinar por mes con un `monthMap`.
+
+**Patrón correcto para combinar por mes:**
+```js
+const monthMap = {};
+incomeArr.forEach(m => { monthMap[m.month] = { income: m.total, expenses: 0 }; });
+expensesArr.forEach(m => {
+  if (monthMap[m.month]) monthMap[m.month].expenses = m.total;
+  else monthMap[m.month] = { income: 0, expenses: m.total };
+});
+const months = Object.keys(monthMap).sort().slice(-4);
+```
+
+---
+
 ## Checklist antes de crear un nuevo workflow
 
 - [ ] ¿Usa Supabase? → Revisar bug #4 (filterString syntax)
