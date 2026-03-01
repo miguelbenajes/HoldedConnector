@@ -353,6 +353,74 @@ def get_summary():
         }
     }
 
+@app.get("/api/stats/date-range")
+def get_date_range():
+    """
+    Returns the earliest and latest date found across all main transactional tables.
+    Used by the date picker to know the absolute min/max for 'Desde siempre'.
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT MIN(d) AS min_date, MAX(d) AS max_date FROM (
+                SELECT MIN(date) AS d FROM invoices          WHERE date > 0
+                UNION ALL
+                SELECT MIN(date) FROM purchase_invoices      WHERE date > 0
+                UNION ALL
+                SELECT MIN(date) FROM estimates              WHERE date > 0
+                UNION ALL
+                SELECT MAX(date) FROM invoices               WHERE date > 0
+                UNION ALL
+                SELECT MAX(date) FROM purchase_invoices      WHERE date > 0
+                UNION ALL
+                SELECT MAX(date) FROM estimates              WHERE date > 0
+            )
+        """)
+        row = dict(cursor.fetchone())
+    return row
+
+
+@app.get("/api/invoices/unpaid")
+def get_unpaid_invoices():
+    """
+    Return all invoices where paymentsPending > 0 (truly unpaid).
+    Holded's 'paymentsPending' field is the authoritative source — it is the
+    amount still owed and is 0 only when the invoice is fully paid.
+    Aging is calculated from dueDate (the real payment deadline):
+      - days_overdue <= 0   → Pendiente (green,  within payment terms)
+      - days_overdue 1-30   → Atención  (yellow, slightly overdue)
+      - days_overdue > 30   → Vencida   (red,    significantly overdue)
+    Sorted oldest due date first (most urgent at top).
+    """
+    import time
+    now_ts = int(time.time())
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT i.id, i.contact_name, i.desc, i.date, i.amount, i.status,
+                   i.payments_pending, i.payments_total,
+                   i.due_date, i.doc_number,
+                   c.email AS contact_email,
+                   CAST((? - COALESCE(i.due_date, i.date)) / 86400 AS INTEGER) AS days_overdue
+            FROM invoices i
+            LEFT JOIN contacts c ON c.id = i.contact_id
+            WHERE i.payments_pending > 0.01
+              AND i.status != 3
+            ORDER BY COALESCE(i.due_date, i.date) ASC
+        """, (now_ts,))
+        rows = [dict(r) for r in cursor.fetchall()]
+    # Annotate each row with a human-readable aging label
+    for r in rows:
+        d = r['days_overdue'] or 0
+        if d <= 0:
+            r['aging_label'] = 'Pendiente'
+        elif d <= 30:
+            r['aging_label'] = 'Atención'
+        else:
+            r['aging_label'] = 'Vencida'
+    return rows
+
+
 @app.get("/api/stats/monthly")
 def get_monthly_stats(start: Optional[int] = None, end: Optional[int] = None):
     with get_db_connection() as conn:
@@ -477,12 +545,14 @@ def get_product_history(product_id: str):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         query = """
-            SELECT 'income' as type, i.id as doc_id, i.date, it.units, it.price, it.subtotal
+            SELECT 'income' as type, i.id as doc_id, i.date, it.units, it.price, it.subtotal,
+                   i.desc as doc_desc, i.contact_name
             FROM invoice_items it
             JOIN invoices i ON it.invoice_id = i.id
             WHERE it.product_id = ?
             UNION ALL
-            SELECT 'expense' as type, p.id as doc_id, p.date, pit.units, pit.price, pit.subtotal
+            SELECT 'expense' as type, p.id as doc_id, p.date, pit.units, pit.price, pit.subtotal,
+                   p.desc as doc_desc, p.contact_name
             FROM purchase_items pit
             JOIN purchase_invoices p ON pit.purchase_id = p.id
             WHERE pit.product_id = ?
@@ -542,21 +612,66 @@ def get_document_pdf(doc_type: str, doc_id: str):
     }
     holded_type = type_map.get(doc_type, doc_type)
 
+    # Build a meaningful filename from local DB data
+    def _make_pdf_filename(doc_type: str, doc_id: str) -> str:
+        try:
+            import re
+            db_table = {"invoices": "invoices", "purchases": "purchase_invoices", "estimates": "estimates"}.get(doc_type)
+            if not db_table:
+                return f"document_{doc_id}.pdf"
+            conn = sqlite3.connect(DB_NAME)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute(f"SELECT contact_name, doc_number FROM {db_table} WHERE id = ?", (doc_id,))
+            row = cur.fetchone()
+            conn.close()
+            if not row:
+                return f"document_{doc_id}.pdf"
+            contact_name = row["contact_name"]
+            doc_number = row["doc_number"]
+            # Slugify: keep alphanumeric + spaces/slash, map to underscores
+            def slug(s):
+                if not s:
+                    return ""
+                s = s.strip()
+                s = re.sub(r'[^\w\s/-]', '', s, flags=re.UNICODE)
+                s = re.sub(r'[\s/]+', '_', s)
+                return s[:40]  # cap length
+            prefix = {"invoices": "Factura", "purchases": "Compra", "estimates": "Presupuesto"}.get(doc_type, "Doc")
+            parts = [slug(contact_name)]
+            if doc_number:
+                parts.append(slug(doc_number))
+            else:
+                parts.append(prefix)
+            return "_".join(p for p in parts if p) + ".pdf"
+        except Exception:
+            return f"document_{doc_id}.pdf"
+
+    pdf_filename = _make_pdf_filename(doc_type, doc_id)
+    # RFC 6266: use filename* (UTF-8 percent-encoded) for non-ASCII names,
+    # plus plain filename= as fallback for older clients
+    from urllib.parse import quote as url_quote
+    encoded_name = url_quote(pdf_filename, safe="._-")
+    content_disposition = (
+        f'inline; filename="{pdf_filename}"; filename*=UTF-8\'\'{encoded_name}'
+    )
+
     url = f"https://api.holded.com/api/invoicing/v1/documents/{holded_type}/{doc_id}/pdf"
     headers = {"key": connector.API_KEY}
 
     response = requests.get(url, headers=headers)
 
     if response.status_code == 200:
+        resp_headers = {"Content-Disposition": content_disposition}
         try:
             json_data = response.json()
             if isinstance(json_data, dict) and "data" in json_data:
                 import base64
                 pdf_bytes = base64.b64decode(json_data["data"])
-                return Response(content=pdf_bytes, media_type="application/pdf")
+                return Response(content=pdf_bytes, media_type="application/pdf", headers=resp_headers)
         except Exception:
             pass
-        return Response(content=response.content, media_type="application/pdf")
+        return Response(content=response.content, media_type="application/pdf", headers=resp_headers)
     else:
         return Response(content=f"Error fetching PDF: {response.status_code}", status_code=response.status_code)
 
@@ -812,6 +927,47 @@ def delete_amortization(amort_id: int):
     return {"status": "success"}
 
 
+# ── Purchase invoice search (for cost-source picker) ──────────────────────────
+
+@app.get("/api/purchases/search")
+def search_purchases(q: str = "", limit: int = 20):
+    """
+    Search purchase invoices by supplier name or description.
+    Returns matching invoices with their line items for the picker UI.
+    """
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        like = f"%{q}%"
+        cursor.execute("""
+            SELECT pi.id, pi.contact_name AS supplier, pi.desc, pi.date, pi.amount,
+                   pit.id AS item_id, pit.name AS item_name, pit.units AS item_units, pit.price AS item_price
+            FROM purchase_invoices pi
+            LEFT JOIN purchase_items pit ON pit.purchase_id = pi.id
+            WHERE pi.contact_name LIKE ? OR pi.desc LIKE ? OR pit.name LIKE ?
+            ORDER BY pi.date DESC
+            LIMIT ?
+        """, (like, like, like, limit))
+        rows = cursor.fetchall()
+
+    # Group items under their parent invoice
+    invoices = {}
+    for r in rows:
+        r = dict(r)
+        pid = r['id']
+        if pid not in invoices:
+            invoices[pid] = {
+                'id': pid, 'supplier': r['supplier'] or '—',
+                'desc': r['desc'] or '', 'date': r['date'], 'amount': r['amount'],
+                'items': []
+            }
+        if r['item_id']:
+            invoices[pid]['items'].append({
+                'id': r['item_id'], 'name': r['item_name'],
+                'units': r['item_units'], 'price': r['item_price']
+            })
+    return list(invoices.values())
+
+
 # ── Amortization Purchase Links ───────────────────────────────────────────────
 
 @app.get("/api/amortizations/{amort_id}/purchases")
@@ -882,7 +1038,11 @@ def delete_amortization_purchase(link_id: int):
 def get_analysis_status():
     """Current state of the analysis job + overall progress stats."""
     stats = connector.get_analysis_stats()
-    return {**analysis_status, **stats}
+    merged = {**analysis_status, **stats}
+    # last_run in memory is reset on every server restart; use DB value as fallback
+    if not merged.get("last_run") and stats.get("last_run_db"):
+        merged["last_run"] = stats["last_run_db"]
+    return merged
 
 @app.post("/api/analysis/run")
 async def trigger_analysis(background_tasks: BackgroundTasks, batch_size: int = 10):
@@ -924,9 +1084,9 @@ def get_category_breakdown():
     return stats.get("by_category", [])
 
 @app.get("/api/analysis/invoices")
-def get_analyzed_invoices(limit: int = 50, offset: int = 0, category: str = None):
-    """List categorized invoices with analysis details, paginated."""
-    return connector.get_analyzed_invoices(limit=limit, offset=offset, category=category)
+def get_analyzed_invoices(limit: int = 50, offset: int = 0, category: str = None, q: str = None):
+    """List categorized invoices with analysis details, paginated. q= for text search."""
+    return connector.get_analyzed_invoices(limit=limit, offset=offset, category=category, q=q)
 
 
 # ── Backup endpoints ──────────────────────────────────────────────────────────

@@ -10,6 +10,49 @@ function escapeHtml(str) {
         .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
 }
 
+/**
+ * liveSearch(inputId, tbodyId)
+ * Attaches a real-time text filter to any in-memory table.
+ * Hides rows whose visible text doesn't match the query.
+ * Shows a "no results" row when nothing matches.
+ * Safe to call multiple times — deduplicates listeners via data attribute.
+ */
+function liveSearch(inputId, tbodyId) {
+    const inp = document.getElementById(inputId);
+    if (!inp || inp.dataset.liveSearchBound === tbodyId) return;
+    inp.dataset.liveSearchBound = tbodyId;
+
+    inp.addEventListener('input', function () {
+        const q = this.value.trim().toLowerCase();
+        const tbody = document.getElementById(tbodyId);
+        if (!tbody) return;
+        let visible = 0;
+        Array.from(tbody.rows).forEach(tr => {
+            if (tr.dataset.searchSkip) return;          // skip detail/accordion rows
+            const match = !q || tr.textContent.toLowerCase().includes(q);
+            tr.style.display = match ? '' : 'none';
+            if (match) visible++;
+        });
+        // Show/hide the "no results" sentinel row
+        let sentinel = tbody.querySelector('tr[data-search-sentinel]');
+        if (!visible && q) {
+            if (!sentinel) {
+                sentinel = document.createElement('tr');
+                sentinel.dataset.searchSentinel = '1';
+                const td = document.createElement('td');
+                td.colSpan = 20;
+                td.style.cssText = 'text-align:center;padding:1.5rem;color:var(--text-gray);font-size:.88rem';
+                td.textContent = 'Sin resultados para "' + q + '"';
+                sentinel.appendChild(td);
+                tbody.appendChild(sentinel);
+            }
+            sentinel.style.display = '';
+        } else if (sentinel) {
+            sentinel.style.display = 'none';
+        }
+    });
+}
+
 // Close modals on click outside
 window.addEventListener('click', (e) => {
     if (e.target.classList.contains('modal-overlay')) {
@@ -27,12 +70,12 @@ function getStatusBadge(entity, status) {
 
     if (entity === 'invoices' || entity === 'purchases') {
         const maps = {
-            0: { label: 'BORRADOR', class: 'badge-draft' },
-            1: { label: 'EMITIDA', class: 'badge-pending' },
-            2: { label: 'COBRADA PARCIAL', class: 'badge-partial' },
-            3: { label: 'COBRADA', class: 'badge-paid' },
-            4: { label: 'VENCIDA', class: 'badge-overdue' },
-            5: { label: 'ANULADA', class: 'badge-canceled' }
+            0: { label: 'BORRADOR',  class: 'badge-draft' },
+            1: { label: 'PENDIENTE', class: 'badge-pending' },  // approved, not yet paid (may be overdue — aging widget colors it)
+            2: { label: 'PARCIAL',   class: 'badge-partial' },
+            3: { label: 'COBRADA',   class: 'badge-paid' },
+            4: { label: 'VENCIDA',   class: 'badge-overdue' },  // Holded rarely sends this
+            5: { label: 'ANULADA',   class: 'badge-canceled' }
         };
         const m = maps[status] || { label: `STATUS ${status}`, class: 'badge-draft' };
         label = m.label;
@@ -199,6 +242,7 @@ async function fetchRecentActivity(start = null, end = null) {
             `;
             body.innerHTML += row;
         });
+        liveSearch('recentSearch', 'recentBody');
     } catch (error) {
         console.error('Error fetching recent activity:', error);
     }
@@ -243,6 +287,7 @@ document.getElementById('syncBtn').addEventListener('click', async () => {
                     renderCharts();
                     renderDistributionChart();
                     fetchRecentActivity();
+                    loadAgingWidget();
                     setTimeout(() => { btn.textContent = 'Sync Now'; }, 3000);
                 }
             } catch (err) {
@@ -286,6 +331,13 @@ function showView(viewName) {
             loadBackupView();
         } else if (!specialViews[viewName]) {
             loadEntityData(viewName);
+            // Show/hide invoice sub-tabs
+            const subTabs = document.getElementById('invoiceSubTabs');
+            if (subTabs) subTabs.style.display = viewName === 'invoices' ? 'flex' : 'none';
+            if (viewName === 'invoices') {
+                // Reset to "all" tab on each navigation
+                switchInvoiceTab('all');
+            }
         }
     } else {
         console.error(`View not found: ${targetViewId}`);
@@ -354,37 +406,88 @@ function renderEntityTable(entity) {
     try { colConfig = JSON.parse(localStorage.getItem(STORAGE_KEY)); } catch(e) {}
     // colConfig = { visible: [...], order: [...] } | null
     // If no saved config, use all keys minus defaults hidden
+    // For invoice/purchase/estimate: doc_number and date are pinned first
+    const DOC_FIRST_ENTITIES = ['invoices', 'purchases', 'estimates'];
     let keys;
     if (colConfig && colConfig.order && colConfig.visible) {
         keys = colConfig.order.filter(k => colConfig.visible.includes(k));
     } else {
-        keys = allKeys.filter(k => !DEFAULT_HIDDEN.has(k));
+        const baseKeys = allKeys.filter(k => !DEFAULT_HIDDEN.has(k));
+        if (DOC_FIRST_ENTITIES.includes(entity) && baseKeys.includes('doc_number')) {
+            // Pin doc_number first, then date, then the rest
+            const pinned = ['doc_number', 'date'].filter(k => baseKeys.includes(k));
+            const rest = baseKeys.filter(k => !pinned.includes(k));
+            keys = [...pinned, ...rest];
+        } else {
+            keys = baseKeys;
+        }
     }
+    // Column widths: { colKey: widthPx }
+    let colWidths = (colConfig && colConfig.widths) ? colConfig.widths : {};
     function saveColConfig() {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify({ visible: keys, order: keys, allKeys: allKeys }));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({ visible: keys, order: keys, allKeys: allKeys, widths: colWidths }));
     }
 
     // Holded direct-edit URLs per entity type
     const holdedUrl = (entity, id) => {
         const map = {
-            'invoices':  `https://app.holded.com/doc/invoice/${id}/edit`,
-            'purchases': `https://app.holded.com/doc/purchase/${id}/edit`,
-            'estimates': `https://app.holded.com/doc/estimate/${id}/edit`,
+            'invoices':  `https://app.holded.com/sales#open:invoice-${id}`,
+            'purchases': `https://app.holded.com/purchases#open:purchase-${id}`,
+            'estimates': `https://app.holded.com/sales#open:estimate-${id}`,
             'contacts':  `https://app.holded.com/contacts/${id}`,
             'products':  `https://app.holded.com/inventory/products/${id}`,
         };
         return map[entity] || null;
     };
 
-    // ── Header render with right-click column configurator ───────────────────
+    // ── Header render with right-click column configurator + drag to reorder ──
     while (thead.firstChild) thead.removeChild(thead.firstChild);
     const headerRow = document.createElement('tr');
+    let dragSrcKey = null;
+
     keys.forEach(function(k) {
         const th = document.createElement('th');
         th.className = currentSort.column === k ? `sort-${currentSort.direction}` : '';
         th.textContent = k.replace(/_/g, ' ').toUpperCase();
-        th.style.cursor = 'pointer';
+        th.style.cursor = 'grab';
+        th.dataset.colKey = k;
+        th.draggable = true;
+
+        // Apply saved width if any
+        if (colWidths[k]) th.style.width = colWidths[k] + 'px';
+
+        // ── Column resizer handle ──
+        const resizer = document.createElement('div');
+        resizer.className = 'col-resizer';
+        resizer.addEventListener('mousedown', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            // Disable drag while resizing
+            th.draggable = false;
+            resizer.classList.add('resizing');
+            const startX = e.clientX;
+            const startW = th.offsetWidth;
+            function onMove(e) {
+                const newW = Math.max(40, startW + (e.clientX - startX));
+                th.style.width = newW + 'px';
+            }
+            function onUp() {
+                resizer.classList.remove('resizing');
+                th.draggable = true;
+                colWidths[k] = th.offsetWidth;
+                saveColConfig();
+                document.removeEventListener('mousemove', onMove);
+                document.removeEventListener('mouseup', onUp);
+            }
+            document.addEventListener('mousemove', onMove);
+            document.addEventListener('mouseup', onUp);
+        });
+        th.appendChild(resizer);
+
+        // ── Sort on click (only if not dragging) ──
         th.addEventListener('click', function(){ handleSort(entity, k); });
+
+        // ── Right-click column configurator ──
         th.addEventListener('contextmenu', function(e){
             e.preventDefault();
             openColMenu(e, entity, allKeys, keys, DEFAULT_HIDDEN, function(newKeys){
@@ -393,6 +496,43 @@ function renderEntityTable(entity) {
                 renderEntityTable(entity);
             });
         });
+
+        // ── Drag & drop handlers ──
+        th.addEventListener('dragstart', function(e) {
+            dragSrcKey = k;
+            e.dataTransfer.effectAllowed = 'move';
+            th.classList.add('col-dragging');
+        });
+        th.addEventListener('dragend', function() {
+            th.classList.remove('col-dragging');
+            headerRow.querySelectorAll('th').forEach(t => t.classList.remove('col-drag-over'));
+        });
+        th.addEventListener('dragover', function(e) {
+            if (dragSrcKey && dragSrcKey !== k) {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'move';
+                headerRow.querySelectorAll('th').forEach(t => t.classList.remove('col-drag-over'));
+                th.classList.add('col-drag-over');
+            }
+        });
+        th.addEventListener('dragleave', function() {
+            th.classList.remove('col-drag-over');
+        });
+        th.addEventListener('drop', function(e) {
+            e.preventDefault();
+            th.classList.remove('col-drag-over');
+            if (!dragSrcKey || dragSrcKey === k) return;
+            // Reorder keys array
+            const fromIdx = keys.indexOf(dragSrcKey);
+            const toIdx   = keys.indexOf(k);
+            if (fromIdx === -1 || toIdx === -1) return;
+            keys.splice(fromIdx, 1);
+            keys.splice(toIdx, 0, dragSrcKey);
+            dragSrcKey = null;
+            saveColConfig();
+            renderEntityTable(entity);
+        });
+
         headerRow.appendChild(th);
     });
     if (showActions) {
@@ -890,7 +1030,8 @@ async function renderDistributionChart() {
 async function init() {
     // Wire up sidebar navigation
     document.querySelectorAll('.nav-item').forEach(item => {
-        item.addEventListener('click', () => {
+        item.addEventListener('click', (e) => {
+            if (e.target.closest('.nav-create-btn')) return; // let the link handle it
             showView(item.getAttribute('data-view'));
         });
     });
@@ -910,6 +1051,7 @@ async function init() {
             renderCharts();
             renderDistributionChart();
             fetchRecentActivity();
+            loadAgingWidget();
         } else {
             showView('setup');
         }
@@ -1496,7 +1638,22 @@ document.addEventListener('DOMContentLoaded', function() {
     if (input) {
         input.addEventListener('input', function() { autoResizeInput(input); });
     }
+    // Restore saved theme on load
+    const savedTheme = localStorage.getItem('theme');
+    if (savedTheme === 'light') {
+        document.body.classList.add('light-mode');
+        const btn = document.getElementById('themeToggle');
+        if (btn) btn.textContent = '☀️';
+    }
 });
+
+// ── Dark / Light mode toggle ─────────────────────────────────────────────
+function toggleTheme() {
+    const isLight = document.body.classList.toggle('light-mode');
+    const btn = document.getElementById('themeToggle');
+    btn.textContent = isLight ? '☀️' : '🌙';
+    localStorage.setItem('theme', isLight ? 'light' : 'dark');
+}
 
 function autoResizeInput(el) {
     el.style.height = 'auto';
@@ -1737,6 +1894,7 @@ async function loadAmortizations() {
         });
 
         if (_amortChartVisible) renderAmortChart(rows);
+        liveSearch('amortSearch', 'amortBody');
 
     } catch (e) {
         console.error('Error loading amortizations:', e);
@@ -1962,7 +2120,7 @@ async function openAmortHistory(productId, productName, purchasePrice, totalReve
     document.getElementById('amortHistoryTitle').textContent = `📋 Alquileres: ${productName}`;
     document.getElementById('amortHistoryModal').style.display = 'flex';
     document.getElementById('amortHistoryBody').innerHTML =
-        '<tr><td colspan="4" style="text-align:center;padding:2rem;color:var(--text-gray)">Cargando...</td></tr>';
+        '<tr><td colspan="5" style="text-align:center;padding:2rem;color:var(--text-gray)">Cargando...</td></tr>';
 
     try {
         const res = await fetch(`/api/entities/products/${productId}/history`);
@@ -1987,23 +2145,30 @@ async function openAmortHistory(productId, productName, purchasePrice, totalReve
 
         if (!rentals.length) {
             document.getElementById('amortHistoryBody').innerHTML =
-                '<tr><td colspan="4" style="text-align:center;padding:2rem;color:var(--text-gray)">Sin alquileres registrados en facturas aún.</td></tr>';
+                '<tr><td colspan="5" style="text-align:center;padding:2rem;color:var(--text-gray)">Sin alquileres registrados en facturas aún.</td></tr>';
             return;
         }
 
         document.getElementById('amortHistoryBody').innerHTML = rentals.map(h => {
             const date = h.date ? new Date(h.date * 1000).toLocaleDateString('es-ES') : '—';
+            const label = escapeHtml(h.doc_desc || h.contact_name || h.doc_id);
+            const linkCell = h.doc_id
+                ? `<a href="#" onclick="closeAmortHistory();openDetails('${h.doc_id}','invoices');return false;"
+                      style="color:var(--primary);text-decoration:none;font-size:0.82rem" title="${escapeHtml(h.contact_name || '')}">${label}</a>`
+                : '—';
             return `<tr>
+                <td>${linkCell}</td>
                 <td>${date}</td>
                 <td style="text-align:center">${h.units ?? '—'}</td>
                 <td>${formatter.format(h.price ?? 0)}</td>
-                <td style="font-weight:600;color:var(--primary)">${formatter.format(h.subtotal ?? 0)}</td>
+                <td style="font-weight:600;color:var(--primary)">${formatter.format(h.subtotal ?? ((h.units ?? 0) * (h.price ?? 0)))}</td>
             </tr>`;
         }).join('');
+        liveSearch('amortHistorySearch', 'amortHistoryBody');
 
     } catch (e) {
         document.getElementById('amortHistoryBody').innerHTML =
-            `<tr><td colspan="4" style="text-align:center;color:var(--danger);padding:1rem">Error: ${e.message}</td></tr>`;
+            `<tr><td colspan="5" style="text-align:center;color:var(--danger);padding:1rem">Error: ${e.message}</td></tr>`;
     }
 }
 
@@ -2060,8 +2225,11 @@ function _populateCategoryFilter(categories) {
 async function loadAnalyzedInvoices(page = 0) {
     _analyzedPage = page;
     const category = document.getElementById('analysisCategoryFilter')?.value || '';
+    const q = document.getElementById('analysisTextSearch')?.value.trim() || '';
     const offset = page * _analyzedPageSize;
-    const url = `/api/analysis/invoices?limit=${_analyzedPageSize}&offset=${offset}${category ? `&category=${encodeURIComponent(category)}` : ''}`;
+    let url = `/api/analysis/invoices?limit=${_analyzedPageSize}&offset=${offset}`;
+    if (category) url += `&category=${encodeURIComponent(category)}`;
+    if (q)        url += `&q=${encodeURIComponent(q)}`;
 
     const tbody = document.getElementById('analyzedInvoicesBody');
     tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-gray);padding:1rem">Cargando...</td></tr>';
@@ -2077,7 +2245,12 @@ async function loadAnalyzedInvoices(page = 0) {
         const methodIcon = m => m === 'rules' ? '⚡' : '🤖';
         const confidenceClass = c => c === 'high' ? 'badge-paid' : c === 'medium' ? 'badge-pending' : '';
         const fmt = amt => amt != null ? `${parseFloat(amt).toFixed(2)} €` : '—';
-        const fmtDate = d => d ? d.substring(0, 10) : '—';
+        const fmtDate = d => {
+            if (!d) return '—';
+            // d may be a Unix timestamp (number) or an ISO string
+            const dt = typeof d === 'number' ? new Date(d * 1000) : new Date(d);
+            return isNaN(dt) ? String(d).substring(0, 10) : dt.toLocaleDateString('es-ES');
+        };
 
         tbody.innerHTML = rows.map(r => `
             <tr>
@@ -2103,6 +2276,13 @@ async function loadAnalyzedInvoices(page = 0) {
     } catch (e) {
         tbody.innerHTML = `<tr><td colspan="8" style="color:var(--danger);padding:1rem">Error: ${e.message}</td></tr>`;
     }
+}
+
+let _analysisSearchTimer = null;
+function debounceAnalysisSearch() {
+    clearTimeout(_analysisSearchTimer);
+    // Reset to page 0 on new search; 350ms debounce avoids spamming the server
+    _analysisSearchTimer = setTimeout(() => loadAnalyzedInvoices(0), 350);
 }
 
 function _renderAnalysisStatus(status) {
@@ -2134,7 +2314,9 @@ function _renderAnalysisStatus(status) {
     } else {
         btn.textContent = '▶ Analizar';
         btn.disabled = (status.pending === 0);
-        const lastRun = status.last_run ? new Date(status.last_run).toLocaleString('es-ES') : 'Nunca';
+        // SQLite returns "YYYY-MM-DD HH:MM:SS" (space separator); normalize to ISO for cross-browser parsing
+        const lastRunStr = status.last_run ? status.last_run.replace(' ', 'T') : null;
+        const lastRun = lastRunStr ? new Date(lastRunStr).toLocaleString('es-ES') : 'Nunca';
         const pendingMatches = status.pending_matches || 0;
         msgEl.innerHTML = `Último análisis: <strong>${lastRun}</strong>${pendingMatches ? ` · <span style="color:var(--warning)">⚠ ${pendingMatches} match(es) pendiente(s) de confirmar</span>` : ''}`;
     }
@@ -2187,6 +2369,7 @@ function _renderMatches(matches) {
             </td>
         </tr>`;
     }).join('');
+    liveSearch('matchesSearch', 'matchesBody');
 }
 
 // ── Match Detail Modal ──────────────────────────────────────────────
@@ -2559,7 +2742,15 @@ async function renderAmortDetail(amortId) {
 
         var addLabel = document.createElement('strong');
         addLabel.style.cssText = 'font-size:.82rem;color:var(--text-gray)';
-        addLabel.textContent = '+ Añadir fuente de coste:';
+        addLabel.textContent = 'Añadir fuente de coste:';
+
+        // "+ Factura" button — opens purchase picker
+        var pickBtn = document.createElement('button');
+        pickBtn.className = 'btn-primary';
+        pickBtn.style.cssText = 'padding:.3rem .7rem;font-size:.82rem;display:flex;align-items:center;gap:.3rem';
+        pickBtn.innerHTML = '+ Factura';
+        pickBtn.title = 'Buscar y vincular factura de compra';
+        pickBtn.addEventListener('click', function(){ openPurchasePicker(amortId); });
 
         var costInput = document.createElement('input');
         costInput.id = 'amort-new-cost-' + amortId;
@@ -2572,12 +2763,13 @@ async function renderAmortDetail(amortId) {
         noteInput.style.cssText = 'flex:1;padding:.3rem .5rem;background:var(--bg-card);border:1px solid var(--border-color);border-radius:6px;color:var(--text-light)';
 
         var addBtn = document.createElement('button');
-        addBtn.className = 'btn-primary';
+        addBtn.className = 'action-btn btn-secondary';
         addBtn.style.cssText = 'padding:.3rem .8rem;font-size:.82rem';
-        addBtn.textContent = 'Añadir';
+        addBtn.textContent = 'Añadir manual';
         addBtn.addEventListener('click', function(){ addAmortLink(amortId); });
 
         addWrap.appendChild(addLabel);
+        addWrap.appendChild(pickBtn);
         addWrap.appendChild(costInput);
         addWrap.appendChild(noteInput);
         addWrap.appendChild(addBtn);
@@ -2647,4 +2839,382 @@ async function refreshAmortRow(amortId) {
             if (cc) cc.innerHTML = '<strong>' + formatter.format(r.purchase_price) + '</strong>';
         }
     } catch (e) { /* silently ignore */ }
+}
+
+// ============================================================
+//  PURCHASE COST-SOURCE PICKER
+// ============================================================
+
+let _pickerAmortId = null;
+let _pickerDebounceTimer = null;
+
+function openPurchasePicker(amortId) {
+    _pickerAmortId = amortId;
+    document.getElementById('purchasePickerSearch').value = '';
+    document.getElementById('purchasePickerResults').innerHTML =
+        '<p style="color:var(--text-gray);font-size:.85rem;text-align:center;padding:2rem 0">Escribe para buscar…</p>';
+    document.getElementById('purchasePickerModal').style.display = 'flex';
+    document.getElementById('purchasePickerSearch').focus();
+}
+
+function closePurchasePicker() {
+    document.getElementById('purchasePickerModal').style.display = 'none';
+    _pickerAmortId = null;
+}
+
+function debouncePurchaseSearch(q) {
+    clearTimeout(_pickerDebounceTimer);
+    _pickerDebounceTimer = setTimeout(() => runPurchaseSearch(q), 280);
+}
+
+async function runPurchaseSearch(q) {
+    if (!q || q.trim().length < 2) {
+        document.getElementById('purchasePickerResults').innerHTML =
+            '<p style="color:var(--text-gray);font-size:.85rem;text-align:center;padding:2rem 0">Escribe al menos 2 caracteres…</p>';
+        return;
+    }
+    const container = document.getElementById('purchasePickerResults');
+    container.innerHTML = '<p style="color:var(--text-gray);font-size:.85rem;text-align:center;padding:1rem 0">Buscando…</p>';
+    try {
+        const res  = await fetch('/api/purchases/search?q=' + encodeURIComponent(q) + '&limit=30');
+        const invoices = await res.json();
+
+        if (!invoices.length) {
+            container.innerHTML = '<p style="color:var(--text-gray);font-size:.85rem;text-align:center;padding:2rem 0">Sin resultados</p>';
+            return;
+        }
+
+        container.innerHTML = '';
+        invoices.forEach(inv => {
+            const dateStr = inv.date ? new Date(inv.date * 1000).toLocaleDateString('es-ES') : '—';
+
+            // Invoice header card
+            const card = document.createElement('div');
+            card.className = 'picker-invoice-card';
+
+            const header = document.createElement('div');
+            header.className = 'picker-invoice-header';
+            header.innerHTML =
+                `<span style="font-weight:600">${escapeHtml(inv.supplier)}</span>` +
+                `<span style="color:var(--text-gray);font-size:.8rem">${escapeHtml(inv.desc || '')}</span>` +
+                `<span style="color:var(--text-gray);font-size:.8rem">${dateStr}</span>` +
+                `<span style="font-weight:700">${formatter.format(inv.amount)}</span>`;
+
+            // "Link whole invoice" button (no specific item)
+            const wholeBtn = document.createElement('button');
+            wholeBtn.className = 'action-btn btn-secondary';
+            wholeBtn.style.cssText = 'font-size:.78rem;padding:.2rem .55rem;margin-left:auto';
+            wholeBtn.textContent = '+ Total factura';
+            wholeBtn.addEventListener('click', () => {
+                selectPurchaseLink(inv.id, null, inv.amount, inv.supplier + (inv.desc ? ' — ' + inv.desc : ''));
+            });
+            header.appendChild(wholeBtn);
+            card.appendChild(header);
+
+            // Line items (if any)
+            if (inv.items && inv.items.length) {
+                const itemsWrap = document.createElement('div');
+                itemsWrap.className = 'picker-items-list';
+                inv.items.forEach(it => {
+                    const row = document.createElement('div');
+                    row.className = 'picker-item-row';
+                    const itemTotal = (it.units || 1) * (it.price || 0);
+                    row.innerHTML =
+                        `<span style="flex:1;font-size:.82rem">${escapeHtml(it.name || '—')}</span>` +
+                        `<span style="color:var(--text-gray);font-size:.78rem">${it.units ?? 1} × ${formatter.format(it.price ?? 0)}</span>` +
+                        `<span style="font-weight:600;font-size:.82rem;min-width:70px;text-align:right">${formatter.format(itemTotal)}</span>`;
+                    const itemBtn = document.createElement('button');
+                    itemBtn.className = 'action-btn btn-secondary';
+                    itemBtn.style.cssText = 'font-size:.75rem;padding:.15rem .45rem';
+                    itemBtn.textContent = '+ Item';
+                    itemBtn.addEventListener('click', () => {
+                        selectPurchaseLink(inv.id, it.id, itemTotal, it.name);
+                    });
+                    row.appendChild(itemBtn);
+                    itemsWrap.appendChild(row);
+                });
+                card.appendChild(itemsWrap);
+            }
+
+            container.appendChild(card);
+        });
+    } catch (e) {
+        container.innerHTML = `<p style="color:var(--danger);font-size:.85rem;text-align:center;padding:1rem">Error: ${e.message}</p>`;
+    }
+}
+
+async function selectPurchaseLink(purchaseId, itemId, suggestedCost, label) {
+    if (!_pickerAmortId) return;
+    const amortId = _pickerAmortId;
+
+    // Pre-fill the cost input with the suggested value, let user confirm
+    const costEl = document.getElementById('amort-new-cost-' + amortId);
+    const noteEl = document.getElementById('amort-new-note-' + amortId);
+    if (costEl) costEl.value = suggestedCost.toFixed(2);
+    if (noteEl && !noteEl.value) noteEl.value = label || '';
+
+    // Save directly with the purchase reference
+    const res = await fetch('/api/amortizations/' + amortId + '/purchases', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            cost_override: parseFloat(suggestedCost.toFixed(2)),
+            allocation_note: label || '',
+            purchase_id: purchaseId,
+            purchase_item_id: itemId || null
+        })
+    });
+
+    if (res.ok) {
+        closePurchasePicker();
+        await refreshAmortRow(amortId);
+        await renderAmortDetail(amortId);
+    } else {
+        alert('Error al vincular la factura');
+    }
+}
+
+// ============================================================
+//  UNPAID INVOICES AGING
+// ============================================================
+
+// ── Unpaid invoices sub-view (inside Invoices) ───────────────────────────────
+
+let _unpaidData = [];
+let _activeInvoiceTab = 'all';
+
+function switchInvoiceTab(tab) {
+    _activeInvoiceTab = tab;
+    document.getElementById('allInvoicesTable').style.display  = tab === 'all'    ? '' : 'none';
+    document.getElementById('unpaidInvoicesTable').style.display = tab === 'unpaid' ? '' : 'none';
+    document.getElementById('tabAllInvoices').className    = tab === 'all'    ? 'action-btn'           : 'action-btn btn-secondary';
+    document.getElementById('tabUnpaidInvoices').className = tab === 'unpaid' ? 'action-btn'           : 'action-btn btn-secondary';
+    if (tab === 'unpaid') loadUnpaidView();
+}
+
+async function loadUnpaidView() {
+    const tbody = document.getElementById('unpaidBody');
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text-gray)">Cargando…</td></tr>';
+    try {
+        const data = await fetch('/api/invoices/unpaid').then(r => r.json());
+        _unpaidData = data;
+        renderUnpaidTable(data);
+    } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="6" style="color:var(--danger);padding:1rem">Error: ${e.message}</td></tr>`;
+    }
+}
+
+function filterUnpaidTable() {
+    const q = (document.getElementById('unpaidSearch')?.value || '').toLowerCase();
+    const filtered = q
+        ? _unpaidData.filter(r =>
+            (r.contact_name || '').toLowerCase().includes(q) ||
+            (r.doc_number   || '').toLowerCase().includes(q) ||
+            (r.contact_email || '').toLowerCase().includes(q))
+        : _unpaidData;
+    renderUnpaidTable(filtered);
+}
+
+function renderUnpaidTable(rows) {
+    const tbody = document.getElementById('unpaidBody');
+    const chips = document.getElementById('unpaidSummaryChips');
+    const sumOf = arr => arr.reduce((s, r) => s + (r.payments_pending || 0), 0);
+
+    // Summary chips
+    const green  = rows.filter(r => (r.days_overdue || 0) <= 0);
+    const yellow = rows.filter(r => (r.days_overdue || 0) > 0  && (r.days_overdue || 0) <= 30);
+    const red    = rows.filter(r => (r.days_overdue || 0) > 30);
+    const total  = sumOf(rows);
+    const chip = (label, count, amt, color) => count
+        ? `<div style="padding:.4rem .8rem;border-radius:8px;background:${color}22;border:1px solid ${color}44;font-size:.82rem;cursor:default">
+               <span style="color:${color};font-weight:700">${label}:</span>
+               ${count} facturas · ${formatter.format(amt)}
+           </div>` : '';
+    chips.innerHTML =
+        chip('🟢 En plazo', green.length, sumOf(green), '#10b981') +
+        chip('🟡 Atención (1–30d)', yellow.length, sumOf(yellow), '#f59e0b') +
+        chip('🔴 Vencida (>30d)', red.length, sumOf(red), '#f43f5e') +
+        `<div style="margin-left:auto;font-size:.82rem;font-weight:700;padding:.4rem .8rem">
+             Total pendiente: ${formatter.format(total)}
+         </div>`;
+
+    if (!rows.length) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text-gray)">Sin facturas pendientes 🎉</td></tr>';
+        return;
+    }
+
+    tbody.innerHTML = rows.map(r => {
+        const d = r.days_overdue || 0;
+        let color, bg;
+        if (d <= 0)       { color = '#10b981'; bg = 'rgba(16,185,129,.05)'; }
+        else if (d <= 30) { color = '#f59e0b'; bg = 'rgba(245,158,11,.05)'; }
+        else              { color = '#f43f5e'; bg = 'rgba(244,63,94,.05)';  }
+
+        const refTs  = r.due_date || r.date;
+        const dateStr = refTs ? new Date(refTs * 1000).toLocaleDateString('es-ES') : '—';
+        const label  = r.aging_label || (d <= 0 ? 'En plazo' : d <= 30 ? 'Atención' : 'Vencida');
+        const overdueText = d > 0 ? ` · ${d}d` : '';
+
+        // Action buttons
+        const emailBtn = r.contact_email
+            ? `<button class="action-btn btn-secondary" title="Copiar email: ${escapeHtml(r.contact_email)}"
+                   style="font-size:.75rem;padding:.25rem .5rem"
+                   onclick="copyUnpaidEmail('${escapeHtml(r.contact_email)}', this)">📧</button>`
+            : `<button class="action-btn btn-secondary" title="Sin email registrado"
+                   style="font-size:.75rem;padding:.25rem .5rem;opacity:.4" disabled>📧</button>`;
+
+        const pdfBtn = `<button class="action-btn btn-secondary" title="Ver PDF"
+                   style="font-size:.75rem;padding:.25rem .5rem"
+                   onclick="openPdfModal('invoices','${r.id}')">📄</button>`;
+
+        const holdedBtn = `<a href="https://app.holded.com/sales#open:invoice-${r.id}" target="_blank"
+                   class="action-btn btn-secondary" title="Abrir en Holded"
+                   style="font-size:.75rem;padding:.25rem .5rem;text-decoration:none">🔗</a>`;
+
+        return `<tr style="background:${bg}">
+            <td style="font-weight:600;white-space:nowrap">${escapeHtml(r.doc_number || '—')}</td>
+            <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+                title="${escapeHtml(r.contact_name || '')}">${escapeHtml(r.contact_name || '—')}</td>
+            <td style="white-space:nowrap">${dateStr}</td>
+            <td>
+                <span style="font-weight:700;color:${color};background:${color}22;padding:.2rem .5rem;border-radius:20px;font-size:.78rem;white-space:nowrap">
+                    ${label}${overdueText}
+                </span>
+            </td>
+            <td style="text-align:right;font-weight:700;white-space:nowrap">${formatter.format(r.payments_pending || 0)}</td>
+            <td style="white-space:nowrap">
+                <div style="display:flex;gap:4px">${emailBtn}${pdfBtn}${holdedBtn}</div>
+            </td>
+        </tr>`;
+    }).join('');
+}
+
+async function copyUnpaidEmail(email, btn) {
+    try {
+        await navigator.clipboard.writeText(email);
+        const orig = btn.textContent;
+        btn.textContent = '✓';
+        btn.style.color = '#10b981';
+        setTimeout(() => { btn.textContent = orig; btn.style.color = ''; }, 1500);
+    } catch (e) {
+        alert(email); // Fallback: show email if clipboard fails
+    }
+}
+
+// ── Aging widget (dashboard overview) ────────────────────────────────────────
+
+let _agingData = [];
+
+async function loadAgingWidget() {
+    try {
+        const res = await fetch('/api/invoices/unpaid');
+        _agingData = await res.json();
+
+        if (!_agingData.length) {
+            document.getElementById('agingWidget').style.display = 'none';
+            return;
+        }
+
+        // Bucket counts & totals (based on days_overdue from due_date)
+        const green  = _agingData.filter(r => (r.days_overdue || 0) <= 0);
+        const yellow = _agingData.filter(r => (r.days_overdue || 0) > 0 && (r.days_overdue || 0) <= 30);
+        const red    = _agingData.filter(r => (r.days_overdue || 0) > 30);
+
+        const sumOf = arr => arr.reduce((s, r) => s + (r.amount || 0), 0);
+
+        const buckets = document.getElementById('agingBuckets');
+        buckets.innerHTML = '';
+        [
+            { label: 'Pendiente',  sublabel: '≤ 30 días',  items: green,  color: '#10b981', bg: 'rgba(16,185,129,.08)' },
+            { label: 'Atención',   sublabel: '31 – 60 días',items: yellow, color: '#f59e0b', bg: 'rgba(245,158,11,.08)'  },
+            { label: 'Vencida',    sublabel: '> 60 días',   items: red,    color: '#f43f5e', bg: 'rgba(244,63,94,.08)'   }
+        ].forEach(b => {
+            if (!b.items.length) return;
+            const div = document.createElement('div');
+            div.className = 'aging-bucket';
+            div.style.cssText = `flex:1;padding:.6rem 1rem;background:${b.bg};border-right:1px solid var(--glass-border);cursor:pointer`;
+            div.innerHTML =
+                `<div style="font-size:.78rem;color:${b.color};font-weight:700">${b.label} <span style="font-weight:400;opacity:.7">${b.sublabel}</span></div>` +
+                `<div style="font-size:1.15rem;font-weight:700;color:${b.color};margin:.1rem 0">${b.items.length} factura${b.items.length>1?'s':''}</div>` +
+                `<div style="font-size:.82rem;color:var(--text-gray)">${formatter.format(sumOf(b.items))}</div>`;
+            div.addEventListener('click', () => openAgingModal());
+            buckets.appendChild(div);
+        });
+
+        document.getElementById('agingWidget').style.display = '';
+    } catch (e) {
+        console.error('Aging widget error:', e);
+    }
+}
+
+function openAgingModal() {
+    document.getElementById('agingModal').style.display = 'flex';
+    renderAgingTable();
+}
+
+function closeAgingModal() {
+    document.getElementById('agingModal').style.display = 'none';
+}
+
+function renderAgingTable() {
+    const tbody = document.getElementById('agingBody');
+    const summaryEl = document.getElementById('agingSummary');
+
+    if (!_agingData.length) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text-gray)">No hay facturas pendientes de cobro.</td></tr>';
+        return;
+    }
+
+    // Summary chips
+    const green  = _agingData.filter(r => (r.days_overdue || 0) <= 0);
+    const yellow = _agingData.filter(r => (r.days_overdue || 0) > 0 && (r.days_overdue || 0) <= 30);
+    const red    = _agingData.filter(r => (r.days_overdue || 0) > 30);
+    const total  = _agingData.reduce((s, r) => s + (r.amount || 0), 0);
+
+    const chip = (label, count, amt, color) => count
+        ? `<div style="padding:.4rem .8rem;border-radius:8px;background:${color}22;border:1px solid ${color}44;font-size:.82rem">
+               <span style="color:${color};font-weight:700">${label}:</span>
+               ${count} factura${count>1?'s':''} · ${formatter.format(amt)}
+           </div>`
+        : '';
+
+    const sumOf = arr => arr.reduce((s, r) => s + (r.amount || 0), 0);
+    summaryEl.innerHTML =
+        chip('🟢 En plazo', green.length, sumOf(green), '#10b981') +
+        chip('🟡 Atención (1–30d)', yellow.length, sumOf(yellow), '#f59e0b') +
+        chip('🔴 Vencida (>30d)', red.length, sumOf(red), '#f43f5e') +
+        `<div style="margin-left:auto;padding:.4rem .8rem;font-size:.82rem;font-weight:700">Total pendiente: ${formatter.format(total)}</div>`;
+
+    // Table rows — color by days_overdue, label from aging_label
+    tbody.innerHTML = _agingData.map(r => {
+        // Show due_date as reference date; fall back to invoice date
+        const refTs = r.due_date || r.date;
+        const dateStr = refTs ? new Date(refTs * 1000).toLocaleDateString('es-ES') : '—';
+        const d = r.days_overdue || 0;
+        let color, bg;
+        if (d <= 0)       { color = '#10b981'; bg = 'rgba(16,185,129,.06)'; }
+        else if (d <= 30) { color = '#f59e0b'; bg = 'rgba(245,158,11,.06)'; }
+        else              { color = '#f43f5e'; bg = 'rgba(244,63,94,.06)';  }
+
+        // aging_label comes from server: 'Pendiente' / 'Atención' / 'Vencida'
+        const agingLabel = r.aging_label || (d <= 0 ? 'Pendiente' : d <= 30 ? 'Atención' : 'Vencida');
+        const overdueText = d > 0 ? ` · ${d}d` : '';
+
+        return `<tr style="background:${bg}">
+            <td style="font-weight:600">${escapeHtml(r.contact_name || '—')}</td>
+            <td style="font-size:.82rem;color:var(--text-gray)">${escapeHtml(r.doc_number || r.desc || '—')}</td>
+            <td>${dateStr}</td>
+            <td>
+                <span style="font-weight:700;color:${color};background:${color}22;padding:.2rem .55rem;border-radius:20px;font-size:.78rem;white-space:nowrap">
+                    ${agingLabel}${overdueText}
+                </span>
+            </td>
+            <td style="text-align:right;font-weight:700">${formatter.format(r.payments_pending || r.amount || 0)}</td>
+            <td>
+                <button class="action-btn btn-secondary" style="font-size:.75rem;padding:.2rem .5rem"
+                    onclick="closeAgingModal();openDocumentDetails('invoices','${r.id}')">Ver</button>
+            </td>
+        </tr>`;
+    }).join('');
+    liveSearch('agingSearch', 'agingBody');
 }

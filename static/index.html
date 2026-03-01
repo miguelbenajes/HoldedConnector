@@ -24,14 +24,17 @@
 <body>
     <div class="dashboard-container">
         <aside class="sidebar">
-            <div class="logo">HOLDED <span>Local</span></div>
+            <div class="sidebar-top">
+                <div class="logo">HOLDED <span>Local</span></div>
+                <button id="themeToggle" class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">🌙</button>
+            </div>
             <nav>
                 <div class="nav-item active" data-view="overview">Overview</div>
                 <div class="nav-item" data-view="contacts">Contacts</div>
                 <div class="nav-item" data-view="products">Inventory</div>
-                <div class="nav-item" data-view="invoices">Invoices</div>
+                <div class="nav-item" data-view="invoices">Invoices<a class="nav-create-btn" href="https://app.holded.com/doc/invoice/new" target="_blank" title="Nueva factura">+</a></div>
                 <div class="nav-item" data-view="purchases">Expenses</div>
-                <div class="nav-item" data-view="estimates">Estimates</div>
+                <div class="nav-item" data-view="estimates">Estimates<a class="nav-create-btn" href="https://app.holded.com/doc/estimate/new" target="_blank" title="Nuevo presupuesto">+</a></div>
                 <div class="nav-item" data-view="amortizations">📊 Amortizaciones</div>
                 <div class="nav-item" data-view="analysis">🧠 Análisis Gastos</div>
                 <div class="nav-item" data-view="backup">💾 Backup</div>
@@ -89,6 +92,15 @@
                     </div>
                 </section>
 
+                <!-- Aging warning bar -->
+                <div id="agingWidget" style="display:none;margin-bottom:1.25rem;border-radius:12px;overflow:hidden;border:1px solid var(--glass-border)">
+                    <div style="display:flex;align-items:center;justify-content:space-between;padding:.65rem 1rem;background:var(--card-bg)">
+                        <span style="font-weight:600;font-size:.9rem">⚠️ Facturas pendientes de cobro</span>
+                        <button class="action-btn btn-secondary" style="font-size:.78rem;padding:.2rem .6rem" onclick="openAgingModal()">Ver todas</button>
+                    </div>
+                    <div id="agingBuckets" style="display:flex;gap:0"></div>
+                </div>
+
                 <section class="charts-container">
                     <div class="chart-wrapper">
                         <h2>Monthly Performance</h2>
@@ -102,7 +114,10 @@
 
                 <section class="activity-section">
                     <div class="card recent-activity">
-                        <h2>Recent Activity</h2>
+                        <div class="table-search-bar">
+                            <h2>Recent Activity</h2>
+                            <input id="recentSearch" class="table-search-input" type="search" placeholder="🔍 Buscar…">
+                        </div>
                         <table id="recentTable">
                             <thead>
                                 <tr>
@@ -131,11 +146,47 @@
                         <button class="sync-btn" onclick="showView('overview')">Back to Dashboard</button>
                     </div>
                 </header>
-                <div class="card table-container">
+
+                <!-- Sub-tabs: only visible for invoices -->
+                <div id="invoiceSubTabs" style="display:none;margin-bottom:1rem;display:flex;gap:.5rem">
+                    <button id="tabAllInvoices" class="action-btn" onclick="switchInvoiceTab('all')"
+                            style="border-radius:8px;padding:.4rem 1rem">Todas</button>
+                    <button id="tabUnpaidInvoices" class="action-btn btn-secondary" onclick="switchInvoiceTab('unpaid')"
+                            style="border-radius:8px;padding:.4rem 1rem">⚠️ Pendientes de cobro</button>
+                </div>
+
+                <!-- All invoices table -->
+                <div id="allInvoicesTable" class="card table-container">
                     <table id="entityTable">
                         <thead id="entityThead"></thead>
                         <tbody id="entityTbody"></tbody>
                     </table>
+                </div>
+
+                <!-- Unpaid invoices table (hidden by default) -->
+                <div id="unpaidInvoicesTable" style="display:none">
+                    <!-- Summary chips -->
+                    <div id="unpaidSummaryChips" style="display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:1rem"></div>
+                    <!-- Search -->
+                    <input id="unpaidSearch" class="table-search-input" type="search"
+                           placeholder="🔍 Buscar cliente o factura…"
+                           style="width:100%;margin-bottom:.75rem;box-sizing:border-box"
+                           oninput="filterUnpaidTable()">
+                    <div class="card table-container" style="overflow-x:auto">
+                        <table style="min-width:700px">
+                            <thead>
+                                <tr>
+                                    <th style="width:120px">Num. Factura</th>
+                                    <th>Cliente</th>
+                                    <th style="width:120px">Vencimiento</th>
+                                    <th style="width:160px">Estado</th>
+                                    <th style="text-align:right;width:120px">Pendiente</th>
+                                    <th style="width:110px">Acciones</th>
+                                </tr>
+                            </thead>
+                            <tbody id="unpaidBody"></tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
 
@@ -187,6 +238,9 @@
 
                 <!-- Main table -->
                 <div class="card table-container" style="margin-top:1.5rem">
+                    <div class="table-search-bar" style="margin-bottom:.75rem">
+                        <input id="amortSearch" class="table-search-input" type="search" placeholder="🔍 Buscar producto…">
+                    </div>
                     <table id="amortTable">
                         <thead>
                             <tr>
@@ -258,6 +312,9 @@
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
                         <h2 style="margin:0">📋 Facturas categorizadas</h2>
                         <div style="display:flex;gap:0.5rem;align-items:center">
+                            <input id="analysisTextSearch" class="table-search-input" type="search"
+                                   placeholder="🔍 Buscar proveedor…" oninput="debounceAnalysisSearch()"
+                                   style="width:180px">
                             <select id="analysisCategoryFilter" onchange="loadAnalyzedInvoices()"
                                 style="padding:0.4rem 0.7rem;background:var(--glass-bg);border:1px solid var(--glass-border);border-radius:8px;color:var(--text-white);font-size:0.85rem">
                                 <option value="">Todas las categorías</option>
@@ -290,7 +347,10 @@
                 <div class="card" style="margin-top:1.5rem" id="matchesPanel">
                     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem">
                         <h2 style="margin:0">🔍 Productos del inventario detectados en compras</h2>
-                        <span id="matchesBadge" class="amort-badge badge-pending" style="display:none"></span>
+                        <div style="display:flex;gap:.5rem;align-items:center">
+                            <input id="matchesSearch" class="table-search-input" type="search" placeholder="🔍 Buscar…">
+                            <span id="matchesBadge" class="amort-badge badge-pending" style="display:none"></span>
+                        </div>
                     </div>
                     <p style="color:var(--text-gray);font-size:0.9rem;margin-bottom:1rem">
                         Estos productos de tu inventario aparecen en facturas de compra. Confírmalos para añadirlos automáticamente a Amortizaciones con su precio real de compra.
@@ -429,18 +489,73 @@
             </header>
             <div style="padding:1rem 1.5rem 1.5rem">
                 <div id="amortHistorySummary" style="margin-bottom:1rem;padding:0.75rem 1rem;background:var(--card-bg);border-radius:8px;border:1px solid var(--glass-border)"></div>
+                <input id="amortHistorySearch" class="table-search-input" type="search"
+                       placeholder="🔍 Buscar cliente o factura…"
+                       style="width:100%;margin-bottom:.75rem;box-sizing:border-box">
                 <div class="table-container" style="max-height:360px;overflow-y:auto">
                     <table>
                         <thead>
                             <tr>
+                                <th>Factura</th>
                                 <th>Fecha</th>
-                                <th>Unidades</th>
+                                <th>Días</th>
                                 <th>Precio unit.</th>
                                 <th>Subtotal</th>
                             </tr>
                         </thead>
                         <tbody id="amortHistoryBody">
-                            <tr><td colspan="4" style="text-align:center;padding:2rem;color:var(--text-gray)">Cargando...</td></tr>
+                            <tr><td colspan="5" style="text-align:center;padding:2rem;color:var(--text-gray)">Cargando...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Purchase cost-source picker modal -->
+    <div id="purchasePickerModal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closePurchasePicker()">
+        <div class="modal-content" style="max-width:620px">
+            <header>
+                <h2>🔍 Vincular factura de compra</h2>
+                <button class="close-btn" onclick="closePurchasePicker()">&times;</button>
+            </header>
+            <div style="padding:1rem 1.5rem 1.5rem">
+                <input id="purchasePickerSearch" type="text" placeholder="Buscar proveedor, descripción o producto…"
+                       style="width:100%;padding:.55rem .8rem;background:var(--card-bg);border:1px solid var(--glass-border);border-radius:8px;color:var(--text-light);font-size:.9rem;box-sizing:border-box;margin-bottom:.75rem"
+                       oninput="debouncePurchaseSearch(this.value)">
+                <div id="purchasePickerResults" style="max-height:380px;overflow-y:auto">
+                    <p style="color:var(--text-gray);font-size:.85rem;text-align:center;padding:2rem 0">Escribe para buscar…</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Unpaid invoices aging panel -->
+    <div id="agingModal" class="modal-overlay" style="display:none" onclick="if(event.target===this)closeAgingModal()">
+        <div class="modal-content" style="max-width:760px">
+            <header>
+                <h2>⚠️ Facturas pendientes de cobro</h2>
+                <button class="close-btn" onclick="closeAgingModal()">&times;</button>
+            </header>
+            <div style="padding:1rem 1.5rem 1.5rem">
+                <div id="agingSummary" style="display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:1rem"></div>
+                <input id="agingSearch" class="table-search-input" type="search"
+                       placeholder="🔍 Buscar cliente o descripción…"
+                       style="width:100%;margin-bottom:.75rem;box-sizing:border-box">
+                <div class="table-container" style="max-height:420px;overflow-y:auto">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Cliente</th>
+                                <th>Descripción</th>
+                                <th>Fecha</th>
+                                <th>Días</th>
+                                <th style="text-align:right">Importe</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="agingBody">
+                            <tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text-gray)">Cargando…</td></tr>
                         </tbody>
                     </table>
                 </div>

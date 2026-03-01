@@ -10,6 +10,106 @@
     --text-gray: #94a3b8;
     --glass-border: rgba(255, 255, 255, 0.08);
     --accent: #8b5cf6;
+
+    /* Alias variables — backwards-compat for components */
+    --glass-bg: rgba(30, 41, 59, 0.4);
+    --text-muted: #94a3b8;
+    --text-light: #f8fafc;
+    --bg-card: rgba(30, 41, 59, 0.4);
+    --bg-card-hover: rgba(30, 41, 59, 0.65);
+    --border-color: rgba(255, 255, 255, 0.08);
+    --accent-green: #10b981;
+}
+
+/* ── Light mode overrides ── */
+body.light-mode {
+    --bg-dark: #f0f4f8;
+    --sidebar-bg: #ffffff;
+    --card-bg: rgba(255, 255, 255, 0.9);
+    --text-white: #1e293b;
+    --text-gray: #64748b;
+    --glass-border: rgba(0, 0, 0, 0.08);
+    /* Alias overrides for light mode */
+    --glass-bg: rgba(255, 255, 255, 0.9);
+    --text-muted: #64748b;
+    --text-light: #1e293b;
+    --bg-card: rgba(255, 255, 255, 0.9);
+    --bg-card-hover: rgba(240, 244, 248, 0.95);
+    --border-color: rgba(0, 0, 0, 0.08);
+}
+body.light-mode {
+    background-image:
+        radial-gradient(circle at 0% 0%, rgba(16, 185, 129, 0.06) 0%, transparent 40%),
+        radial-gradient(circle at 100% 100%, rgba(59, 130, 246, 0.06) 0%, transparent 40%);
+}
+body.light-mode .sidebar {
+    box-shadow: 10px 0 30px rgba(0, 0, 0, 0.08);
+}
+body.light-mode .card {
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+}
+body.light-mode .stat-card {
+    background: rgba(255, 255, 255, 0.95);
+}
+body.light-mode table th {
+    background: rgba(0, 0, 0, 0.04);
+}
+body.light-mode table tr:hover {
+    background: rgba(16, 185, 129, 0.06);
+}
+body.light-mode .nav-item {
+    color: #475569;
+}
+body.light-mode .nav-item.active,
+body.light-mode .nav-item:hover {
+    background: rgba(16, 185, 129, 0.12);
+    color: #10b981;
+}
+body.light-mode input,
+body.light-mode select {
+    background: #ffffff;
+    border-color: rgba(0, 0, 0, 0.15);
+    color: #1e293b;
+}
+body.light-mode .safe-mode-badge {
+    background: rgba(244, 63, 94, 0.12);
+    color: #f43f5e;
+}
+
+/* ── Smooth transition on theme switch ── */
+body, .sidebar, .card, .stat-card, table th, table td, .nav-item, input, select {
+    transition: background-color 0.25s ease, color 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
+}
+
+/* ── Sidebar top (logo + theme toggle) ── */
+.sidebar-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1.75rem;
+}
+.sidebar-top .logo {
+    margin-bottom: 0;
+}
+
+/* ── Theme toggle button ── */
+.theme-toggle {
+    background: var(--card-bg);
+    border: 1px solid var(--glass-border);
+    border-radius: 8px;
+    width: 34px;
+    height: 34px;
+    font-size: 1rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s, transform 0.15s;
+    flex-shrink: 0;
+}
+.theme-toggle:hover {
+    background: rgba(16, 185, 129, 0.15);
+    transform: scale(1.1);
 }
 
 * {
@@ -48,7 +148,6 @@ body {
 .logo {
     font-size: 1.5rem;
     font-weight: 800;
-    margin-bottom: 4rem;
     letter-spacing: -0.025em;
 }
 
@@ -76,6 +175,33 @@ body {
 .nav-item.active {
     background: rgba(16, 185, 129, 0.1);
     color: var(--primary);
+}
+
+/* Quick-create + button inside nav items */
+.nav-create-btn {
+    margin-left: auto;
+    opacity: 0;
+    transition: opacity 0.2s, background 0.2s;
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1rem;
+    font-weight: 600;
+    line-height: 1;
+    color: var(--primary);
+    background: transparent;
+    text-decoration: none;
+    flex-shrink: 0;
+}
+.nav-item:hover .nav-create-btn {
+    opacity: 1;
+}
+.nav-create-btn:hover {
+    background: rgba(16, 185, 129, 0.2);
+    transform: scale(1.1);
 }
 
 .safe-mode-badge {
@@ -458,7 +584,7 @@ td {
 }
 
 .modal-content {
-    background: #0f172a;
+    background: var(--sidebar-bg);
     padding: 2.5rem;
     border-radius: 24px;
     width: 90%;
@@ -547,6 +673,40 @@ td {
     position: absolute;
     right: 8px;
     color: var(--primary);
+}
+
+/* Drag & drop column reorder */
+#entityThead th[draggable] {
+    user-select: none;
+}
+#entityThead th.col-dragging {
+    opacity: 0.4;
+    cursor: grabbing;
+}
+#entityThead th.col-drag-over {
+    border-left: 2px solid var(--primary);
+    background: rgba(16, 185, 129, 0.12);
+}
+
+/* Column resize */
+#entityTable {
+    table-layout: fixed;
+    width: 100%;
+}
+.col-resizer {
+    position: absolute;
+    right: 0;
+    top: 0;
+    width: 6px;
+    height: 100%;
+    cursor: col-resize;
+    z-index: 2;
+    user-select: none;
+}
+.col-resizer:hover,
+.col-resizer.resizing {
+    background: var(--primary);
+    opacity: 1;
 }
 
 .date-filter-group {
@@ -986,6 +1146,7 @@ td {
     }
     .sidebar nav { display: flex; gap: 0.5rem; }
     .nav-item { white-space: nowrap; margin-bottom: 0; padding: 0.6rem 1rem; font-size: 0.85rem; }
+    .nav-create-btn { display: none; }
     .logo { margin-bottom: 0; margin-right: 1rem; font-size: 1.2rem; }
     .safe-mode-badge { display: none; }
     .content { padding: 1.5rem; }
@@ -1201,7 +1362,7 @@ td {
 
 /* ── Column configurator context menu ───────────────────────────── */
 .col-config-menu {
-    background: #1e2536;
+    background: var(--sidebar-bg);
     border: 1px solid var(--border-color);
     border-radius: 10px;
     box-shadow: 0 12px 36px rgba(0,0,0,.6);
@@ -1269,17 +1430,17 @@ td {
 .hdate-label { font-weight: 500; }
 .hdate-caret { opacity: .5; font-size: .7rem; }
 
-/* Dropdown */
+/* Dropdown — position:fixed so it escapes any ancestor stacking context
+   (transform, backdrop-filter, overflow:hidden on parent cards) */
 .hdate-dropdown {
-    position: absolute;
-    top: calc(100% + 6px);
-    z-index: 9999;
+    position: fixed;
+    z-index: 99999;
     display: flex;
     flex-direction: row;
-    background: #1e2536;
+    background: var(--sidebar-bg);
     border: 1px solid var(--border-color);
     border-radius: 12px;
-    box-shadow: 0 16px 48px rgba(0,0,0,.55);
+    box-shadow: 0 16px 48px rgba(0,0,0,.75);
     overflow: hidden;
     min-width: 200px;
 }
@@ -1344,10 +1505,37 @@ td {
     transition: color .12s;
 }
 .hcal-nav:hover { color: var(--text-light); }
+/* Legacy — kept for safety, replaced by .hcal-sel */
 .hcal-title {
     font-size: .82rem;
     font-weight: 600;
     color: var(--text-light);
+}
+/* Month/Year select dropdowns inside calendar header */
+.hcal-sel {
+    background: var(--card-bg);
+    border: 1px solid var(--glass-border);
+    border-radius: 5px;
+    color: var(--text-light);
+    font-size: .82rem;
+    font-weight: 600;
+    padding: .15rem .25rem;
+    cursor: pointer;
+    outline: none;
+    appearance: none;
+    -webkit-appearance: none;
+    text-align: center;
+    transition: border-color .12s;
+}
+.hcal-sel:hover  { border-color: var(--primary); }
+.hcal-sel:focus  { border-color: var(--primary); box-shadow: 0 0 0 2px rgba(16,185,129,.2); }
+.hcal-sel-month  { min-width: 82px; }
+.hcal-sel-year   { min-width: 52px; }
+/* Thin separator in presets list before long-range presets */
+.hdate-preset-sep {
+    height: 1px;
+    background: var(--glass-border);
+    margin: .3rem .5rem;
 }
 .hcal-grid {
     display: grid;
@@ -1377,3 +1565,75 @@ td {
 .hcal-range-start,
 .hcal-range-end           { background: var(--accent-green) !important; color: #000 !important; border-radius: 5px; font-weight: 600; }
 .hcal-selected            { background: var(--accent-green); color: #000; font-weight: 600; }
+
+/* ── Purchase picker ─────────────────────────────────── */
+.picker-invoice-card {
+    border: 1px solid var(--glass-border);
+    border-radius: 10px;
+    margin-bottom: .6rem;
+    overflow: hidden;
+    background: var(--card-bg);
+}
+.picker-invoice-header {
+    display: flex;
+    align-items: center;
+    gap: .75rem;
+    padding: .55rem .8rem;
+    background: rgba(255,255,255,.03);
+    flex-wrap: wrap;
+}
+.picker-items-list {
+    border-top: 1px solid var(--glass-border);
+    padding: .3rem 0;
+}
+.picker-item-row {
+    display: flex;
+    align-items: center;
+    gap: .6rem;
+    padding: .3rem .8rem;
+    font-size: .82rem;
+    transition: background .15s;
+}
+.picker-item-row:hover { background: rgba(16,185,129,.06); }
+
+/* ── Aging widget & modal ────────────────────────────── */
+#agingWidget            { cursor: default; }
+.aging-bucket           { transition: background .15s; }
+.aging-bucket:hover     { filter: brightness(1.1); }
+#agingModal .table-container tr { transition: background .12s; }
+#agingModal .table-container tr:hover { filter: brightness(1.08); }
+/* ── Table search inputs ────────────────────────────── */
+.table-search-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+}
+.table-search-bar h2 { margin: 0; flex: 1; }
+
+.table-search-input {
+    background: rgba(15, 23, 42, 0.6);
+    border: 1px solid var(--glass-border);
+    border-radius: 8px;
+    padding: 0.4rem 0.75rem;
+    color: var(--text-white);
+    font-size: 0.85rem;
+    outline: none;
+    transition: border-color .2s, box-shadow .2s;
+    min-width: 160px;
+}
+.table-search-input::placeholder { color: var(--text-gray); }
+.table-search-input:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.15);
+}
+/* Cancel button (×) inside <input type="search"> */
+.table-search-input::-webkit-search-cancel-button { filter: invert(0.6); cursor: pointer; }
+
+/* ── Unpaid invoices sub-view ───────────────────────────────── */
+#unpaidInvoicesTable .card.table-container {
+    overflow-x: auto;
+}
+#unpaidInvoicesTable table {
+    min-width: 750px;
+}

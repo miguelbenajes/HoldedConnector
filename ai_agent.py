@@ -887,6 +887,38 @@ TOOL_EXECUTORS = {
 
 # ─── System Prompt Builder ───────────────────────────────────────────
 
+def load_skills():
+    """Load skills from the skills/ directory."""
+    try:
+        # Assuming skills dir is in the same directory as this script
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        skills_dir = os.path.join(base_dir, "skills")
+        
+        if not os.path.exists(skills_dir):
+            return ""
+
+        skills_text = []
+        for item in sorted(os.listdir(skills_dir)):
+            skill_path = os.path.join(skills_dir, item)
+            if os.path.isdir(skill_path):
+                skill_file = os.path.join(skill_path, "SKILL.md")
+                if os.path.exists(skill_file):
+                    try:
+                        with open(skill_file, "r", encoding="utf-8") as f:
+                            content = f.read()
+                            # Simply append the content of the skill file
+                            skills_text.append(f"--- SKILL: {item} ---\n{content}\n")
+                    except Exception as e:
+                        logger.error(f"Error loading skill {item}: {e}")
+        
+        if not skills_text:
+            return ""
+            
+        return "\n\nENABLED SKILLS (follow these specific instructions):\n" + "\n".join(skills_text)
+    except Exception as e:
+        logger.error(f"Error in load_skills: {e}")
+        return ""
+
 def build_system_prompt():
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
@@ -904,6 +936,8 @@ def build_system_prompt():
     conn.close()
 
     safe_status = "ON (dry run - writes are simulated)" if connector.SAFE_MODE else "OFF (writes execute against Holded)"
+    
+    skills_content = load_skills()
 
     return f"""You are the financial assistant for this company's Holded accounting system.
 You help analyze financial data, check prices, create estimates/invoices, generate reports, and send documents.
@@ -935,7 +969,9 @@ RULES:
 - When showing amounts, use EUR format with 2 decimals.
 - Use render_chart to show inline charts when the user asks for visual data, trends, or comparisons.
 - Use get_overdue_invoices to find overdue/unpaid invoices.
-- Use compare_periods for period-over-period analysis (e.g., this month vs last month)."""
+- Use compare_periods for period-over-period analysis (e.g., this month vs last month).
+
+{skills_content}"""
 
 # ─── Conversation History ────────────────────────────────────────────
 
