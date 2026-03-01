@@ -39,53 +39,19 @@
     },
     {
       "id": "a1b2c3d4-0001-0001-0001-a1b2c3d40003",
-      "name": "GET /api/status",
+      "name": "GET /api/backup/status",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [680, 300],
       "parameters": {
         "method": "GET",
-        "url": "http://holded-api:8000/api/status",
+        "url": "http://holded-api:8000/api/backup/status",
         "options": {
           "response": {
             "response": {
               "responseFormat": "json"
             }
           }
-        }
-      }
-    },
-    {
-      "id": "a1b2c3d4-0001-0001-0001-a1b2c3d40004",
-      "name": "Log en Supabase",
-      "type": "n8n-nodes-base.supabase",
-      "typeVersion": 1,
-      "position": [900, 300],
-      "parameters": {
-        "operation": "create",
-        "tableId": "sync_logs",
-        "dataToSend": "defineBelow",
-        "fieldsUi": {
-          "fieldValues": [
-            {
-              "fieldId": "synced_at",
-              "fieldValue": "={{ new Date().toISOString() }}"
-            },
-            {
-              "fieldId": "status",
-              "fieldValue": "={{ $json.status || 'ok' }}"
-            },
-            {
-              "fieldId": "flow",
-              "fieldValue": "sync-programado"
-            }
-          ]
-        }
-      },
-      "credentials": {
-        "supabaseApi": {
-          "id": "SUPABASE_CREDENTIAL_ID",
-          "name": "Supabase account"
         }
       }
     }
@@ -106,18 +72,7 @@
       "main": [
         [
           {
-            "node": "GET /api/status",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "GET /api/status": {
-      "main": [
-        [
-          {
-            "node": "Log en Supabase",
+            "node": "GET /api/backup/status",
             "type": "main",
             "index": 0
           }
