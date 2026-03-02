@@ -252,6 +252,34 @@ Items tables (invoice_items, etc.) use DELETE + INSERT pattern.
 
 ---
 
+## Data Cleaning & Linking Tools
+
+**Purpose:** Clean up invoice_items without product_id, link them to actual products, enable ROI tracking.
+
+### 1. `inventory_matcher.py` — Fuzzy Match Invoice Concepts to Products
+- Reads invoice_items where product_id IS NULL
+- Fuzzy matches against products table (≥60% similarity threshold)
+- Outputs Excel with two sheets: MATCHED (for reference) + NOT_MATCHED (candidates for creation)
+- Uses `openpyxl` for formatted output with checkboxes and editable fields
+- **Usage:** `/usr/bin/python3 inventory_matcher.py` → generates `products_to_import.xlsx`
+
+### 2. `link_matched_products.py` — Link Items + Auto-Create Amortizations
+- Reads Excel MATCHED sheet (openpyxl)
+- Bulk updates invoice_items.product_id in single transaction
+- Creates amortizations for linked products (ON CONFLICT safe)
+- **Gotcha:** String trimming matters — `'California sun bounce '` ≠ `'California sun bounce'` (trailing spaces)
+- **Usage:** `/usr/bin/python3 link_matched_products.py`
+- **Impact:** 204 items linked, revenue visibility increased 7x (€16k → €114k)
+
+### 3. `migrate_amortizations.py` — SQLite → Supabase Migration
+- One-time migration of manually-curated amortizations from holded.db
+- Maps old SQLite AUTOINCREMENT IDs → new PostgreSQL SERIAL IDs
+- Sets purchase_item_id=NULL (SERIAL IDs don't port between databases)
+- Safe: Handles duplicates gracefully (ON CONFLICT DO NOTHING)
+- **Usage:** `/usr/bin/python3 migrate_amortizations.py` (ran once on 2026-03-02)
+
+---
+
 ## File Structure
 
 ```
@@ -260,6 +288,9 @@ holded-connector/
 ├── connector.py        # DB abstraction, Holded API sync, all data access
 ├── ai_agent.py         # Claude tool_use agent, 19 tools, streaming
 ├── reports.py          # PDF/Excel report generation
+├── migrate_amortizations.py    # SQLite→Supabase migration for amortizations (40 items)
+├── inventory_matcher.py         # Generate Excel with fuzzy-matched products (204 matched, 307 new)
+├── link_matched_products.py     # Bulk link invoice_items to products + create amortizations
 ├── requirements.txt    # Python dependencies
 ├── .env                # Local config (not in git)
 ├── .env.example        # Config template
@@ -319,8 +350,12 @@ conn.close()
 - [x] Supabase — 20 tables created, full data sync verified
 - [x] PWA — Installable on desktop and mobile
 - [x] Dark/light theme toggle
+- [x] Amortizations migration — 40 items SQLite → Supabase (`migrate_amortizations.py`)
+- [x] Invoice linking — 207 items linked (`inventory_matcher.py` + `link_matched_products.py`)
+- [x] Data cleaning — Revenue impact: €16k → €114k (7x increase from proper product linking)
 
-### Pending (Tasks 6-7)
+### Pending (Tasks 8+)
+- [ ] Filter & create 307 NOT_MATCHED products in Holded
 - [ ] `api.py` — Still has ~3 raw `sqlite3.connect()` calls (lines ~211, ~622, ~1120, ~1191)
 - [ ] `ai_agent.py` — Still has ~22 raw `sqlite3.connect()` calls (all exec_* functions)
 - [ ] Docker deployment (Dockerfile, docker-compose.yml)
@@ -371,8 +406,11 @@ python3 api.py
 | `cursor.lastrowid` returns wrong value | Use `RETURNING id` for PostgreSQL inserts needing new PK |
 | New table missing after code change | Add `CREATE TABLE IF NOT EXISTS` in `init_db()`, restart server |
 | PWA not installable | Needs HTTPS in production (localhost works without) |
+| Invoice items not linking in bulk UPDATE | String trimming: `'text '` with trailing space ≠ `'text'` — use TRIM() or .strip() in code |
+| ON CONFLICT silently skips duplicates | Not an error — check rowcount to verify inserts. Use rowcount=0 to detect skips |
+| Fuzzy matching missing valid matches | Threshold ≥60% is configurable — adjust `difflib.get_close_matches(cutoff=...)` if needed |
 
 ---
 
-**Last Updated:** 2026-03-01
-**Latest Milestone:** Supabase migration (connector.py fully migrated, 20 tables in cloud)
+**Last Updated:** 2026-03-02
+**Latest Milestone:** Data cleaning suite complete (207 items linked, 307 new products pending creation, revenue visibility 7x increase)
