@@ -10,6 +10,13 @@ function escapeHtml(str) {
         .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
 }
 
+/** Fetch wrapper that throws on non-2xx responses. */
+async function safeFetch(url, opts) {
+    var res = await fetch(url, opts);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    return res;
+}
+
 /**
  * liveSearch(inputId, tbodyId)
  * Attaches a real-time text filter to any in-memory table.
@@ -22,34 +29,38 @@ function liveSearch(inputId, tbodyId) {
     if (!inp || inp.dataset.liveSearchBound === tbodyId) return;
     inp.dataset.liveSearchBound = tbodyId;
 
+    var _lsTimer = null;
     inp.addEventListener('input', function () {
-        const q = this.value.trim().toLowerCase();
-        const tbody = document.getElementById(tbodyId);
-        if (!tbody) return;
-        let visible = 0;
-        Array.from(tbody.rows).forEach(tr => {
-            if (tr.dataset.searchSkip) return;          // skip detail/accordion rows
-            const match = !q || tr.textContent.toLowerCase().includes(q);
-            tr.style.display = match ? '' : 'none';
-            if (match) visible++;
-        });
-        // Show/hide the "no results" sentinel row
-        let sentinel = tbody.querySelector('tr[data-search-sentinel]');
-        if (!visible && q) {
-            if (!sentinel) {
-                sentinel = document.createElement('tr');
-                sentinel.dataset.searchSentinel = '1';
-                const td = document.createElement('td');
-                td.colSpan = 20;
-                td.style.cssText = 'text-align:center;padding:1.5rem;color:var(--text-gray);font-size:.88rem';
-                td.textContent = 'Sin resultados para "' + q + '"';
-                sentinel.appendChild(td);
-                tbody.appendChild(sentinel);
+        clearTimeout(_lsTimer);
+        var self = this;
+        _lsTimer = setTimeout(function () {
+            var q = self.value.trim().toLowerCase();
+            var tbody = document.getElementById(tbodyId);
+            if (!tbody) return;
+            var visible = 0;
+            Array.from(tbody.rows).forEach(function (tr) {
+                if (tr.dataset.searchSkip) return;
+                var match = !q || tr.textContent.toLowerCase().includes(q);
+                tr.style.display = match ? '' : 'none';
+                if (match) visible++;
+            });
+            var sentinel = tbody.querySelector('tr[data-search-sentinel]');
+            if (!visible && q) {
+                if (!sentinel) {
+                    sentinel = document.createElement('tr');
+                    sentinel.dataset.searchSentinel = '1';
+                    var td = document.createElement('td');
+                    td.colSpan = 20;
+                    td.style.cssText = 'text-align:center;padding:1.5rem;color:var(--text-gray);font-size:.88rem';
+                    td.textContent = 'Sin resultados para "' + q + '"';
+                    sentinel.appendChild(td);
+                    tbody.appendChild(sentinel);
+                }
+                sentinel.style.display = '';
+            } else if (sentinel) {
+                sentinel.style.display = 'none';
             }
-            sentinel.style.display = '';
-        } else if (sentinel) {
-            sentinel.style.display = 'none';
-        }
+        }, 150);
     });
 }
 
@@ -104,7 +115,7 @@ async function fetchStats(start = null, end = null) {
         }
 
         console.log(`Fetching stats from: ${url}`);
-        const response = await fetch(url);
+        const response = await safeFetch(url);
         const data = await response.json();
         console.log('Stats data received:', data);
 
@@ -141,7 +152,7 @@ async function renderCharts(start = null, end = null) {
             url = `/api/stats/monthly?start=${start}&end=${end}`;
         }
 
-        const response = await fetch(url);
+        const response = await safeFetch(url);
         const data = await response.json();
 
         const canvas = document.getElementById('performanceChart');
@@ -223,15 +234,15 @@ async function fetchRecentActivity(start = null, end = null) {
         if (start && end) {
             url = `/api/recent?start=${start}&end=${end}`;
         }
-        const response = await fetch(url);
+        const response = await safeFetch(url);
         const data = await response.json();
         const body = document.getElementById('recentBody');
         body.innerHTML = '';
 
-        data.forEach(item => {
+        body.innerHTML = data.map(item => {
             const date = new Date(item.date * 1000).toLocaleDateString();
             const typeBadge = item.type === 'income' ? 'badge-income' : 'badge-expense';
-            const row = `
+            return `
                 <tr>
                     <td><span class="badge ${typeBadge}">${escapeHtml(item.type).toUpperCase()}</span></td>
                     <td style="font-weight: 600">${escapeHtml(item.contact_name)}</td>
@@ -240,8 +251,7 @@ async function fetchRecentActivity(start = null, end = null) {
                     <td>${getStatusBadge(item.type === 'income' ? 'invoices' : 'purchases', item.status)}</td>
                 </tr>
             `;
-            body.innerHTML += row;
-        });
+        }).join('');
         liveSearch('recentSearch', 'recentBody');
     } catch (error) {
         console.error('Error fetching recent activity:', error);
@@ -575,26 +585,68 @@ function renderEntityTable(entity) {
     }
 
     tbody.innerHTML = '';
+
+    // Event delegation: single click handler for all rows
+    if (!tbody.dataset.delegated) {
+        tbody.dataset.delegated = '1';
+        tbody.addEventListener('click', function(e) {
+            if (e.target.closest('.action-btn') || e.target.closest('.web-toggle')) return;
+            var tr = e.target.closest('tr[data-row-id]');
+            if (!tr) return;
+            var ent = tr.dataset.entity;
+            var rowId = tr.dataset.rowId;
+            var rowName = tr.dataset.rowName || '';
+            if (ent === 'contacts') openContactDetails(rowId, rowName);
+            else if (ent === 'products') openProductDetails(rowId, rowName);
+            else openDocumentDetails(ent, rowId);
+        });
+    }
+
     filteredData.forEach(row => {
         const tr = document.createElement('tr');
         const interactive = ['contacts', 'products', 'invoices', 'estimates', 'purchases'].includes(entity);
-        if (interactive) tr.style.cursor = 'pointer';
+        if (interactive) {
+            tr.style.cursor = 'pointer';
+            tr.dataset.rowId = row.id;
+            tr.dataset.rowName = row.name || '';
+            tr.dataset.entity = entity;
+        }
 
         keys.forEach(key => {
             const td = document.createElement('td');
-            td.addEventListener('click', (e) => {
-                if (!e.target.closest('.action-btn')) {
-                    if (entity === 'contacts') openContactDetails(row.id, row.name);
-                    else if (entity === 'products') openProductDetails(row.id, row.name);
-                    else openDocumentDetails(entity, row.id);
-                }
-            });
 
             let val = row[key];
             const moneyKeys = ['amount', 'price', 'total', 'subtotal', 'tax', 'discount', 'balance', 'budget', 'stock'];
             const dateKeys = ['date', 'time', 'created', 'updated'];
 
-            if (key.toLowerCase() === 'status' && (entity === 'invoices' || entity === 'estimates' || entity === 'purchases')) {
+            if (key === 'web_include' && entity === 'products') {
+                const checked = val === 1 || val === true;
+                const toggle = document.createElement('label');
+                toggle.className = 'web-toggle';
+                const input = document.createElement('input');
+                input.type = 'checkbox';
+                input.checked = checked;
+                const slider = document.createElement('span');
+                slider.className = 'web-toggle-slider';
+                toggle.appendChild(input);
+                toggle.appendChild(slider);
+                input.addEventListener('change', async (e) => {
+                    e.stopPropagation();
+                    const newVal = e.target.checked;
+                    try {
+                        await safeFetch(`/api/entities/products/${row.id}/web-include`, {
+                            method: 'PATCH',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ web_include: newVal })
+                        });
+                        row.web_include = newVal ? 1 : 0;
+                    } catch (err) {
+                        e.target.checked = !newVal;
+                    }
+                });
+                toggle.addEventListener('click', (e) => e.stopPropagation());
+                td.appendChild(toggle);
+            } else if (key.toLowerCase() === 'status' && (entity === 'invoices' || entity === 'estimates' || entity === 'purchases')) {
                 td.innerHTML = getStatusBadge(entity, val);
             } else if (moneyKeys.includes(key.toLowerCase()) && val !== null) {
                 const num = parseFloat(val);
@@ -611,21 +663,33 @@ function renderEntityTable(entity) {
         if (showActions) {
             const td = document.createElement('td');
             td.style.whiteSpace = 'nowrap';
-            const url = holdedUrl(entity, row.id);
-            const editBtn = url
-                ? `<a class="action-btn" href="${url}" target="_blank" rel="noopener"
-                      title="Editar en Holded" onclick="event.stopPropagation()"
-                      style="text-decoration:none;display:inline-flex;align-items:center;gap:3px">
-                      ✏️ Holded
-                   </a>`
-                : '';
-            const pdfBtn = showPdf
-                ? `<button class="action-btn btn-secondary" title="Ver PDF"
-                      onclick="event.stopPropagation(); openPdfModal('${escapeHtml(entity)}', '${escapeHtml(row.id)}')">
-                      👁️ PDF
-                   </button>`
-                : '';
-            td.innerHTML = `<div style="display:flex;gap:4px;align-items:center">${pdfBtn}${editBtn}</div>`;
+            const wrap = document.createElement('div');
+            wrap.style.cssText = 'display:flex;gap:4px;align-items:center';
+
+            if (showPdf) {
+                var pdfBtn = document.createElement('button');
+                pdfBtn.className = 'action-btn btn-secondary';
+                pdfBtn.title = 'Ver PDF';
+                pdfBtn.textContent = '👁️ PDF';
+                pdfBtn.addEventListener('click', (function(ent, rid) { return function(e) { e.stopPropagation(); openPdfModal(ent, rid); }; })(entity, row.id));
+                wrap.appendChild(pdfBtn);
+            }
+
+            var hUrl = holdedUrl(entity, row.id);
+            if (hUrl) {
+                var editLink = document.createElement('a');
+                editLink.className = 'action-btn';
+                editLink.href = hUrl;
+                editLink.target = '_blank';
+                editLink.rel = 'noopener';
+                editLink.title = 'Editar en Holded';
+                editLink.style.cssText = 'text-decoration:none;display:inline-flex;align-items:center;gap:3px';
+                editLink.textContent = '✏️ Holded';
+                editLink.addEventListener('click', function(e) { e.stopPropagation(); });
+                wrap.appendChild(editLink);
+            }
+
+            td.appendChild(wrap);
             tr.appendChild(td);
         }
         tbody.appendChild(tr);
@@ -759,7 +823,7 @@ async function openProductDetails(id, name) {
     tbody.innerHTML = '<tr><td colspan="100" style="text-align:center">Loading history...</td></tr>';
 
     try {
-        const response = await fetch(`/api/entities/products/${id}/history`);
+        const response = await safeFetch(`/api/entities/products/${id}/history`);
         const data = await response.json();
 
         title.textContent = `Product Sales & Purchase History: ${name}`;
@@ -825,7 +889,7 @@ async function openContactDetails(id, name) {
     tbody.innerHTML = '<tr><td colspan="100" style="text-align:center">Loading history...</td></tr>';
 
     try {
-        const response = await fetch(`/api/entities/contacts/${id}/history`);
+        const response = await safeFetch(`/api/entities/contacts/${id}/history`);
         const data = await response.json();
 
         title.textContent = `Transaction History: ${name}`;
@@ -948,7 +1012,7 @@ async function finishSetup() {
 
     errorEl.textContent = 'Verifying key...';
     try {
-        const response = await fetch('/api/config', {
+        const response = await safeFetch('/api/config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ apiKey: key })
@@ -973,7 +1037,7 @@ let distributionChartInstance = null;
 
 async function renderDistributionChart() {
     try {
-        const response = await fetch('/api/stats/top-contacts');
+        const response = await safeFetch('/api/stats/top-contacts');
         const data = await response.json();
 
         const canvas = document.getElementById('distributionChart');
@@ -1027,23 +1091,23 @@ async function renderDistributionChart() {
     }
 }
 
-async function init() {
-    // Wire up sidebar navigation
+// One-time DOM listener setup (never re-run)
+(function setupListeners() {
     document.querySelectorAll('.nav-item').forEach(item => {
         item.addEventListener('click', (e) => {
-            if (e.target.closest('.nav-create-btn')) return; // let the link handle it
+            if (e.target.closest('.nav-create-btn')) return;
             showView(item.getAttribute('data-view'));
         });
     });
-
-    // Wire up Excel export button
     document.getElementById('exportExcelBtn')?.addEventListener('click', () => {
         window.location.href = '/api/reports/excel';
     });
+})();
 
+async function init() {
     // Check config and decide initial view
     try {
-        const response = await fetch('/api/config');
+        const response = await safeFetch('/api/config');
         const config = await response.json();
         if (config.hasKey) {
             showView('overview');
@@ -1088,7 +1152,7 @@ function toggleChat() {
 
 async function checkAiConfig() {
     try {
-        const res = await fetch('/api/ai/config');
+        const res = await safeFetch('/api/ai/config');
         const cfg = await res.json();
         if (!cfg.hasKey) {
             document.getElementById('aiSetupModal').style.display = 'flex';
@@ -1103,7 +1167,7 @@ async function saveClaudeKey() {
     const errorEl = document.getElementById('aiSetupError');
     if (!key) { errorEl.textContent = 'Please enter a key.'; return; }
     try {
-        const res = await fetch('/api/ai/config', {
+        const res = await safeFetch('/api/ai/config', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({ claudeApiKey: key })
@@ -1174,7 +1238,8 @@ async function sendMessage() {
                 if (line.startsWith('event: ')) {
                     currentEvent = line.slice(7).trim();
                 } else if (line.startsWith('data: ') && currentEvent) {
-                    const data = JSON.parse(line.slice(6));
+                    let data;
+                    try { data = JSON.parse(line.slice(6)); } catch (_) { currentEvent = null; continue; }
 
                     switch (currentEvent) {
                         case 'tool_start':
@@ -1267,6 +1332,8 @@ async function sendMessage() {
 
 // ─── Inline Chart Rendering ─────────────────────────────────────────
 
+var _inlineChartInstances = [];
+
 function renderInlineChart(chartData) {
     const container = document.getElementById('chatMessages');
     const wrapper = document.createElement('div');
@@ -1301,7 +1368,7 @@ function renderInlineChart(chartData) {
         return config;
     });
 
-    new Chart(canvas.getContext('2d'), {
+    const chartInstance = new Chart(canvas.getContext('2d'), {
         type: chartData.chart_type,
         data: { labels: chartData.labels, datasets: datasets },
         options: {
@@ -1317,6 +1384,7 @@ function renderInlineChart(chartData) {
             }
         }
     });
+    _inlineChartInstances.push(chartInstance);
 }
 
 // ─── History & Favorites Drawer ─────────────────────────────────────
@@ -1344,6 +1412,7 @@ function switchDrawerTab(tab) {
 async function loadConversations() {
     try {
         const res = await fetch('/api/ai/conversations');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
         const convos = await res.json();
         const el = document.getElementById('drawerHistory');
         if (convos.length === 0) {
@@ -1385,6 +1454,7 @@ async function loadConversation(convId) {
 
     try {
         const res = await fetch('/api/ai/history?conversation_id=' + encodeURIComponent(convId));
+        if (!res.ok) throw new Error('HTTP ' + res.status);
         const messages = await res.json();
         messages.forEach(function(msg) {
             appendChatMessage(msg.role, msg.content);
@@ -1435,7 +1505,7 @@ async function loadFavorites() {
 
 async function addFavorite(query) {
     try {
-        await fetch('/api/ai/favorites', {
+        await safeFetch('/api/ai/favorites', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({ query: query, label: query.substring(0, 50) })
@@ -1453,7 +1523,7 @@ async function addFavorite(query) {
 
 async function removeFavorite(id) {
     try {
-        await fetch('/api/ai/favorites/' + id, { method: 'DELETE' });
+        await safeFetch('/api/ai/favorites/' + id, { method: 'DELETE' });
         loadFavorites();
     } catch (e) {
         console.error('Failed to remove favorite:', e);
@@ -1577,7 +1647,7 @@ async function handleConfirm(confirmed) {
 
     showThinking();
     try {
-        const res = await fetch('/api/ai/confirm', {
+        const res = await safeFetch('/api/ai/confirm', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({ pending_state_id: pendingStateId, confirmed: confirmed })
@@ -1601,6 +1671,8 @@ async function handleConfirm(confirmed) {
 }
 
 function clearChat() {
+    _inlineChartInstances.forEach(function(c) { c.destroy(); });
+    _inlineChartInstances = [];
     chatConversationId = crypto.randomUUID();
     const container = document.getElementById('chatMessages');
     container.textContent = '';
@@ -1672,7 +1744,7 @@ document.getElementById('fileUploadInput')?.addEventListener('change', async (e)
 
     try {
         showThinking();
-        const res = await fetch('/api/files/upload', {
+        const res = await safeFetch('/api/files/upload', {
             method: 'POST',
             body: formData
         });
@@ -1715,7 +1787,7 @@ async function openDirectoryConfig() {
 
     // Load current config
     try {
-        const res = await fetch('/api/files/config');
+        const res = await safeFetch('/api/files/config');
         const config = await res.json();
         document.getElementById('uploadsDir').value = config.uploads_dir || '';
         document.getElementById('reportsDir').value = config.reports_dir || '';
@@ -1745,7 +1817,7 @@ async function saveDirectoryConfig() {
     }
 
     try {
-        const res = await fetch('/api/files/config', {
+        const res = await safeFetch('/api/files/config', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
@@ -1826,7 +1898,7 @@ async function loadAmortizations() {
         rows.forEach(function(r) {
             const profitColor = r.profit >= 0 ? 'var(--primary)' : 'var(--danger)';
             const roiColor    = r.roi_pct >= 0 ? 'var(--primary)' : 'var(--danger)';
-            const safeName    = r.product_name.replace(/'/g, "\\'");
+            const safeName    = escapeHtml(r.product_name);
             const safeType    = r.product_type || 'alquiler';
             const typeInfo    = PRODUCT_TYPES[safeType] || PRODUCT_TYPES.alquiler;
             const irpfBadge   = typeInfo.irpf > 0
@@ -1858,25 +1930,35 @@ async function loadAmortizations() {
                 <td style="text-align:center">${irpfBadge}</td>
                 <td id="amort-cost-${r.id}"><strong>${formatter.format(r.purchase_price)}</strong></td>
                 <td>${escapeHtml(r.purchase_date)}</td>
-                <td>${formatter.format(r.total_revenue)}</td>
+                <td>${formatter.format(r.total_revenue)}${r.pack_revenue > 0 ? '<br><span style="font-size:0.72rem;color:var(--text-gray)">incl. ' + formatter.format(r.pack_revenue) + ' de ' + r.pack_count + ' pack' + (r.pack_count !== 1 ? 's' : '') + '</span>' : ''}</td>
                 <td style="color:${profitColor};font-weight:600">${formatter.format(r.profit)}</td>
                 <td style="color:${roiColor};font-weight:600">${r.roi_pct}%</td>
                 <td>${statusBadge}</td>
-                <td style="white-space:nowrap">
-                    <button class="action-btn btn-secondary" style="padding:0.3rem 0.6rem;font-size:0.8rem"
-                        onclick="openAmortHistory('${escapeHtml(r.product_id)}','${safeName}',${r.purchase_price},${r.total_revenue});event.stopPropagation()">
-                        📋 Historial
-                    </button>
-                    <button class="action-btn btn-secondary" style="padding:0.3rem 0.6rem;font-size:0.8rem"
-                        onclick="openAmortizationModal(${r.id},'${safeName}',${r.purchase_price},'${escapeHtml(r.purchase_date)}','${escapeHtml(r.notes || '')}','${safeType}');event.stopPropagation()">
-                        ✎
-                    </button>
-                    <button class="action-btn" style="padding:0.3rem 0.6rem;font-size:0.8rem;background:var(--danger)"
-                        onclick="deleteAmortization(${r.id},'${safeName}');event.stopPropagation()">
-                        ✕
-                    </button>
-                </td>
+                <td style="white-space:nowrap"></td>
             `;
+            // Build action buttons via DOM to avoid XSS from product names in onclick strings
+            var actionsTd = mainTr.querySelector('td:last-child');
+            var histBtn = document.createElement('button');
+            histBtn.className = 'action-btn btn-secondary';
+            histBtn.style.cssText = 'padding:0.3rem 0.6rem;font-size:0.8rem';
+            histBtn.textContent = '📋 Historial';
+            histBtn.addEventListener('click', (function(row) { return function(e) { e.stopPropagation(); openAmortHistory(row.product_id, row.product_name, row.purchase_price, row.total_revenue); }; })(r));
+            actionsTd.appendChild(histBtn);
+
+            var editBtn = document.createElement('button');
+            editBtn.className = 'action-btn btn-secondary';
+            editBtn.style.cssText = 'padding:0.3rem 0.6rem;font-size:0.8rem';
+            editBtn.textContent = '✎';
+            editBtn.addEventListener('click', (function(row, type) { return function(e) { e.stopPropagation(); openAmortizationModal(row.id, row.product_name, row.purchase_price, row.purchase_date, row.notes || '', type); }; })(r, safeType));
+            actionsTd.appendChild(editBtn);
+
+            var delBtn = document.createElement('button');
+            delBtn.className = 'action-btn';
+            delBtn.style.cssText = 'padding:0.3rem 0.6rem;font-size:0.8rem;background:var(--danger)';
+            delBtn.textContent = '✕';
+            delBtn.addEventListener('click', (function(row) { return function(e) { e.stopPropagation(); deleteAmortization(row.id, row.product_name); }; })(r));
+            actionsTd.appendChild(delBtn);
+
             tbody.appendChild(mainTr);
 
             // Detail row (hidden by default)
@@ -1906,7 +1988,7 @@ async function loadAmortizations() {
 // Inline type change — no modal needed
 async function updateAmortType(id, newType) {
     try {
-        await fetch(`/api/amortizations/${id}`, {
+        await safeFetch(`/api/amortizations/${id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ product_type: newType })
@@ -1921,7 +2003,7 @@ async function updateAmortType(id, newType) {
 async function openAmortizationModal(id = null, name = '', price = '', date = '', notes = '', productType = 'alquiler') {
     if (!_amortProducts.length) {
         try {
-            const res = await fetch('/api/entities/products');
+            const res = await safeFetch('/api/entities/products');
             _amortProducts = await res.json();
         } catch (e) { _amortProducts = []; }
     }
@@ -1986,7 +2068,7 @@ async function saveAmortization() {
         const body = id
             ? { purchase_price: price, purchase_date: date, notes, product_type: productType }
             : { product_id: productId, product_name: productName, purchase_price: price, purchase_date: date, notes, product_type: productType };
-        const res  = await fetch(id ? `/api/amortizations/${id}` : '/api/amortizations', {
+        const res  = await safeFetch(id ? `/api/amortizations/${id}` : '/api/amortizations', {
             method: id ? 'PUT' : 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body)
@@ -2123,7 +2205,7 @@ async function openAmortHistory(productId, productName, purchasePrice, totalReve
         '<tr><td colspan="5" style="text-align:center;padding:2rem;color:var(--text-gray)">Cargando...</td></tr>';
 
     try {
-        const res = await fetch(`/api/entities/products/${productId}/history`);
+        const res = await safeFetch(`/api/entities/products/${productId}/history`);
         const history = await res.json();
 
         // Only income transactions (invoice_items)
@@ -2149,21 +2231,32 @@ async function openAmortHistory(productId, productName, purchasePrice, totalReve
             return;
         }
 
-        document.getElementById('amortHistoryBody').innerHTML = rentals.map(h => {
-            const date = h.date ? new Date(h.date * 1000).toLocaleDateString('es-ES') : '—';
-            const label = escapeHtml(h.doc_desc || h.contact_name || h.doc_id);
-            const linkCell = h.doc_id
-                ? `<a href="#" onclick="closeAmortHistory();openDetails('${h.doc_id}','invoices');return false;"
-                      style="color:var(--primary);text-decoration:none;font-size:0.82rem" title="${escapeHtml(h.contact_name || '')}">${label}</a>`
-                : '—';
-            return `<tr>
-                <td>${linkCell}</td>
-                <td>${date}</td>
+        var historyTbody = document.getElementById('amortHistoryBody');
+        while (historyTbody.firstChild) historyTbody.removeChild(historyTbody.firstChild);
+        rentals.forEach(function(h) {
+            var tr = document.createElement('tr');
+            var dateFmt = h.date ? new Date(h.date * 1000).toLocaleDateString('es-ES') : '—';
+            tr.innerHTML = `
+                <td></td>
+                <td>${escapeHtml(dateFmt)}</td>
                 <td style="text-align:center">${h.units ?? '—'}</td>
                 <td>${formatter.format(h.price ?? 0)}</td>
                 <td style="font-weight:600;color:var(--primary)">${formatter.format(h.subtotal ?? ((h.units ?? 0) * (h.price ?? 0)))}</td>
-            </tr>`;
-        }).join('');
+            `;
+            var linkTd = tr.querySelector('td');
+            if (h.doc_id) {
+                var a = document.createElement('a');
+                a.href = '#';
+                a.style.cssText = 'color:var(--primary);text-decoration:none;font-size:0.82rem';
+                a.title = h.contact_name || '';
+                a.textContent = h.doc_desc || h.contact_name || h.doc_id;
+                a.addEventListener('click', (function(docId) { return function(e) { e.preventDefault(); closeAmortHistory(); openDetails(docId, 'invoices'); }; })(h.doc_id));
+                linkTd.appendChild(a);
+            } else {
+                linkTd.textContent = '—';
+            }
+            historyTbody.appendChild(tr);
+        });
         liveSearch('amortHistorySearch', 'amortHistoryBody');
 
     } catch (e) {
@@ -2235,7 +2328,7 @@ async function loadAnalyzedInvoices(page = 0) {
     tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-gray);padding:1rem">Cargando...</td></tr>';
 
     try {
-        const rows = await fetch(url).then(r => r.json());
+        const rows = await safeFetch(url).then(r => r.json());
         if (!rows.length) {
             tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-gray);padding:2rem">Sin facturas categorizadas aún. Ejecuta el análisis.</td></tr>';
             document.getElementById('analyzedInvoicesPager').innerHTML = '';
@@ -2254,14 +2347,14 @@ async function loadAnalyzedInvoices(page = 0) {
 
         tbody.innerHTML = rows.map(r => `
             <tr>
-                <td style="white-space:nowrap">${fmtDate(r.date)}</td>
-                <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r.contact_name || ''}">${r.contact_name || '—'}</td>
-                <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r.desc || r.reasoning || ''}">${r.desc || r.reasoning || '—'}</td>
+                <td style="white-space:nowrap">${escapeHtml(fmtDate(r.date))}</td>
+                <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(r.contact_name || '')}">${escapeHtml(r.contact_name || '—')}</td>
+                <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(r.desc || r.reasoning || '')}">${escapeHtml(r.desc || r.reasoning || '—')}</td>
                 <td style="text-align:right;font-weight:600">${fmt(r.amount)}</td>
-                <td><span class="badge ${confidenceClass(r.confidence)}" style="font-size:0.75rem">${r.category || '—'}</span></td>
-                <td style="font-size:0.85rem;color:var(--text-gray)">${r.subcategory || '—'}</td>
+                <td><span class="badge ${confidenceClass(r.confidence)}" style="font-size:0.75rem">${escapeHtml(r.category || '—')}</span></td>
+                <td style="font-size:0.85rem;color:var(--text-gray)">${escapeHtml(r.subcategory || '—')}</td>
                 <td title="${r.method === 'rules' ? 'Regla automática' : 'Claude AI'}">${methodIcon(r.method)} ${r.method === 'rules' ? 'Reglas' : 'Claude'}</td>
-                <td><span class="badge ${confidenceClass(r.confidence)}" style="font-size:0.7rem">${r.confidence || '—'}</span></td>
+                <td><span class="badge ${confidenceClass(r.confidence)}" style="font-size:0.7rem">${escapeHtml(r.confidence || '—')}</span></td>
             </tr>`).join('');
 
         // Pager
@@ -2345,30 +2438,48 @@ function _renderMatches(matches) {
         return m || '—';
     };
 
-    tbody.innerHTML = matches.map(m => {
-        const safeName = (m.product_name || '').replace(/'/g, "\\'");
-        return `
-        <tr id="match-row-${m.id}">
+    while (tbody.firstChild) tbody.removeChild(tbody.firstChild);
+    matches.forEach(function(m) {
+        var tr = document.createElement('tr');
+        tr.id = 'match-row-' + m.id;
+        tr.innerHTML = `
             <td><strong>${escapeHtml(m.product_name)}</strong></td>
             <td style="color:var(--text-gray);font-size:0.85rem">${escapeHtml(m.item_name_in_invoice || m.product_name)}</td>
             <td>${escapeHtml(m.supplier || '—')}</td>
             <td style="font-weight:600;color:var(--primary)">${formatter.format(m.matched_price)}</td>
             <td>${escapeHtml(m.matched_date || '—')}</td>
             <td>${methodLabel(m.match_method)}</td>
-            <td>
-                <button class="action-btn btn-secondary" style="padding:0.3rem 0.6rem;font-size:0.8rem"
-                    onclick="openMatchDetail(${m.id}, '${escapeHtml(m.purchase_id)}', '${safeName}', ${m.matched_price}, '${escapeHtml(m.matched_date || '')}', '${escapeHtml(m.supplier || '')}')">
-                    🧾 Ver
-                </button>
-            </td>
-            <td style="white-space:nowrap">
-                <button class="action-btn" style="padding:0.3rem 0.7rem;font-size:0.8rem;margin-right:4px"
-                    onclick="confirmMatch(${m.id}, true)">✅ Confirmar</button>
-                <button class="action-btn" style="padding:0.3rem 0.7rem;font-size:0.8rem;background:var(--danger)"
-                    onclick="confirmMatch(${m.id}, false)">✕ Rechazar</button>
-            </td>
-        </tr>`;
-    }).join('');
+            <td></td>
+            <td style="white-space:nowrap"></td>
+        `;
+        // Build buttons via DOM — avoids XSS from product/supplier names in onclick strings
+        var viewTd = tr.querySelectorAll('td')[6];
+        var viewBtn = document.createElement('button');
+        viewBtn.className = 'action-btn btn-secondary';
+        viewBtn.style.cssText = 'padding:0.3rem 0.6rem;font-size:0.8rem';
+        viewBtn.textContent = '🧾 Ver';
+        viewBtn.addEventListener('click', (function(match) { return function() {
+            openMatchDetail(match.id, match.purchase_id, match.product_name, match.matched_price, match.matched_date || '', match.supplier || '');
+        }; })(m));
+        viewTd.appendChild(viewBtn);
+
+        var actionsTd = tr.querySelectorAll('td')[7];
+        var confirmBtn = document.createElement('button');
+        confirmBtn.className = 'action-btn';
+        confirmBtn.style.cssText = 'padding:0.3rem 0.7rem;font-size:0.8rem;margin-right:4px';
+        confirmBtn.textContent = '✅ Confirmar';
+        confirmBtn.addEventListener('click', (function(id) { return function() { confirmMatch(id, true); }; })(m.id));
+        actionsTd.appendChild(confirmBtn);
+
+        var rejectBtn = document.createElement('button');
+        rejectBtn.className = 'action-btn';
+        rejectBtn.style.cssText = 'padding:0.3rem 0.7rem;font-size:0.8rem;background:var(--danger)';
+        rejectBtn.textContent = '✕ Rechazar';
+        rejectBtn.addEventListener('click', (function(id) { return function() { confirmMatch(id, false); }; })(m.id));
+        actionsTd.appendChild(rejectBtn);
+
+        tbody.appendChild(tr);
+    });
     liveSearch('matchesSearch', 'matchesBody');
 }
 
@@ -2401,7 +2512,7 @@ async function openMatchDetail(matchId, purchaseId, productName, detectedPrice, 
 
     // Load line items from Holded
     try {
-        const res = await fetch(`/api/entities/purchases/${purchaseId}/items`);
+        const res = await safeFetch(`/api/entities/purchases/${purchaseId}/items`);
         const items = await res.json();
         if (!items.length) {
             document.getElementById('matchDetailItems').innerHTML =
@@ -2475,7 +2586,7 @@ async function runAnalysisJob() {
     btn.disabled = true;
     btn.textContent = '⏳ Iniciando...';
     try {
-        const res = await fetch(`/api/analysis/run?batch_size=${batchSize}`, { method: 'POST' });
+        const res = await safeFetch(`/api/analysis/run?batch_size=${batchSize}`, { method: 'POST' });
         const data = await res.json();
         if (data.status === 'started' || data.status === 'already_running') {
             loadAnalysisView();
@@ -2497,7 +2608,7 @@ async function confirmMatch(matchId, confirmed, customPrice = null) {
         const body = { confirmed };
         if (customPrice !== null && !isNaN(customPrice)) body.custom_price = customPrice;
 
-        const res = await fetch(`/api/analysis/matches/${matchId}/confirm`, {
+        const res = await safeFetch(`/api/analysis/matches/${matchId}/confirm`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body)
@@ -2602,7 +2713,7 @@ async function loadBackupView() {
     if (!statusEl) return;
     statusEl.innerHTML = '<span style="opacity:.6">Cargando información…</span>';
     try {
-        const res = await fetch('/api/backup/status');
+        const res = await safeFetch('/api/backup/status');
         const d = await res.json();
 
         // Build commit line
@@ -2687,7 +2798,7 @@ async function renderAmortDetail(amortId) {
     cell.appendChild(loading);
 
     try {
-        const res   = await fetch('/api/amortizations/' + amortId + '/purchases');
+        const res   = await safeFetch('/api/amortizations/' + amortId + '/purchases');
         const links = await res.json();
         while (cell.firstChild) cell.removeChild(cell.firstChild);
 
@@ -2791,7 +2902,7 @@ async function addAmortLink(amortId) {
     const cost   = parseFloat(costEl ? costEl.value : 0);
     if (!cost || cost <= 0) { alert('Introduce un importe válido'); return; }
 
-    const res = await fetch('/api/amortizations/' + amortId + '/purchases', {
+    const res = await safeFetch('/api/amortizations/' + amortId + '/purchases', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ cost_override: cost, allocation_note: noteEl ? noteEl.value : '' })
@@ -2809,7 +2920,7 @@ async function editAmortLink(linkId, amortId) {
     if (!newCostStr) return;
     const newCost = parseFloat(newCostStr);
     if (!newCost || newCost <= 0) { alert('Importe no válido'); return; }
-    const res = await fetch('/api/amortizations/purchases/' + linkId, {
+    const res = await safeFetch('/api/amortizations/purchases/' + linkId, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ cost_override: newCost })
@@ -2822,7 +2933,7 @@ async function editAmortLink(linkId, amortId) {
 
 async function deleteAmortLink(linkId, amortId) {
     if (!confirm('¿Eliminar esta fuente de coste?')) return;
-    const res = await fetch('/api/amortizations/purchases/' + linkId, { method: 'DELETE' });
+    const res = await safeFetch('/api/amortizations/purchases/' + linkId, { method: 'DELETE' });
     if (res.ok) {
         await refreshAmortRow(amortId);
         await renderAmortDetail(amortId);
@@ -2831,7 +2942,7 @@ async function deleteAmortLink(linkId, amortId) {
 
 async function refreshAmortRow(amortId) {
     try {
-        const res  = await fetch('/api/amortizations');
+        const res  = await safeFetch('/api/amortizations');
         const rows = await res.json();
         const r    = rows.find(function(x){ return x.id === amortId; });
         if (r) {
@@ -2876,7 +2987,7 @@ async function runPurchaseSearch(q) {
     const container = document.getElementById('purchasePickerResults');
     container.innerHTML = '<p style="color:var(--text-gray);font-size:.85rem;text-align:center;padding:1rem 0">Buscando…</p>';
     try {
-        const res  = await fetch('/api/purchases/search?q=' + encodeURIComponent(q) + '&limit=30');
+        const res  = await safeFetch('/api/purchases/search?q=' + encodeURIComponent(q) + '&limit=30');
         const invoices = await res.json();
 
         if (!invoices.length) {
@@ -2954,7 +3065,7 @@ async function selectPurchaseLink(purchaseId, itemId, suggestedCost, label) {
     if (noteEl && !noteEl.value) noteEl.value = label || '';
 
     // Save directly with the purchase reference
-    const res = await fetch('/api/amortizations/' + amortId + '/purchases', {
+    const res = await safeFetch('/api/amortizations/' + amortId + '/purchases', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2996,7 +3107,7 @@ async function loadUnpaidView() {
     const tbody = document.getElementById('unpaidBody');
     tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:2rem;color:var(--text-gray)">Cargando…</td></tr>';
     try {
-        const data = await fetch('/api/invoices/unpaid').then(r => r.json());
+        const data = await safeFetch('/api/invoices/unpaid').then(r => r.json());
         _unpaidData = data;
         renderUnpaidTable(data);
     } catch (e) {
@@ -3107,7 +3218,7 @@ let _agingData = [];
 
 async function loadAgingWidget() {
     try {
-        const res = await fetch('/api/invoices/unpaid');
+        const res = await safeFetch('/api/invoices/unpaid');
         _agingData = await res.json();
 
         if (!_agingData.length) {

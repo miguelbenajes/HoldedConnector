@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 import logging
 import requests
@@ -26,8 +27,18 @@ _USE_SQLITE = not DATABASE_URL
 if not _USE_SQLITE:
     import psycopg2
     import psycopg2.extras
+    import psycopg2.pool as _pg_pool
 
 DB_NAME = os.getenv("DB_NAME", "holded.db")  # used only in SQLite mode
+
+# ── Connection pooling (PostgreSQL only) ──────────────────────────────────
+_pool = None
+
+def _get_pool():
+    global _pool
+    if _pool is None:
+        _pool = _pg_pool.ThreadedConnectionPool(minconn=2, maxconn=10, dsn=DATABASE_URL)
+    return _pool
 
 
 def get_db():
@@ -36,7 +47,37 @@ def get_db():
         conn = sqlite3.connect(DB_NAME)
         conn.row_factory = sqlite3.Row
         return conn
-    return psycopg2.connect(DATABASE_URL)
+    try:
+        conn = _get_pool().getconn()
+    except Exception as e:
+        logger.error("Failed to get connection from pool: %s", e)
+        raise RuntimeError("Database connection unavailable") from e
+    try:
+        conn.autocommit = False
+        # Validate the connection is alive (stale connections return errors)
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        cur.close()
+    except Exception:
+        # Connection is dead — discard it and get a fresh one
+        try:
+            _get_pool().putconn(conn, close=True)
+        except Exception:
+            pass
+        conn = _get_pool().getconn()
+    return conn
+
+
+def release_db(conn):
+    """Return a PostgreSQL connection to the pool, rolling back any uncommitted transaction."""
+    if _USE_SQLITE:
+        conn.close()
+    else:
+        try:
+            conn.rollback()  # Clean up any aborted transaction state
+        except Exception:
+            pass
+        _get_pool().putconn(conn)
 
 
 def _cursor(conn):
@@ -76,7 +117,7 @@ def reload_config():
 
         HEADERS["key"] = API_KEY
     finally:
-        conn.close()
+        release_db(conn)
 
 
 def get_setting(key, default=None):
@@ -89,7 +130,7 @@ def get_setting(key, default=None):
             return default
         return row[0] if _USE_SQLITE else row["value"]
     finally:
-        conn.close()
+        release_db(conn)
 
 
 def save_setting(key, value):
@@ -105,7 +146,7 @@ def save_setting(key, value):
             """, (key, value))
         conn.commit()
     finally:
-        conn.close()
+        release_db(conn)
 
 
 # Initial load — always safe: SQLite file may not exist yet, PG may not be reachable
@@ -125,11 +166,17 @@ def extract_ret(prod):
             st = str(t)
             if '_ret_' in st:
                 try: return float(st.split('_ret_')[-1])
-                except: pass
+                except (ValueError, IndexError): pass
     return 0
 
 def init_db():
     conn = get_db()
+    try:
+        _init_db_inner(conn)
+    finally:
+        release_db(conn)
+
+def _init_db_inner(conn):
     cursor = _cursor(conn)
 
     # Dialect-specific type tokens
@@ -154,7 +201,9 @@ def init_db():
             payments_pending {_real} DEFAULT 0,
             payments_total {_real} DEFAULT 0,
             due_date INTEGER,
-            doc_number TEXT
+            doc_number TEXT,
+            tags TEXT,
+            notes TEXT
         )
     ''')
 
@@ -167,7 +216,9 @@ def init_db():
             date INTEGER,
             amount {_real},
             status INTEGER,
-            doc_number TEXT
+            doc_number TEXT,
+            tags TEXT,
+            notes TEXT
         )
     ''')
 
@@ -180,7 +231,9 @@ def init_db():
             date INTEGER,
             amount {_real},
             status INTEGER,
-            doc_number TEXT
+            doc_number TEXT,
+            tags TEXT,
+            notes TEXT
         )
     ''')
 
@@ -191,7 +244,18 @@ def init_db():
             "desc" TEXT,
             price {_real},
             stock {_real},
-            sku TEXT
+            sku TEXT,
+            kind TEXT DEFAULT 'simple',
+            web_include INTEGER NOT NULL DEFAULT 1
+        )
+    ''')
+
+    cursor.execute(f'''
+        CREATE TABLE IF NOT EXISTS pack_components (
+            pack_id TEXT NOT NULL,
+            component_id TEXT NOT NULL,
+            quantity {_real} NOT NULL DEFAULT 1,
+            UNIQUE(pack_id, component_id)
         )
     ''')
 
@@ -208,7 +272,9 @@ def init_db():
             discount {_real},
             tax {_real},
             retention {_real},
-            account TEXT
+            account TEXT,
+            project_id TEXT,
+            kind TEXT
         )
     ''')
 
@@ -225,7 +291,9 @@ def init_db():
             discount {_real},
             tax {_real},
             retention {_real},
-            account TEXT
+            account TEXT,
+            project_id TEXT,
+            kind TEXT
         )
     ''')
 
@@ -242,7 +310,9 @@ def init_db():
             discount {_real},
             tax {_real},
             retention {_real},
-            account TEXT
+            account TEXT,
+            project_id TEXT,
+            kind TEXT
         )
     ''')
 
@@ -421,8 +491,35 @@ def init_db():
             except Exception:
                 pass
 
+        for tbl, col, defn in [
+            ("invoices",          "tags",       "TEXT"),
+            ("invoices",          "notes",      "TEXT"),
+            ("purchase_invoices", "tags",       "TEXT"),
+            ("purchase_invoices", "notes",      "TEXT"),
+            ("estimates",         "tags",       "TEXT"),
+            ("estimates",         "notes",      "TEXT"),
+            ("invoice_items",     "project_id", "TEXT"),
+            ("invoice_items",     "kind",       "TEXT"),
+            ("purchase_items",    "project_id", "TEXT"),
+            ("purchase_items",    "kind",       "TEXT"),
+            ("estimate_items",    "project_id", "TEXT"),
+            ("estimate_items",    "kind",       "TEXT"),
+        ]:
+            try:
+                cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {defn}")
+            except Exception:
+                pass
+
         try:
             cursor.execute("ALTER TABLE amortizations ADD COLUMN product_type TEXT NOT NULL DEFAULT 'alquiler'")
+        except Exception:
+            pass
+        try:
+            cursor.execute("ALTER TABLE products ADD COLUMN kind TEXT DEFAULT 'simple'")
+        except Exception:
+            pass
+        try:
+            cursor.execute("ALTER TABLE products ADD COLUMN web_include INTEGER NOT NULL DEFAULT 1")
         except Exception:
             pass
     else:
@@ -435,6 +532,21 @@ def init_db():
             "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS doc_number TEXT",
             "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS doc_number TEXT",
             "ALTER TABLE amortizations ADD COLUMN IF NOT EXISTS product_type TEXT NOT NULL DEFAULT 'alquiler'",
+            "ALTER TABLE products ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'simple'",
+            # project + tags support
+            "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS tags TEXT",
+            "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS notes TEXT",
+            "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS tags TEXT",
+            "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS notes TEXT",
+            "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS tags TEXT",
+            "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS notes TEXT",
+            "ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS project_id TEXT",
+            "ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS kind TEXT",
+            "ALTER TABLE purchase_items ADD COLUMN IF NOT EXISTS project_id TEXT",
+            "ALTER TABLE purchase_items ADD COLUMN IF NOT EXISTS kind TEXT",
+            "ALTER TABLE estimate_items ADD COLUMN IF NOT EXISTS project_id TEXT",
+            "ALTER TABLE estimate_items ADD COLUMN IF NOT EXISTS kind TEXT",
+            "ALTER TABLE products ADD COLUMN IF NOT EXISTS web_include INTEGER NOT NULL DEFAULT 1",
         ]:
             try:
                 cursor.execute(stmt)
@@ -492,12 +604,16 @@ def init_db():
         'CREATE INDEX IF NOT EXISTS idx_inv_items_invoice ON invoice_items(invoice_id)',
         'CREATE INDEX IF NOT EXISTS idx_pur_items_product ON purchase_items(product_id)',
         'CREATE INDEX IF NOT EXISTS idx_pur_items_purchase ON purchase_items(purchase_id)',
+        'CREATE INDEX IF NOT EXISTS idx_pack_components_pack ON pack_components(pack_id)',
+        'CREATE INDEX IF NOT EXISTS idx_pack_components_comp ON pack_components(component_id)',
         'CREATE INDEX IF NOT EXISTS idx_ai_history_conv ON ai_history(conversation_id, timestamp)',
+        'CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status)',
+        'CREATE INDEX IF NOT EXISTS idx_invoices_payments_pending ON invoices(payments_pending)',
+        'CREATE INDEX IF NOT EXISTS idx_ai_history_conv_role ON ai_history(conversation_id, role, timestamp)',
     ]:
         cursor.execute(idx_sql)
 
     conn.commit()
-    conn.close()
 
 def fetch_data(endpoint, params=None):
     if params is None: params = {}
@@ -587,49 +703,53 @@ def sync_documents(doc_type, table, items_table, fk_column):
 
         for item in data:
             doc_id = item.get('id')
+            tags   = json.dumps(item.get('tags') or [])
+            notes  = item.get('notes') or ''
             if table == 'invoices':
                 vals = (doc_id, item.get('contact'), item.get('contactName'), item.get('desc'),
                         item.get('date'), _num(item.get('total')), item.get('status'),
                         _num(item.get('paymentsPending', 0)), _num(item.get('paymentsTotal', 0)),
-                        item.get('dueDate'), item.get('docNumber'))
+                        item.get('dueDate'), item.get('docNumber'), tags, notes)
                 if _USE_SQLITE:
                     cursor.execute('''
                         INSERT OR REPLACE INTO invoices
                             (id, contact_id, contact_name, "desc", date, amount, status,
-                             payments_pending, payments_total, due_date, doc_number)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                             payments_pending, payments_total, due_date, doc_number, tags, notes)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ''', vals)
                 else:
                     cursor.execute('''
                         INSERT INTO invoices
                             (id, contact_id, contact_name, "desc", date, amount, status,
-                             payments_pending, payments_total, due_date, doc_number)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                             payments_pending, payments_total, due_date, doc_number, tags, notes)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                         ON CONFLICT (id) DO UPDATE SET
                             contact_id=EXCLUDED.contact_id, contact_name=EXCLUDED.contact_name,
                             "desc"=EXCLUDED."desc", date=EXCLUDED.date, amount=EXCLUDED.amount,
                             status=EXCLUDED.status, payments_pending=EXCLUDED.payments_pending,
                             payments_total=EXCLUDED.payments_total, due_date=EXCLUDED.due_date,
-                            doc_number=EXCLUDED.doc_number
+                            doc_number=EXCLUDED.doc_number, tags=EXCLUDED.tags, notes=EXCLUDED.notes
                     ''', vals)
             else:
                 vals = (doc_id, item.get('contact'), item.get('contactName'), item.get('desc'),
-                        item.get('date'), _num(item.get('total')), item.get('status'), item.get('docNumber'))
+                        item.get('date'), _num(item.get('total')), item.get('status'),
+                        item.get('docNumber'), tags, notes)
                 if _USE_SQLITE:
                     cursor.execute(f'''
                         INSERT OR REPLACE INTO {table}
-                            (id, contact_id, contact_name, "desc", date, amount, status, doc_number)
-                        VALUES (?,?,?,?,?,?,?,?)
+                            (id, contact_id, contact_name, "desc", date, amount, status, doc_number, tags, notes)
+                        VALUES (?,?,?,?,?,?,?,?,?,?)
                     ''', vals)
                 else:
                     cursor.execute(f'''
                         INSERT INTO {table}
-                            (id, contact_id, contact_name, "desc", date, amount, status, doc_number)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                            (id, contact_id, contact_name, "desc", date, amount, status, doc_number, tags, notes)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                         ON CONFLICT (id) DO UPDATE SET
                             contact_id=EXCLUDED.contact_id, contact_name=EXCLUDED.contact_name,
                             "desc"=EXCLUDED."desc", date=EXCLUDED.date, amount=EXCLUDED.amount,
-                            status=EXCLUDED.status, doc_number=EXCLUDED.doc_number
+                            status=EXCLUDED.status, doc_number=EXCLUDED.doc_number,
+                            tags=EXCLUDED.tags, notes=EXCLUDED.notes
                     ''', vals)
 
             # Items: delete + re-insert (simpler than upsert for SERIAL-keyed rows)
@@ -640,15 +760,17 @@ def sync_documents(doc_type, table, items_table, fk_column):
                 account = acc_map.get(acc_id, acc_id)
                 cursor.execute(_q(f'''
                     INSERT INTO {items_table}
-                        ({fk_column}, product_id, name, sku, units, price, subtotal, discount, tax, retention, account)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                        ({fk_column}, product_id, name, sku, units, price, subtotal,
+                         discount, tax, retention, account, project_id, kind)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                 '''), (doc_id, prod.get('productId'), prod.get('name'), prod.get('sku'),
                        _num(prod.get('units')), _num(prod.get('price')), _num(prod.get('subtotal')),
-                       _num(prod.get('discount')), _num(prod.get('tax')), _num(retention), account))
+                       _num(prod.get('discount')), _num(prod.get('tax')), _num(retention), account,
+                       prod.get('projectid'), prod.get('kind')))
 
         conn.commit()
     finally:
-        conn.close()
+        release_db(conn)
     logger.info(f"Synced {len(data)} {doc_type}s and their line items.")
 
 
@@ -680,7 +802,7 @@ def sync_accounts():
                 """, vals)
         conn.commit()
     finally:
-        conn.close()
+        release_db(conn)
     logger.info(f"Synced {len(accounts)} ledger accounts.")
 
 
@@ -690,22 +812,41 @@ def sync_products():
     conn = get_db()
     try:
         cursor = _cursor(conn)
+        pack_rows = []  # collect (pack_id, component_id, qty) for batch insert
         for item in data:
+            kind = item.get('kind', 'simple') or 'simple'
             vals = (item.get('id'), item.get('name'), item.get('desc'),
-                    _num(item.get('price')), _num(item.get('stock')), item.get('sku'))
+                    _num(item.get('price')), _num(item.get('stock')), item.get('sku'), kind)
             if _USE_SQLITE:
-                cursor.execute('INSERT OR REPLACE INTO products (id, name, "desc", price, stock, sku) VALUES (?,?,?,?,?,?)', vals)
+                cursor.execute('INSERT OR REPLACE INTO products (id, name, "desc", price, stock, sku, kind) VALUES (?,?,?,?,?,?,?)', vals)
             else:
                 cursor.execute("""
-                    INSERT INTO products (id, name, "desc", price, stock, sku) VALUES (%s,%s,%s,%s,%s,%s)
+                    INSERT INTO products (id, name, "desc", price, stock, sku, kind) VALUES (%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT (id) DO UPDATE SET
                         name=EXCLUDED.name, "desc"=EXCLUDED."desc", price=EXCLUDED.price,
-                        stock=EXCLUDED.stock, sku=EXCLUDED.sku
+                        stock=EXCLUDED.stock, sku=EXCLUDED.sku, kind=EXCLUDED.kind
                 """, vals)
+
+            # Collect pack composition for batch insert
+            if kind == 'pack':
+                pack_id = item.get('id')
+                for pi in (item.get('packItems') or []):
+                    raw_pid = pi.get('pid', '')
+                    component_id = raw_pid.split('#')[0] if '#' in raw_pid else raw_pid
+                    if component_id:
+                        pack_rows.append((pack_id, component_id, _num(pi.get('units', 1)) or 1))
+
+        # Refresh pack_components: DELETE all + re-INSERT (small table, composition may change)
+        cursor.execute("DELETE FROM pack_components")
+        for row in pack_rows:
+            if _USE_SQLITE:
+                cursor.execute("INSERT INTO pack_components (pack_id, component_id, quantity) VALUES (?,?,?)", row)
+            else:
+                cursor.execute("INSERT INTO pack_components (pack_id, component_id, quantity) VALUES (%s,%s,%s)", row)
         conn.commit()
     finally:
-        conn.close()
-    logger.info(f"Synced {len(data)} products.")
+        release_db(conn)
+    logger.info(f"Synced {len(data)} products ({len(pack_rows)} pack components).")
 
 
 def sync_contacts():
@@ -733,7 +874,7 @@ def sync_contacts():
                 """, vals)
         conn.commit()
     finally:
-        conn.close()
+        release_db(conn)
     logger.info(f"Synced {len(data)} contacts.")
 
 
@@ -761,7 +902,7 @@ def sync_projects():
                 """, vals)
         conn.commit()
     finally:
-        conn.close()
+        release_db(conn)
     logger.info(f"Synced {len(data)} projects.")
 
 
@@ -789,7 +930,7 @@ def sync_payments():
                 """, vals)
         conn.commit()
     finally:
-        conn.close()
+        release_db(conn)
     logger.info(f"Synced {len(data)} payments.")
 
 def post_data(endpoint, payload):
@@ -799,7 +940,7 @@ def post_data(endpoint, payload):
         return {"status": 1, "id": "SAFE_MODE_ID_TEST", "info": "Dry run successful"}
 
     url = f"{BASE_URL}{endpoint}"
-    response = requests.post(url, headers=HEADERS, json=payload)
+    response = requests.post(url, headers=HEADERS, json=payload, timeout=30)
     if response.status_code == 200:
         return response.json()
     else:
@@ -813,7 +954,7 @@ def put_data(endpoint, payload):
         return {"status": 1, "info": "Dry run successful"}
 
     url = f"{BASE_URL}{endpoint}"
-    response = requests.put(url, headers=HEADERS, json=payload)
+    response = requests.put(url, headers=HEADERS, json=payload, timeout=30)
     if response.status_code == 200:
         return response.json()
     else:
@@ -1130,7 +1271,7 @@ def get_unanalyzed_purchases(limit: int = 10) -> list:
             result.append(d)
         return result
     finally:
-        conn.close()
+        release_db(conn)
 
 
 def save_purchase_analysis(purchase_id: str, category: str, subcategory: str,
@@ -1158,7 +1299,7 @@ def save_purchase_analysis(purchase_id: str, category: str, subcategory: str,
             ''', vals)
         conn.commit()
     finally:
-        conn.close()
+        release_db(conn)
 
 
 def get_analyzed_invoices(limit: int = 50, offset: int = 0, category: str = None, q: str = None) -> list:
@@ -1188,7 +1329,7 @@ def get_analyzed_invoices(limit: int = 50, offset: int = 0, category: str = None
         ''', params + [limit, offset])
         return [dict(r) for r in cursor.fetchall()]
     finally:
-        conn.close()
+        release_db(conn)
 
 
 def get_analysis_stats() -> dict:
@@ -1218,7 +1359,7 @@ def get_analysis_stats() -> dict:
             "last_run_db": last_run,
         }
     finally:
-        conn.close()
+        release_db(conn)
 
 
 # ─── Inventory Matcher ───────────────────────────────────────────────
@@ -1368,7 +1509,7 @@ def find_inventory_in_purchases() -> list:
 
         return matches
     finally:
-        conn.close()
+        release_db(conn)
 
 
 def save_inventory_match(purchase_id, purchase_item_id, product_id,
@@ -1401,7 +1542,7 @@ def save_inventory_match(purchase_id, purchase_item_id, product_id,
         conn.commit()
         return new_id
     finally:
-        conn.close()
+        release_db(conn)
 
 
 def get_pending_matches() -> list:
@@ -1426,7 +1567,7 @@ def get_pending_matches() -> list:
         ''')
         return [dict(r) for r in cursor.fetchall()]
     finally:
-        conn.close()
+        release_db(conn)
 
 
 def confirm_inventory_match(match_id: int, confirmed: bool, custom_price=None,
@@ -1501,7 +1642,7 @@ def confirm_inventory_match(match_id: int, confirmed: bool, custom_price=None,
         return {"ok": True, "action": "confirmed",
                 "amortization_id": amort_id, "price_used": final_price}
     finally:
-        conn.close()
+        release_db(conn)
 
 
 # ============= Amortization Functions =============
@@ -1549,7 +1690,7 @@ def get_amortization_purchases(amortization_id):
         '''), (amortization_id,))
         return [dict(r) for r in cursor.fetchall()]
     finally:
-        conn.close()
+        release_db(conn)
 
 
 def add_amortization_purchase(amortization_id, cost_override, allocation_note="",
@@ -1580,7 +1721,7 @@ def add_amortization_purchase(amortization_id, cost_override, allocation_note=""
         conn.commit()
         return new_id
     finally:
-        conn.close()
+        release_db(conn)
 
 
 def update_amortization_purchase(purchase_link_id, cost_override=None, allocation_note=None,
@@ -1612,7 +1753,7 @@ def update_amortization_purchase(purchase_link_id, cost_override=None, allocatio
         conn.commit()
         return cursor.rowcount > 0
     finally:
-        conn.close()
+        release_db(conn)
 
 
 def delete_amortization_purchase(purchase_link_id):
@@ -1630,7 +1771,7 @@ def delete_amortization_purchase(purchase_link_id):
         conn.commit()
         return True
     finally:
-        conn.close()
+        release_db(conn)
 
 
 def get_product_type_rules() -> list:
@@ -1641,18 +1782,56 @@ def get_product_type_rules() -> list:
         cursor.execute("SELECT * FROM product_type_rules ORDER BY is_expense, irpf_pct DESC")
         return [dict(r) for r in cursor.fetchall()]
     finally:
-        conn.close()
+        release_db(conn)
+
+
+def get_pack_info(product_id):
+    """Return pack composition (if pack) or packs containing this product (if component).
+    Returns dict with 'kind', 'components' (if pack), and 'member_of' (if component)."""
+    conn = get_db()
+    try:
+        cursor = _cursor(conn)
+        cursor.execute(_q("SELECT id, name, kind, price FROM products WHERE id = ?"), (product_id,))
+        prod = cursor.fetchone()
+        if not prod:
+            return None
+        prod = dict(prod)
+        result = {"product_id": product_id, "name": prod["name"], "kind": prod["kind"] or "simple"}
+
+        if prod["kind"] == "pack":
+            cursor.execute(_q('''
+                SELECT pc.component_id, pc.quantity, p.name, p.price
+                FROM pack_components pc
+                LEFT JOIN products p ON p.id = pc.component_id
+                WHERE pc.pack_id = ?
+            '''), (product_id,))
+            result["components"] = [dict(r) for r in cursor.fetchall()]
+        else:
+            cursor.execute(_q('''
+                SELECT pc.pack_id, pc.quantity, p.name, p.price
+                FROM pack_components pc
+                LEFT JOIN products p ON p.id = pc.pack_id
+                WHERE pc.component_id = ?
+            '''), (product_id,))
+            result["member_of"] = [dict(r) for r in cursor.fetchall()]
+
+        return result
+    finally:
+        release_db(conn)
 
 
 def get_amortizations():
     """
     Return all amortizations with real-time revenue calculation from invoice_items.
-    Revenue = SUM of (units * price) per invoice_item where product_id matches.
+    Revenue includes both direct revenue (product_id match) and pack revenue
+    (attributed proportionally from packs that contain the component product).
     Also returns product_type and its fiscal rule (irpf_pct).
     """
     conn = get_db()
     try:
         cursor = _cursor(conn)
+
+        # 1. Direct revenue per amortization (unchanged logic)
         cursor.execute('''
             SELECT
                 a.id,
@@ -1669,7 +1848,7 @@ def get_amortizations():
                         THEN ii.subtotal
                         ELSE COALESCE(ii.units, 0) * COALESCE(ii.price, 0)
                     END
-                ), 0.0) AS total_revenue,
+                ), 0.0) AS direct_revenue,
                 ptr.label        AS type_label,
                 ptr.irpf_pct     AS irpf_pct,
                 ptr.is_expense   AS is_expense
@@ -1681,25 +1860,115 @@ def get_amortizations():
                      ptr.label, ptr.irpf_pct, ptr.is_expense
             ORDER BY a.purchase_date DESC
         ''')
-        rows = cursor.fetchall()
+        rows = [dict(r) for r in cursor.fetchall()]
+
+        # 2. Load pack_components with component prices for proportional attribution
+        cursor.execute('''
+            SELECT pc.pack_id, pc.component_id, pc.quantity, COALESCE(p.price, 0) AS component_price
+            FROM pack_components pc
+            LEFT JOIN products p ON p.id = pc.component_id
+        ''')
+        comp_rows = cursor.fetchall()
+
+        # Build lookups: component_id → list of packs, pack_id → list of components
+        comp_to_packs = {}   # component_id → [pack_id, ...]
+        pack_contents = {}   # pack_id → [(component_id, qty, price), ...]
+        for cr in comp_rows:
+            cr = dict(cr)
+            pack_id = cr['pack_id']
+            comp_id = cr['component_id']
+            qty = float(cr['quantity'] or 1)
+            price = float(cr['component_price'] or 0)
+            comp_to_packs.setdefault(comp_id, []).append(pack_id)
+            pack_contents.setdefault(pack_id, []).append((comp_id, qty, price))
+
+        # Collect all amortized product_ids that appear in some pack
+        amort_product_ids = {r['product_id'] for r in rows}
+        relevant_pack_ids = set()
+        for pid in amort_product_ids:
+            for pack_id in comp_to_packs.get(pid, []):
+                relevant_pack_ids.add(pack_id)
+
+        # 3. Get pack invoice revenue for relevant packs
+        pack_revenue_map = {}  # pack_id → total_invoiced
+        pack_count_map = {}    # pack_id → number of invoice lines
+        if relevant_pack_ids:
+            placeholders = ','.join(['?' if _USE_SQLITE else '%s'] * len(relevant_pack_ids))
+            pack_ids_list = list(relevant_pack_ids)
+            cursor.execute(f'''
+                SELECT product_id,
+                       COALESCE(SUM(
+                           CASE WHEN subtotal IS NOT NULL AND subtotal > 0
+                                THEN subtotal
+                                ELSE COALESCE(units, 0) * COALESCE(price, 0)
+                           END
+                       ), 0) AS pack_total,
+                       COUNT(*) AS line_count
+                FROM invoice_items
+                WHERE product_id IN ({placeholders})
+                GROUP BY product_id
+            ''', pack_ids_list)
+            for pr in cursor.fetchall():
+                pr = dict(pr)
+                pack_revenue_map[pr['product_id']] = float(pr['pack_total'])
+                pack_count_map[pr['product_id']] = pr['line_count']
+
+        # 4. Attribute pack revenue proportionally to each component
         result = []
-        for row in rows:
-            d = dict(row)
+        for d in rows:
+            pack_revenue = 0.0
+            pack_count = 0
+            component_packs = comp_to_packs.get(d['product_id'], [])
+            for pack_id in component_packs:
+                total_pack_invoiced = pack_revenue_map.get(pack_id, 0)
+                if total_pack_invoiced <= 0:
+                    continue
+                # Calculate this component's share of the pack
+                components = pack_contents.get(pack_id, [])
+                total_pack_value = sum(c_price * c_qty for _, c_qty, c_price in components)
+                my_entry = next((c for c in components if c[0] == d['product_id']), None)
+                if my_entry and total_pack_value > 0:
+                    my_value = my_entry[2] * my_entry[1]  # price * qty
+                    share = my_value / total_pack_value
+                elif components:
+                    share = 1.0 / len(components)  # equal split fallback
+                else:
+                    share = 1.0
+                pack_revenue += total_pack_invoiced * share
+                pack_count += pack_count_map.get(pack_id, 0)
+
+            d['direct_revenue'] = float(d.pop('direct_revenue', 0))
+            d['pack_revenue'] = round(pack_revenue, 2)
+            d['pack_count'] = pack_count
+            d['total_revenue'] = round(d['direct_revenue'] + pack_revenue, 2)
+            d['purchase_price'] = float(d['purchase_price'] or 0)
             d['profit'] = d['total_revenue'] - d['purchase_price']
             d['roi_pct'] = round((d['profit'] / d['purchase_price'] * 100), 2) if d['purchase_price'] > 0 else 0
             d['status'] = 'AMORTIZADO' if d['profit'] >= 0 else 'EN CURSO'
             result.append(d)
         return result
     finally:
-        conn.close()
+        release_db(conn)
 
 
 def add_amortization(product_id, product_name, purchase_price, purchase_date,
                      notes="", product_type="alquiler"):
-    """Add a product to amortization tracking. Returns new id or None if duplicate."""
+    """Add a product to amortization tracking.
+    Returns new id, None if duplicate, or raises ValueError if product is a pack."""
     conn = get_db()
     try:
         cursor = _cursor(conn)
+        # Guard: reject pack products — track components instead
+        cursor.execute(_q("SELECT kind FROM products WHERE id = ?"), (product_id,))
+        prod_row = cursor.fetchone()
+        if prod_row:
+            kind = prod_row['kind'] if isinstance(prod_row, dict) else prod_row[0]
+            if kind == 'pack':
+                raise ValueError(
+                    f"'{product_name}' is a pack product. "
+                    "Track its component products instead for accurate ROI."
+                )
+
         vals = (product_id, product_name, purchase_price, purchase_date, notes, product_type)
         if _USE_SQLITE:
             cursor.execute('''
@@ -1719,11 +1988,14 @@ def add_amortization(product_id, product_name, purchase_price, purchase_date,
             new_id = row['id'] if row else None
         conn.commit()
         return new_id
+    except ValueError:
+        conn.rollback()
+        raise  # re-raise pack error for API to handle
     except Exception:
         conn.rollback()
         return None  # likely duplicate product_id (UNIQUE constraint)
     finally:
-        conn.close()
+        release_db(conn)
 
 
 def update_amortization(amort_id, purchase_price=None, purchase_date=None,
@@ -1751,7 +2023,7 @@ def update_amortization(amort_id, purchase_price=None, purchase_date=None,
         conn.commit()
         return cursor.rowcount > 0
     finally:
-        conn.close()
+        release_db(conn)
 
 
 def delete_amortization(amort_id):
@@ -1763,7 +2035,7 @@ def delete_amortization(amort_id):
         conn.commit()
         return cursor.rowcount > 0
     finally:
-        conn.close()
+        release_db(conn)
 
 def get_amortization_summary():
     """Global summary: total invested, total recovered, global profit, counts."""

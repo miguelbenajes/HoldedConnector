@@ -3,6 +3,7 @@ import logging
 import time
 import uuid
 import os
+import threading
 from datetime import datetime, timedelta
 
 import anthropic
@@ -22,6 +23,7 @@ WRITE_TOOLS = {"create_estimate", "create_invoice", "send_document", "create_con
 
 # Pending confirmations: { state_id: { messages, tool_block, conversation_id, expires_at } }
 pending_actions = {}
+_pending_lock = threading.Lock()
 
 # Rate limiting: { ip: [timestamps] }
 _rate_limits = {}
@@ -57,7 +59,7 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "get_product_pricing",
-        "description": "Look up product catalog prices and compare with actual historical sale/purchase prices. Returns catalog price, avg/min/max sale and purchase prices, and margin analysis.",
+        "description": "Look up product catalog prices and compare with actual historical sale/purchase prices. Returns catalog price, avg/min/max sale and purchase prices, margin analysis, and pack/component info (if the product is a pack or belongs to packs).",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -262,7 +264,7 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "get_amortization_status",
-        "description": "Get amortization (ROI) tracking for rental products. Returns each product's purchase cost, total revenue earned from invoices, profit, and ROI%. Also includes a global summary. Use when the user asks about amortization, ROI, investment recovery, or how much a product has earned.",
+        "description": "Get amortization (ROI) tracking for rental products. Returns each product's purchase cost, total revenue (direct + pack-attributed), profit, and ROI%. Pack revenue is automatically attributed to component products proportionally. Also includes a global summary. Use when the user asks about amortization, ROI, investment recovery, or how much a product has earned.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -310,103 +312,178 @@ TOOL_DEFINITIONS = [
 
 # ─── Tool Executors ──────────────────────────────────────────────────
 
+import re as _re
+
 def _validate_sql(sql):
-    s = sql.strip().upper()
-    if not s.startswith("SELECT"):
-        return False
-    dangerous = ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "ATTACH", "DETACH", "PRAGMA"]
-    for kw in dangerous:
-        if kw in s.split("'")[0] if "'" in s else s:
-            # Check outside string literals (simple heuristic)
-            parts = s.split("'")
-            outside = " ".join(parts[::2])
-            if kw in outside.split():
-                return False
-    return True
+    """Validate SQL is read-only. Mirrors Brain's sql.ts protections."""
+    # Block semicolons (prevents statement stacking)
+    if ";" in sql:
+        return False, "Semicolons not allowed — use a single SELECT statement"
+
+    # Block escape sequences that could hide mutation keywords
+    if _re.search(r'\\x[0-9a-f]', sql, _re.IGNORECASE) or "U&'" in sql.upper():
+        return False, "Escape sequences not allowed"
+
+    # Strip comments before checking keywords (prevents hiding mutations in comments)
+    normalized = _re.sub(r'--[^\n]*', '', sql)           # Line comments
+    normalized = _re.sub(r'/\*[\s\S]*?\*/', '', normalized)  # Block comments
+    normalized = normalized.upper()
+
+    # Check for mutation keywords anywhere in the query
+    mutation_keywords = [
+        "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE",
+        "GRANT", "REVOKE", "COPY", "EXECUTE", "CALL", "ATTACH", "DETACH",
+        "PRAGMA", "VACUUM", "REINDEX",
+    ]
+    for kw in mutation_keywords:
+        if _re.search(r'\b' + kw + r'\b', normalized):
+            return False, f"Keyword {kw} not allowed — only SELECT queries"
+
+    # Block dangerous PostgreSQL functions that can read filesystem or leak data
+    dangerous_functions = [
+        "PG_READ_FILE", "PG_READ_BINARY_FILE", "PG_WRITE_FILE",
+        "LO_IMPORT", "LO_EXPORT", "LO_GET", "LO_PUT",
+        "DBLINK", "PG_SHADOW", "PG_AUTHID", "PG_ROLES",
+        "CURRENT_SETTING", "SET_CONFIG", "PG_RELOAD_CONF",
+        "PG_TERMINATE_BACKEND", "PG_CANCEL_BACKEND",
+        "PG_SLEEP",
+    ]
+    for fn in dangerous_functions:
+        if fn in normalized:
+            return False, f"Function {fn} not allowed"
+
+    # Must start with SELECT or WITH (after stripping comments)
+    trimmed = normalized.strip()
+    if not trimmed.startswith("SELECT") and not trimmed.startswith("WITH"):
+        return False, "Query must start with SELECT or WITH"
+
+    return True, None
 
 
 def exec_query_database(params):
     sql = params["sql"]
-    if not _validate_sql(sql):
-        return {"error": "Only SELECT queries are allowed."}
+    # Limit query length
+    if len(sql) > 2000:
+        return {"error": "Query too long (max 2000 chars)"}
+
+    valid, error_msg = _validate_sql(sql)
+    if not valid:
+        return {"error": error_msg}
+
+    conn = connector.get_db()
     try:
-        conn = connector.get_db()
         cursor = connector._cursor(conn)
+        # Set query timeout to prevent runaway queries (PostgreSQL only)
+        if not connector._USE_SQLITE:
+            cursor.execute("SET statement_timeout = '10s'")
         cursor.execute(connector._q(sql))
         rows = [dict(r) for r in cursor.fetchmany(100)]
-        conn.close()
         return {"rows": rows, "count": len(rows), "explanation": params.get("explanation", "")}
     except Exception as e:
-        return {"error": str(e)}
+        # Don't leak full error details — log server-side, return generic message
+        logger.error(f"SQL query error: {e}")
+        return {"error": "Query execution failed"}
+    finally:
+        connector.release_db(conn)
 
 
 def exec_get_contact_details(params):
     search = params["search"]
     include_history = params.get("include_history", False)
     conn = connector.get_db()
-    cursor = connector._cursor(conn)
+    try:
+        cursor = connector._cursor(conn)
 
-    cursor.execute(connector._q("SELECT * FROM contacts WHERE id = ? OR name LIKE ? LIMIT 10"),
-                   (search, f"%{search}%"))
-    contacts = [dict(r) for r in cursor.fetchall()]
+        cursor.execute(connector._q("SELECT * FROM contacts WHERE id = ? OR name LIKE ? LIMIT 10"),
+                       (search, f"%{search}%"))
+        contacts = [dict(r) for r in cursor.fetchall()]
 
-    if include_history and contacts:
-        for c in contacts:
-            cid = c["id"]
-            cursor.execute(connector._q("SELECT COUNT(*) as cnt, COALESCE(SUM(amount),0) as total FROM invoices WHERE contact_id=?"), (cid,))
-            inv = dict(cursor.fetchone())
-            cursor.execute(connector._q("SELECT COUNT(*) as cnt, COALESCE(SUM(amount),0) as total FROM purchase_invoices WHERE contact_id=?"), (cid,))
-            pur = dict(cursor.fetchone())
-            cursor.execute(connector._q("SELECT COUNT(*) as cnt, COALESCE(SUM(amount),0) as total FROM estimates WHERE contact_id=?"), (cid,))
-            est = dict(cursor.fetchone())
-            c["history"] = {"invoices": inv, "purchases": pur, "estimates": est}
+        if include_history and contacts:
+            cids = [c["id"] for c in contacts]
+            ph = ','.join(['?' if connector._USE_SQLITE else '%s'] * len(cids))
+            cursor.execute(connector._q(f"""
+                SELECT contact_id, 'invoices' as doc_type, COUNT(*) as cnt, COALESCE(SUM(amount),0) as total
+                FROM invoices WHERE contact_id IN ({ph}) GROUP BY contact_id
+                UNION ALL
+                SELECT contact_id, 'purchases', COUNT(*), COALESCE(SUM(amount),0)
+                FROM purchase_invoices WHERE contact_id IN ({ph}) GROUP BY contact_id
+                UNION ALL
+                SELECT contact_id, 'estimates', COUNT(*), COALESCE(SUM(amount),0)
+                FROM estimates WHERE contact_id IN ({ph}) GROUP BY contact_id
+            """), cids * 3)
+            hist_map = {}
+            for r in cursor.fetchall():
+                r = dict(r)
+                hist_map.setdefault(r["contact_id"], {})[r["doc_type"]] = {"cnt": r["cnt"], "total": r["total"]}
+            for c in contacts:
+                h = hist_map.get(c["id"], {})
+                empty = {"cnt": 0, "total": 0}
+                c["history"] = {"invoices": h.get("invoices", empty), "purchases": h.get("purchases", empty), "estimates": h.get("estimates", empty)}
 
-    conn.close()
-    return {"contacts": contacts, "count": len(contacts)}
+        return {"contacts": contacts, "count": len(contacts)}
+    finally:
+        connector.release_db(conn)
 
 
 def exec_get_product_pricing(params):
     search = params["search"]
     include_history = params.get("include_history", True)
     conn = connector.get_db()
-    cursor = connector._cursor(conn)
+    try:
+        cursor = connector._cursor(conn)
 
-    cursor.execute(connector._q("SELECT * FROM products WHERE id = ? OR name LIKE ? OR sku LIKE ? LIMIT 10"),
-                   (search, f"%{search}%", f"%{search}%"))
-    products = [dict(r) for r in cursor.fetchall()]
+        cursor.execute(connector._q("SELECT * FROM products WHERE id = ? OR name LIKE ? OR sku LIKE ? LIMIT 10"),
+                       (search, f"%{search}%", f"%{search}%"))
+        products = [dict(r) for r in cursor.fetchall()]
 
-    if include_history and products:
-        for p in products:
-            pid = p["id"]
-            cursor.execute(connector._q("""
-                SELECT COUNT(*) as sales_count,
+        if include_history and products:
+            pids = [p["id"] for p in products]
+            ph = ','.join(['?' if connector._USE_SQLITE else '%s'] * len(pids))
+
+            cursor.execute(connector._q(f"""
+                SELECT product_id, COUNT(*) as sales_count,
                        COALESCE(AVG(price),0) as avg_sale_price,
                        COALESCE(MIN(price),0) as min_sale_price,
                        COALESCE(MAX(price),0) as max_sale_price,
                        COALESCE(SUM(subtotal),0) as total_revenue
-                FROM invoice_items WHERE product_id=?
-            """), (pid,))
-            p["sales"] = dict(cursor.fetchone())
+                FROM invoice_items WHERE product_id IN ({ph}) GROUP BY product_id
+            """), pids)
+            sales_map = {dict(r)["product_id"]: dict(r) for r in cursor.fetchall()}
 
-            cursor.execute(connector._q("""
-                SELECT COUNT(*) as purchase_count,
+            cursor.execute(connector._q(f"""
+                SELECT product_id, COUNT(*) as purchase_count,
                        COALESCE(AVG(price),0) as avg_purchase_price,
                        COALESCE(MIN(price),0) as min_purchase_price,
                        COALESCE(MAX(price),0) as max_purchase_price,
                        COALESCE(SUM(subtotal),0) as total_cost
-                FROM purchase_items WHERE product_id=?
-            """), (pid,))
-            p["purchases"] = dict(cursor.fetchone())
+                FROM purchase_items WHERE product_id IN ({ph}) GROUP BY product_id
+            """), pids)
+            purch_map = {dict(r)["product_id"]: dict(r) for r in cursor.fetchall()}
 
-            avg_sale = p["sales"]["avg_sale_price"]
-            avg_cost = p["purchases"]["avg_purchase_price"]
-            if avg_cost > 0:
-                p["margin_pct"] = round((avg_sale - avg_cost) / avg_cost * 100, 2)
-            else:
-                p["margin_pct"] = None
+            empty_sales = {"sales_count": 0, "avg_sale_price": 0, "min_sale_price": 0, "max_sale_price": 0, "total_revenue": 0}
+            empty_purch = {"purchase_count": 0, "avg_purchase_price": 0, "min_purchase_price": 0, "max_purchase_price": 0, "total_cost": 0}
+            for p in products:
+                p["sales"] = sales_map.get(p["id"], empty_sales)
+                p["purchases"] = purch_map.get(p["id"], empty_purch)
+                avg_sale = p["sales"]["avg_sale_price"]
+                avg_cost = p["purchases"]["avg_purchase_price"]
+                if avg_cost > 0:
+                    p["margin_pct"] = round((avg_sale - avg_cost) / avg_cost * 100, 2)
+                else:
+                    p["margin_pct"] = None
 
-    conn.close()
-    return {"products": products, "count": len(products)}
+            for p in products:
+                pack_info = connector.get_pack_info(p["id"])
+                if pack_info:
+                    p["kind"] = pack_info["kind"]
+                    if pack_info.get("components"):
+                        p["pack_components"] = pack_info["components"]
+                    if pack_info.get("member_of"):
+                        p["member_of_packs"] = pack_info["member_of"]
+
+        return {"products": products, "count": len(products)}
+    finally:
+        connector.release_db(conn)
 
 
 def exec_get_financial_summary(params):
@@ -414,61 +491,62 @@ def exec_get_financial_summary(params):
     start_str = params.get("start_date")
     end_str = params.get("end_date")
 
-    if start_str:
-        start_dt = datetime.strptime(start_str, "%Y-%m-%d")
-    else:
-        start_dt = now - timedelta(days=365)
-    if end_str:
-        end_dt = datetime.strptime(end_str, "%Y-%m-%d")
-    else:
-        end_dt = now
+    try:
+        start_dt = datetime.strptime(start_str, "%Y-%m-%d") if start_str else now - timedelta(days=365)
+        end_dt = datetime.strptime(end_str, "%Y-%m-%d") if end_str else now
+    except ValueError:
+        return {"error": "Invalid date format. Use YYYY-MM-DD."}
+    if start_dt > end_dt:
+        return {"error": "Start date must be before end date."}
 
     start_epoch = int(start_dt.timestamp())
     end_epoch = int(end_dt.timestamp())
 
     conn = connector.get_db()
-    cursor = connector._cursor(conn)
+    try:
+        cursor = connector._cursor(conn)
 
-    cursor.execute(connector._q("SELECT COALESCE(SUM(amount),0) as total FROM invoices WHERE date>=? AND date<=?"),
-                   (start_epoch, end_epoch))
-    income = cursor.fetchone()["total"]
+        cursor.execute(connector._q("SELECT COALESCE(SUM(amount),0) as total FROM invoices WHERE date>=? AND date<=?"),
+                       (start_epoch, end_epoch))
+        income = cursor.fetchone()["total"]
 
-    cursor.execute(connector._q("SELECT COALESCE(SUM(amount),0) as total FROM purchase_invoices WHERE date>=? AND date<=?"),
-                   (start_epoch, end_epoch))
-    expenses = cursor.fetchone()["total"]
+        cursor.execute(connector._q("SELECT COALESCE(SUM(amount),0) as total FROM purchase_invoices WHERE date>=? AND date<=?"),
+                       (start_epoch, end_epoch))
+        expenses = cursor.fetchone()["total"]
 
-    cursor.execute(connector._q("""
-        SELECT contact_name, SUM(amount) as total FROM invoices
-        WHERE date>=? AND date<=? AND contact_name IS NOT NULL AND contact_name != ''
-        GROUP BY contact_name ORDER BY total DESC LIMIT 5
-    """), (start_epoch, end_epoch))
-    top_clients = [dict(r) for r in cursor.fetchall()]
+        cursor.execute(connector._q("""
+            SELECT contact_name, SUM(amount) as total FROM invoices
+            WHERE date>=? AND date<=? AND contact_name IS NOT NULL AND contact_name != ''
+            GROUP BY contact_name ORDER BY total DESC LIMIT 5
+        """), (start_epoch, end_epoch))
+        top_clients = [dict(r) for r in cursor.fetchall()]
 
-    mf = _month_fmt()
-    cursor.execute(connector._q(f"""
-        SELECT {mf} as month, SUM(amount) as total
-        FROM invoices WHERE date>=? AND date<=?
-        GROUP BY month ORDER BY month
-    """), (start_epoch, end_epoch))
-    monthly_income = [dict(r) for r in cursor.fetchall()]
+        mf = _month_fmt()
+        cursor.execute(connector._q(f"""
+            SELECT {mf} as month, SUM(amount) as total
+            FROM invoices WHERE date>=? AND date<=?
+            GROUP BY month ORDER BY month
+        """), (start_epoch, end_epoch))
+        monthly_income = [dict(r) for r in cursor.fetchall()]
 
-    cursor.execute(connector._q(f"""
-        SELECT {mf} as month, SUM(amount) as total
-        FROM purchase_invoices WHERE date>=? AND date<=?
-        GROUP BY month ORDER BY month
-    """), (start_epoch, end_epoch))
-    monthly_expenses = [dict(r) for r in cursor.fetchall()]
+        cursor.execute(connector._q(f"""
+            SELECT {mf} as month, SUM(amount) as total
+            FROM purchase_invoices WHERE date>=? AND date<=?
+            GROUP BY month ORDER BY month
+        """), (start_epoch, end_epoch))
+        monthly_expenses = [dict(r) for r in cursor.fetchall()]
 
-    conn.close()
-    return {
-        "period": {"start": start_str or start_dt.strftime("%Y-%m-%d"), "end": end_str or end_dt.strftime("%Y-%m-%d")},
-        "income": round(income, 2),
-        "expenses": round(expenses, 2),
-        "balance": round(income - expenses, 2),
-        "top_clients": top_clients,
-        "monthly_income": monthly_income,
-        "monthly_expenses": monthly_expenses
-    }
+        return {
+            "period": {"start": start_str or start_dt.strftime("%Y-%m-%d"), "end": end_str or end_dt.strftime("%Y-%m-%d")},
+            "income": round(income, 2),
+            "expenses": round(expenses, 2),
+            "balance": round(income - expenses, 2),
+            "top_clients": top_clients,
+            "monthly_income": monthly_income,
+            "monthly_expenses": monthly_expenses
+        }
+    finally:
+        connector.release_db(conn)
 
 
 def exec_get_document_details(params):
@@ -485,36 +563,48 @@ def exec_get_document_details(params):
 
     table, items_table, fk = table_map[doc_type]
     conn = connector.get_db()
-    cursor = connector._cursor(conn)
+    try:
+        cursor = connector._cursor(conn)
 
-    cursor.execute(connector._q(f"SELECT * FROM {table} WHERE id=?"), (doc_id,))
-    doc = cursor.fetchone()
-    if not doc:
-        conn.close()
-        return {"error": f"Document {doc_id} not found"}
+        cursor.execute(connector._q(f"SELECT * FROM {table} WHERE id=?"), (doc_id,))
+        doc = cursor.fetchone()
+        if not doc:
+            return {"error": f"Document {doc_id} not found"}
 
-    cursor.execute(connector._q(f"SELECT * FROM {items_table} WHERE {fk}=?"), (doc_id,))
-    items = [dict(r) for r in cursor.fetchall()]
-    conn.close()
+        cursor.execute(connector._q(f"SELECT * FROM {items_table} WHERE {fk}=?"), (doc_id,))
+        items = [dict(r) for r in cursor.fetchall()]
 
-    return {"document": dict(doc), "items": items}
+        return {"document": dict(doc), "items": items}
+    finally:
+        connector.release_db(conn)
 
 
-def exec_create_estimate(params):
-    contact_id = params["contact_id"]
-    items = params["items"]
-    desc = params.get("desc", "")
-
+def _prepare_line_items(items):
+    """Convert AI tool items to Holded API product format."""
     products = []
     for item in items:
-        p = {"name": item["name"], "units": item["units"], "subtotal": item["price"]}
+        if not item.get("name") or not item.get("price"):
+            continue
+        p = {"name": item["name"], "units": item.get("units", 1), "subtotal": item["price"]}
         if "tax" in item:
             p["tax"] = item["tax"]
         if "retention" in item:
             p["retention"] = item["retention"]
         products.append(p)
+    return products
 
-    payload = {"contact": contact_id, "desc": desc, "products": products}
+
+def exec_create_estimate(params):
+    contact_id = params["contact_id"]
+    items = params.get("items", [])
+    if not items:
+        return {"error": "At least one line item is required"}
+
+    products = _prepare_line_items(items)
+    if not products:
+        return {"error": "No valid line items provided"}
+
+    payload = {"contact": contact_id, "desc": params.get("desc", ""), "products": products}
     result = connector.post_data("/invoicing/v1/documents/estimate", payload)
     if result:
         is_safe = connector.SAFE_MODE
@@ -525,19 +615,15 @@ def exec_create_estimate(params):
 
 def exec_create_invoice(params):
     contact_id = params["contact_id"]
-    items = params["items"]
-    desc = params.get("desc", "")
+    items = params.get("items", [])
+    if not items:
+        return {"error": "At least one line item is required"}
 
-    products = []
-    for item in items:
-        p = {"name": item["name"], "units": item["units"], "subtotal": item["price"]}
-        if "tax" in item:
-            p["tax"] = item["tax"]
-        if "retention" in item:
-            p["retention"] = item["retention"]
-        products.append(p)
+    products = _prepare_line_items(items)
+    if not products:
+        return {"error": "No valid line items provided"}
 
-    payload = {"contact": contact_id, "desc": desc, "products": products}
+    payload = {"contact": contact_id, "desc": params.get("desc", ""), "products": products}
     result = connector.create_invoice(payload)
     if result:
         is_safe = connector.SAFE_MODE
@@ -549,6 +635,13 @@ def exec_create_invoice(params):
 def exec_send_document(params):
     doc_type = params["doc_type"]
     doc_id = params["doc_id"]
+
+    allowed_types = {"invoice", "purchase", "estimate", "creditnote", "proforma"}
+    if doc_type not in allowed_types:
+        return {"error": f"Unknown doc_type: {doc_type}"}
+    if not _re.match(r'^[a-zA-Z0-9]+$', doc_id):
+        return {"error": "Invalid document ID"}
+
     payload = {}
     if "emails" in params:
         payload["emails"] = params["emails"]
@@ -592,24 +685,26 @@ def exec_get_overdue_invoices(params):
     inv_type = params.get("type", "both")
     min_amount = params.get("min_amount", 0)
     conn = connector.get_db()
-    cursor = connector._cursor(conn)
+    try:
+        cursor = connector._cursor(conn)
 
-    results = []
-    if inv_type in ("receivable", "both"):
-        cursor.execute(
-            connector._q("SELECT id, contact_name, amount, date, status FROM invoices WHERE status = 4 AND amount >= ? ORDER BY amount DESC"),
-            (min_amount,))
-        results.extend([{**dict(r), "source": "receivable"} for r in cursor.fetchall()])
+        results = []
+        if inv_type in ("receivable", "both"):
+            cursor.execute(
+                connector._q("SELECT id, contact_name, amount, date, status FROM invoices WHERE status = 4 AND amount >= ? ORDER BY amount DESC"),
+                (min_amount,))
+            results.extend([{**dict(r), "source": "receivable"} for r in cursor.fetchall()])
 
-    if inv_type in ("payable", "both"):
-        cursor.execute(
-            connector._q("SELECT id, contact_name, amount, date, status FROM purchase_invoices WHERE status = 4 AND amount >= ? ORDER BY amount DESC"),
-            (min_amount,))
-        results.extend([{**dict(r), "source": "payable"} for r in cursor.fetchall()])
+        if inv_type in ("payable", "both"):
+            cursor.execute(
+                connector._q("SELECT id, contact_name, amount, date, status FROM purchase_invoices WHERE status = 4 AND amount >= ? ORDER BY amount DESC"),
+                (min_amount,))
+            results.extend([{**dict(r), "source": "payable"} for r in cursor.fetchall()])
 
-    conn.close()
-    total = sum(r["amount"] or 0 for r in results)
-    return {"overdue": results, "count": len(results), "total_overdue": round(total, 2)}
+        total = sum(r["amount"] or 0 for r in results)
+        return {"overdue": results, "count": len(results), "total_overdue": round(total, 2)}
+    finally:
+        connector.release_db(conn)
 
 
 def exec_get_upcoming_payments(params):
@@ -619,25 +714,27 @@ def exec_get_upcoming_payments(params):
     future = now + days * 86400
 
     conn = connector.get_db()
-    cursor = connector._cursor(conn)
+    try:
+        cursor = connector._cursor(conn)
 
-    where_type = ""
-    if ptype == "income":
-        where_type = "AND type = 'income'"
-    elif ptype == "expense":
-        where_type = "AND type = 'expense'"
+        where_type = ""
+        if ptype == "income":
+            where_type = "AND type = 'income'"
+        elif ptype == "expense":
+            where_type = "AND type = 'expense'"
 
-    cursor.execute(connector._q(f"""
-        SELECT id, document_id, amount, date, method, type
-        FROM payments
-        WHERE date >= ? AND date <= ? {where_type}
-        ORDER BY date ASC
-    """), (now - 30 * 86400, future))
-    payments = [dict(r) for r in cursor.fetchall()]
-    conn.close()
+        cursor.execute(connector._q(f"""
+            SELECT id, document_id, amount, date, method, type
+            FROM payments
+            WHERE date >= ? AND date <= ? {where_type}
+            ORDER BY date ASC
+        """), (now - 30 * 86400, future))
+        payments = [dict(r) for r in cursor.fetchall()]
 
-    total = sum(p["amount"] or 0 for p in payments)
-    return {"payments": payments, "count": len(payments), "total": round(total, 2)}
+        total = sum(p["amount"] or 0 for p in payments)
+        return {"payments": payments, "count": len(payments), "total": round(total, 2)}
+    finally:
+        connector.release_db(conn)
 
 
 def exec_compare_periods(params):
@@ -663,12 +760,20 @@ def exec_compare_periods(params):
             "purchase_count": pur_count
         }
 
-    conn = connector.get_db()
-    cursor = connector._cursor(conn)
+    try:
+        for key in ["period1_start", "period1_end", "period2_start", "period2_end"]:
+            datetime.strptime(params[key], "%Y-%m-%d")
+    except (ValueError, KeyError):
+        return {"error": "Invalid date format. Use YYYY-MM-DD for all period dates."}
 
-    p1 = _period_stats(cursor, params["period1_start"], params["period1_end"])
-    p2 = _period_stats(cursor, params["period2_start"], params["period2_end"])
-    conn.close()
+    conn = connector.get_db()
+    try:
+        cursor = connector._cursor(conn)
+
+        p1 = _period_stats(cursor, params["period1_start"], params["period1_end"])
+        p2 = _period_stats(cursor, params["period2_start"], params["period2_end"])
+    finally:
+        connector.release_db(conn)
 
     def _pct(old, new):
         if old == 0:
@@ -695,6 +800,10 @@ def exec_update_invoice_status(params):
     holded_type = type_map.get(doc_type)
     if not holded_type:
         return {"error": f"Unknown doc_type: {doc_type}"}
+    if not _re.match(r'^[a-zA-Z0-9]+$', doc_id):
+        return {"error": "Invalid document ID"}
+    if not isinstance(status, int) or status < 0 or status > 5:
+        return {"error": "Invalid status (must be 0-5)"}
 
     result = connector.put_data(f"/invoicing/v1/documents/{holded_type}/{doc_id}", {"status": status})
     if result:
@@ -740,15 +849,15 @@ def exec_analyze_file(params):
 
     # Path traversal prevention
     safe_name = os.path.basename(filename)
-    uploads_dir = connector.get_uploads_dir()
+    uploads_dir = os.path.abspath(connector.get_uploads_dir())
     filepath = os.path.join(uploads_dir, safe_name)
 
-    # Validate file exists and is within uploads dir
-    if not os.path.abspath(filepath).startswith(uploads_dir):
-        return {"error": f"Invalid filename: {filename}"}
+    # Validate file is within uploads dir (append sep to prevent prefix attacks)
+    if not os.path.abspath(filepath).startswith(uploads_dir + os.sep):
+        return {"error": "Invalid filename"}
 
     if not os.path.exists(filepath):
-        return {"error": f"File not found: {filename}"}
+        return {"error": f"File not found: {safe_name}"}
 
     # Parse file
     try:
@@ -769,7 +878,7 @@ def exec_analyze_file(params):
             if analysis_type in ["summary", "trends"]:
                 try:
                     analysis["summary"] = df.describe().to_dict()
-                except:
+                except Exception:
                     pass
 
             if analysis_type == "anomalies":
@@ -791,7 +900,8 @@ def exec_analyze_file(params):
         else:
             return {"error": "Unsupported file type (only CSV/Excel)"}
     except Exception as e:
-        return {"error": f"File parsing error: {str(e)}"}
+        logger.error(f"File parsing error: {e}")
+        return {"error": "Failed to parse file"}
 
 def exec_list_files(params):
     """List files in uploads or reports directory."""
@@ -819,7 +929,8 @@ def exec_list_files(params):
 
         return {"success": True, "files": files, "count": len(files)}
     except Exception as e:
-        return {"error": f"Error listing files: {str(e)}"}
+        logger.error(f"Error listing files: {e}")
+        return {"error": "Failed to list files"}
 
 def exec_upload_file(params):
     """Register uploaded file (write operation - requires confirmation)."""
@@ -828,15 +939,18 @@ def exec_upload_file(params):
 
     # Path traversal prevention
     safe_name = os.path.basename(filename)
-    uploads_dir = connector.get_uploads_dir()
+    uploads_dir = os.path.abspath(connector.get_uploads_dir())
     filepath = os.path.join(uploads_dir, safe_name)
 
-    if not os.path.exists(filepath):
-        return {"error": f"File not found in uploads: {filename}"}
+    if not os.path.abspath(filepath).startswith(uploads_dir + os.sep):
+        return {"error": "Invalid filename"}
 
+    if not os.path.exists(filepath):
+        return {"error": f"File not found in uploads: {safe_name}"}
+
+    conn = connector.get_db()
     try:
         # Record in ai_history for audit trail
-        conn = connector.get_db()
         cursor = connector._cursor(conn)
         cursor.execute(connector._q("""
             INSERT INTO ai_history (role, content, conversation_id, tool_calls)
@@ -848,7 +962,6 @@ def exec_upload_file(params):
             "size": os.path.getsize(filepath)
         })))
         conn.commit()
-        conn.close()
 
         return {
             "success": True,
@@ -857,7 +970,10 @@ def exec_upload_file(params):
             "message": f"File '{filename}' registered for processing"
         }
     except Exception as e:
-        return {"error": f"Failed to register file: {str(e)}"}
+        logger.error(f"Failed to register file: {e}")
+        return {"error": "Failed to register file"}
+    finally:
+        connector.release_db(conn)
 
 
 TOOL_EXECUTORS = {
@@ -916,26 +1032,35 @@ def load_skills():
         logger.error(f"Error in load_skills: {e}")
         return ""
 
+_system_prompt_cache = {"prompt": None, "built_at": 0}
+_SYSTEM_PROMPT_TTL = 300  # 5 minutes
+
 def build_system_prompt():
+    now = time.time()
+    if _system_prompt_cache["prompt"] and now - _system_prompt_cache["built_at"] < _SYSTEM_PROMPT_TTL:
+        return _system_prompt_cache["prompt"]
+
     conn = connector.get_db()
-    cursor = connector._cursor(conn)
+    try:
+        cursor = connector._cursor(conn)
 
-    stats = {}
-    for table in ["invoices", "purchase_invoices", "estimates", "products", "contacts"]:
-        cursor.execute(f"SELECT COUNT(*) as c FROM {table}")
-        stats[table] = cursor.fetchone()["c"]
+        stats = {}
+        for table in ["invoices", "purchase_invoices", "estimates", "products", "contacts"]:
+            cursor.execute(f"SELECT COUNT(*) as c FROM {table}")
+            stats[table] = cursor.fetchone()["c"]
 
-    cursor.execute("SELECT COALESCE(SUM(amount),0) as t FROM invoices")
-    total_income = cursor.fetchone()["t"]
-    cursor.execute("SELECT COALESCE(SUM(amount),0) as t FROM purchase_invoices")
-    total_expenses = cursor.fetchone()["t"]
-    conn.close()
+        cursor.execute("SELECT COALESCE(SUM(amount),0) as t FROM invoices")
+        total_income = cursor.fetchone()["t"]
+        cursor.execute("SELECT COALESCE(SUM(amount),0) as t FROM purchase_invoices")
+        total_expenses = cursor.fetchone()["t"]
+    finally:
+        connector.release_db(conn)
 
     safe_status = "ON (dry run - writes are simulated)" if connector.SAFE_MODE else "OFF (writes execute against Holded)"
     
     skills_content = load_skills()
 
-    return f"""You are the financial assistant for this company's Holded accounting system.
+    prompt = f"""You are the financial assistant for this company's Holded accounting system.
 You help analyze financial data, check prices, create estimates/invoices, generate reports, and send documents.
 
 DATABASE (PostgreSQL via query_database tool — use standard SQL with %s placeholders or hardcoded values):
@@ -969,81 +1094,102 @@ RULES:
 
 {skills_content}"""
 
+    _system_prompt_cache["prompt"] = prompt
+    _system_prompt_cache["built_at"] = time.time()
+    return prompt
+
 # ─── Conversation History ────────────────────────────────────────────
 
 def _ensure_ai_history_schema():
-    pass  # Tables managed by connector.init_db() on server startup
+    """No-op: tables managed by connector.init_db() on server startup."""
 
 
 def load_history(conversation_id, limit=20):
     conn = connector.get_db()
-    cursor = connector._cursor(conn)
-    cursor.execute(
-        connector._q("SELECT role, content FROM ai_history WHERE conversation_id=? ORDER BY timestamp DESC LIMIT ?"),
-        (conversation_id, limit)
-    )
-    rows = cursor.fetchall()
-    conn.close()
-    rows = list(rows)
-    rows.reverse()
-    return [{"role": r["role"], "content": r["content"]} for r in rows]
+    try:
+        cursor = connector._cursor(conn)
+        cursor.execute(
+            connector._q("SELECT role, content FROM ai_history WHERE conversation_id=? AND role IN ('user', 'assistant') ORDER BY timestamp DESC LIMIT ?"),
+            (conversation_id, limit)
+        )
+        rows = cursor.fetchall()
+        rows = list(rows)
+        rows.reverse()
+        return [{"role": r["role"], "content": r["content"]} for r in rows]
+    finally:
+        connector.release_db(conn)
 
 
 def save_history(conversation_id, role, content, tool_calls=None):
     conn = connector.get_db()
-    cursor = connector._cursor(conn)
-    cursor.execute(
-        connector._q("INSERT INTO ai_history (role, content, conversation_id, tool_calls) VALUES (?, ?, ?, ?)"),
-        (role, content, conversation_id, json.dumps(tool_calls) if tool_calls else None)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        cursor = connector._cursor(conn)
+        cursor.execute(
+            connector._q("INSERT INTO ai_history (role, content, conversation_id, tool_calls) VALUES (?, ?, ?, ?)"),
+            (role, content, conversation_id, json.dumps(tool_calls) if tool_calls else None)
+        )
+        conn.commit()
+    finally:
+        connector.release_db(conn)
 
 
 def get_history(conversation_id=None):
     conn = connector.get_db()
-    cursor = connector._cursor(conn)
-    if conversation_id:
-        cursor.execute(
-            connector._q("SELECT role, content, timestamp FROM ai_history WHERE conversation_id=? ORDER BY timestamp ASC"),
-            (conversation_id,)
-        )
-    else:
-        cursor.execute("SELECT role, content, timestamp FROM ai_history ORDER BY timestamp DESC LIMIT 50")
-    rows = [dict(r) for r in cursor.fetchall()]
-    conn.close()
-    return rows
+    try:
+        cursor = connector._cursor(conn)
+        if conversation_id:
+            cursor.execute(
+                connector._q("SELECT role, content, timestamp FROM ai_history WHERE conversation_id=? ORDER BY timestamp ASC"),
+                (conversation_id,)
+            )
+        else:
+            cursor.execute("SELECT role, content, timestamp FROM ai_history ORDER BY timestamp DESC LIMIT 50")
+        rows = [dict(r) for r in cursor.fetchall()]
+        return rows
+    finally:
+        connector.release_db(conn)
 
 
 def clear_history(conversation_id=None):
     conn = connector.get_db()
-    cursor = connector._cursor(conn)
-    if conversation_id:
-        cursor.execute(connector._q("DELETE FROM ai_history WHERE conversation_id=?"), (conversation_id,))
-    else:
-        cursor.execute("DELETE FROM ai_history")
-    conn.commit()
-    conn.close()
+    try:
+        cursor = connector._cursor(conn)
+        if conversation_id:
+            cursor.execute(connector._q("DELETE FROM ai_history WHERE conversation_id=?"), (conversation_id,))
+        else:
+            cursor.execute("DELETE FROM ai_history")
+        conn.commit()
+    finally:
+        connector.release_db(conn)
 
 # ─── Rate Limiting ───────────────────────────────────────────────────
 
+_rate_limit_lock = threading.Lock()
+
 def check_rate_limit(ip="local"):
     now = time.time()
-    if ip not in _rate_limits:
-        _rate_limits[ip] = []
-    _rate_limits[ip] = [t for t in _rate_limits[ip] if now - t < RATE_LIMIT_WINDOW]
-    if len(_rate_limits[ip]) >= RATE_LIMIT_MAX:
-        return False
-    _rate_limits[ip].append(now)
-    return True
+    with _rate_limit_lock:
+        if ip not in _rate_limits:
+            _rate_limits[ip] = []
+        _rate_limits[ip] = [t for t in _rate_limits[ip] if now - t < RATE_LIMIT_WINDOW]
+        if len(_rate_limits[ip]) >= RATE_LIMIT_MAX:
+            return False
+        _rate_limits[ip].append(now)
+        # Prune stale IPs every 100 checks to prevent unbounded growth
+        if len(_rate_limits) > 100:
+            stale = [k for k, v in _rate_limits.items() if not v or now - v[-1] > RATE_LIMIT_WINDOW]
+            for k in stale:
+                del _rate_limits[k]
+        return True
 
 # ─── Cleanup expired pending actions ────────────────────────────────
 
 def _cleanup_pending():
-    now = time.time()
-    expired = [k for k, v in pending_actions.items() if v["expires_at"] < now]
-    for k in expired:
-        del pending_actions[k]
+    with _pending_lock:
+        now = time.time()
+        expired = [k for k, v in pending_actions.items() if v["expires_at"] < now]
+        for k in expired:
+            del pending_actions[k]
 
 # ─── Get Claude API Key ─────────────────────────────────────────────
 
@@ -1114,15 +1260,16 @@ def chat(user_message, conversation_id=None):
                         # Build description for user
                         desc = _describe_write_action(tool_name, tool_input)
 
-                        pending_actions[state_id] = {
-                            "messages": messages + [{"role": "assistant", "content": [b.model_dump() for b in response.content]}],
-                            "tool_block": block.model_dump(),
-                            "conversation_id": conversation_id,
-                            "expires_at": time.time() + 300,
-                            "model": model,
-                            "system_prompt": system_prompt,
-                            "user_message": user_message
-                        }
+                        with _pending_lock:
+                            pending_actions[state_id] = {
+                                "messages": messages + [{"role": "assistant", "content": [b.model_dump() for b in response.content]}],
+                                "tool_block": block.model_dump(),
+                                "conversation_id": conversation_id,
+                                "expires_at": time.time() + 300,
+                                "model": model,
+                                "system_prompt": system_prompt,
+                                "user_message": user_message
+                            }
 
                         return {
                             "type": "confirmation_needed",
@@ -1169,6 +1316,11 @@ def chat(user_message, conversation_id=None):
             if hasattr(block, "text"):
                 final_text += block.text
 
+        # Guard: tool loop hit max iterations without a final text response
+        if not final_text and iteration >= max_iterations:
+            logger.warning(f"Tool loop hit max iterations ({max_iterations}) for conversation {conversation_id}")
+            final_text = "I needed more steps to complete this request. Please try a simpler query."
+
         # Save to history
         save_history(conversation_id, "user", user_message)
         save_history(conversation_id, "assistant", final_text, tool_calls_summary or None)
@@ -1185,14 +1337,15 @@ def chat(user_message, conversation_id=None):
 
     except anthropic.APIError as e:
         logger.error(f"Claude API error: {e}")
-        return {"type": "error", "content": f"AI service error: {str(e)}", "conversation_id": conversation_id}
+        return {"type": "error", "content": "AI service is temporarily unavailable. Please try again.", "conversation_id": conversation_id}
     except Exception as e:
         logger.error(f"Agent error: {e}", exc_info=True)
-        return {"type": "error", "content": f"An error occurred: {str(e)}", "conversation_id": conversation_id}
+        return {"type": "error", "content": "An internal error occurred. Please try again.", "conversation_id": conversation_id}
 
 
 def chat_stream(user_message, conversation_id=None):
     """Generator that yields SSE events for streaming responses."""
+    _cleanup_pending()  # Clean expired confirmations on every chat call
     if not conversation_id:
         conversation_id = str(uuid.uuid4())
 
@@ -1241,15 +1394,16 @@ def chat_stream(user_message, conversation_id=None):
                             state_id = str(uuid.uuid4())
                             _cleanup_pending()
                             desc = _describe_write_action(tool_name, tool_input)
-                            pending_actions[state_id] = {
-                                "messages": messages + [{"role": "assistant", "content": [b.model_dump() for b in response.content]}],
-                                "tool_block": block.model_dump(),
-                                "conversation_id": conversation_id,
-                                "expires_at": time.time() + 300,
-                                "model": model,
-                                "system_prompt": system_prompt,
-                                "user_message": user_message
-                            }
+                            with _pending_lock:
+                                pending_actions[state_id] = {
+                                    "messages": messages + [{"role": "assistant", "content": [b.model_dump() for b in response.content]}],
+                                    "tool_block": block.model_dump(),
+                                    "conversation_id": conversation_id,
+                                    "expires_at": time.time() + 300,
+                                    "model": model,
+                                    "system_prompt": system_prompt,
+                                    "user_message": user_message
+                                }
                             yield {"event": "confirmation_needed", "data": json.dumps({
                                 "action": {"tool": tool_name, "description": desc, "details": tool_input},
                                 "pending_state_id": state_id,
@@ -1301,71 +1455,86 @@ def chat_stream(user_message, conversation_id=None):
             save_history(conversation_id, "user", user_message)
             save_history(conversation_id, "assistant", final_text, tool_calls_summary or None)
 
+        # Guard: if tool loop hit max iterations without producing a final response
+        if needs_tool_loop and iteration >= max_iterations:
+            logger.warning(f"[stream] Tool loop hit max iterations ({max_iterations}) for conversation {conversation_id}")
+            yield {"event": "text_delta", "data": json.dumps({"text": "I needed more steps to complete this request. Please try a simpler query."})}
+            yield {"event": "done", "data": json.dumps({"conversation_id": conversation_id})}
+
     except anthropic.APIError as e:
         logger.error(f"[stream] Claude API error: {e}")
-        yield {"event": "error", "data": json.dumps({"content": f"AI service error: {str(e)}"})}
+        yield {"event": "error", "data": json.dumps({"content": "AI service is temporarily unavailable. Please try again."})}
     except Exception as e:
         logger.error(f"[stream] Agent error: {e}", exc_info=True)
-        yield {"event": "error", "data": json.dumps({"content": f"Error: {str(e)}"})}
+        yield {"event": "error", "data": json.dumps({"content": "An internal error occurred. Please try again."})}
 
 
 # ─── Favorites ──────────────────────────────────────────────────────
 
 def _ensure_favorites_schema():
-    pass  # Tables managed by connector.init_db() on server startup
+    """No-op: tables managed by connector.init_db() on server startup."""
 
 def get_favorites():
     conn = connector.get_db()
-    cursor = connector._cursor(conn)
-    cursor.execute("SELECT id, query, label, created_at FROM ai_favorites ORDER BY created_at DESC")
-    rows = [dict(r) for r in cursor.fetchall()]
-    conn.close()
-    return rows
+    try:
+        cursor = connector._cursor(conn)
+        cursor.execute("SELECT id, query, label, created_at FROM ai_favorites ORDER BY created_at DESC")
+        rows = [dict(r) for r in cursor.fetchall()]
+        return rows
+    finally:
+        connector.release_db(conn)
 
 def add_favorite(query, label=None):
     conn = connector.get_db()
-    cursor = connector._cursor(conn)
-    if connector._USE_SQLITE:
-        cursor.execute(connector._q("INSERT INTO ai_favorites (query, label) VALUES (?, ?)"),
-                       (query, label or query[:50]))
-        conn.commit()
-        fav_id = cursor.lastrowid
-    else:
-        cursor.execute("INSERT INTO ai_favorites (query, label) VALUES (%s, %s) RETURNING id",
-                       (query, label or query[:50]))
-        conn.commit()
-        fav_id = connector._fetch_one_val(cursor, 'id')
-    conn.close()
-    return fav_id
+    try:
+        cursor = connector._cursor(conn)
+        if connector._USE_SQLITE:
+            cursor.execute(connector._q("INSERT INTO ai_favorites (query, label) VALUES (?, ?)"),
+                           (query, label or query[:50]))
+            conn.commit()
+            fav_id = cursor.lastrowid
+        else:
+            cursor.execute("INSERT INTO ai_favorites (query, label) VALUES (%s, %s) RETURNING id",
+                           (query, label or query[:50]))
+            conn.commit()
+            fav_id = connector._fetch_one_val(cursor, 'id')
+        return fav_id
+    finally:
+        connector.release_db(conn)
 
 def remove_favorite(fav_id):
     conn = connector.get_db()
-    cursor = connector._cursor(conn)
-    cursor.execute(connector._q("DELETE FROM ai_favorites WHERE id = ?"), (fav_id,))
-    conn.commit()
-    conn.close()
+    try:
+        cursor = connector._cursor(conn)
+        cursor.execute(connector._q("DELETE FROM ai_favorites WHERE id = ?"), (fav_id,))
+        conn.commit()
+    finally:
+        connector.release_db(conn)
 
 def get_conversations():
     conn = connector.get_db()
-    cursor = connector._cursor(conn)
-    cursor.execute(connector._q("""
-        SELECT conversation_id, MIN(timestamp) as started, MAX(timestamp) as last_msg,
-               COUNT(*) as msg_count,
-               (SELECT content FROM ai_history h2 WHERE h2.conversation_id = ai_history.conversation_id AND h2.role = 'user' ORDER BY h2.timestamp ASC LIMIT 1) as first_message
-        FROM ai_history
-        WHERE conversation_id IS NOT NULL AND conversation_id != 'default'
-        GROUP BY conversation_id
-        ORDER BY last_msg DESC
-        LIMIT 20
-    """))
-    rows = [dict(r) for r in cursor.fetchall()]
-    conn.close()
-    return rows
+    try:
+        cursor = connector._cursor(conn)
+        cursor.execute(connector._q("""
+            SELECT conversation_id, MIN(timestamp) as started, MAX(timestamp) as last_msg,
+                   COUNT(*) as msg_count,
+                   (SELECT content FROM ai_history h2 WHERE h2.conversation_id = ai_history.conversation_id AND h2.role = 'user' ORDER BY h2.timestamp ASC LIMIT 1) as first_message
+            FROM ai_history
+            WHERE conversation_id IS NOT NULL AND conversation_id != 'default'
+            GROUP BY conversation_id
+            ORDER BY last_msg DESC
+            LIMIT 20
+        """))
+        rows = [dict(r) for r in cursor.fetchall()]
+        return rows
+    finally:
+        connector.release_db(conn)
 
 
 def confirm_action(state_id, confirmed):
     _cleanup_pending()
-    state = pending_actions.pop(state_id, None)
+    with _pending_lock:
+        state = pending_actions.pop(state_id, None)
     if not state:
         return {"type": "error", "content": "This action has expired. Please try again."}
 
@@ -1422,7 +1591,7 @@ def confirm_action(state_id, confirmed):
         }
     except Exception as e:
         logger.error(f"Agent error after confirmation: {e}", exc_info=True)
-        return {"type": "error", "content": f"Error: {str(e)}", "conversation_id": conversation_id}
+        return {"type": "error", "content": "An error occurred after confirmation. Please try again.", "conversation_id": conversation_id}
 
 
 def _describe_write_action(tool_name, tool_input):

@@ -1,29 +1,52 @@
-from fastapi import FastAPI, BackgroundTasks, Response, UploadFile, File
+from fastapi import FastAPI, BackgroundTasks, Response, UploadFile, File, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from typing import Optional
 from contextlib import contextmanager
 import os
 import time
 import logging
 import json
+import hmac
 import requests
 import io
 import pandas as pd
+import re as _re_mod
 import threading
 from datetime import datetime, timedelta
 import connector
 import reports
 import ai_agent
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
-# CORS: allow all origins for PWA/mobile access.
-# In production, restrict to your domain.
+# ── API Authentication ─────────────────────────────────────────────────
+# Set HOLDED_CONNECTOR_TOKEN in .env to require Bearer token authentication.
+# Internal services (Brain, agent-runner) must send: Authorization: Bearer <token>
+API_TOKEN = os.getenv("HOLDED_CONNECTOR_TOKEN", "")
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    # Allow health check without auth
+    if request.url.path == "/health":
+        return await call_next(request)
+    # Allow static files without auth (frontend UI)
+    if request.url.path.startswith("/static") or request.url.path == "/":
+        return await call_next(request)
+    # If no token configured, allow all (development mode)
+    if not API_TOKEN:
+        return await call_next(request)
+    # Validate Bearer token
+    auth = request.headers.get("authorization", "")
+    if not auth.startswith("Bearer ") or not hmac.compare_digest(auth[7:], API_TOKEN):
+        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+    return await call_next(request)
+
+# CORS: restrict to known origins in production.
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*")
 app.add_middleware(
     CORSMiddleware,
@@ -37,6 +60,7 @@ REPORTS_DIR = os.path.abspath("reports")
 UPLOADS_DIR = os.path.abspath("uploads")
 
 sync_status = {"running": False, "last_result": None, "last_time": None, "errors": []}
+_sync_lock = threading.Lock()
 
 # ── Invoice Analysis Job ─────────────────────────────────────────────
 analysis_status = {
@@ -46,6 +70,11 @@ analysis_status = {
     "processed": 0,
     "pending_matches": 0,
 }
+_analysis_lock = threading.Lock()
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "service": "holded-connector"}
 
 def run_analysis_job(batch_size: int = 10):
     """
@@ -53,11 +82,11 @@ def run_analysis_job(batch_size: int = 10):
     1. Categorize up to batch_size unanalyzed purchase invoices (rules → Claude fallback)
     2. Scan ALL purchase_items for inventory matches and save pending ones
     """
-    if analysis_status["running"]:
-        return {"error": "Already running"}
-
-    analysis_status["running"] = True
-    analysis_status["last_run"] = datetime.now().isoformat()
+    with _analysis_lock:
+        if analysis_status["running"]:
+            return {"error": "Already running"}
+        analysis_status["running"] = True
+        analysis_status["last_run"] = datetime.now().isoformat()
     processed = 0
     errors = []
 
@@ -113,7 +142,7 @@ def run_analysis_job(batch_size: int = 10):
     except Exception as e:
         logger.error(f"Analysis job failed: {e}", exc_info=True)
         analysis_status["last_result"] = "error"
-        return {"error": str(e)}
+        return {"error": "Analysis job failed"}
     finally:
         analysis_status["running"] = False
 
@@ -179,10 +208,11 @@ def _claude_categorize(inv: dict) -> dict:
 
 # Daily scheduler: runs analysis job automatically each day
 _scheduler_thread = None
+_scheduler_stop = threading.Event()
 
 def _daily_scheduler():
     """Background thread: runs analysis job once per day."""
-    while True:
+    while not _scheduler_stop.is_set():
         now = datetime.now()
         # Run at 3:00 AM
         next_run = now.replace(hour=3, minute=0, second=0, microsecond=0)
@@ -190,9 +220,13 @@ def _daily_scheduler():
             next_run += timedelta(days=1)
         wait_secs = (next_run - now).total_seconds()
         logger.info(f"Analysis scheduler: next run in {wait_secs/3600:.1f}h at {next_run.strftime('%H:%M')}")
-        time.sleep(wait_secs)
+        if _scheduler_stop.wait(timeout=wait_secs):
+            break  # Shutdown requested
         logger.info("Analysis scheduler: starting daily job")
-        run_analysis_job(batch_size=10)
+        try:
+            run_analysis_job(batch_size=10)
+        except Exception as e:
+            logger.error(f"Analysis scheduler: job failed: {e}", exc_info=True)
 
 
 @app.on_event("startup")
@@ -204,6 +238,11 @@ def on_startup():
     _scheduler_thread = threading.Thread(target=_daily_scheduler, daemon=True)
     _scheduler_thread.start()
     logger.info("Daily analysis scheduler started")
+
+@app.on_event("shutdown")
+def on_shutdown():
+    """Signal scheduler thread to stop gracefully."""
+    _scheduler_stop.set()
 
 class _CompatCursor:
     """Cursor wrapper: auto-converts ? placeholders for PostgreSQL and returns dict-like rows."""
@@ -228,7 +267,7 @@ class _ConnProxy:
     def cursor(self):    return _CompatCursor(connector._cursor(self._conn))
     def commit(self):    self._conn.commit()
     def rollback(self):  self._conn.rollback()
-    def close(self):     self._conn.close()
+    def close(self):     connector.release_db(self._conn)
 
 @contextmanager
 def get_db_connection():
@@ -236,10 +275,9 @@ def get_db_connection():
     try:
         yield _ConnProxy(conn)
     finally:
-        conn.close()
+        connector.release_db(conn)
 
 def run_sync():
-    sync_status["running"] = True
     sync_status["errors"] = []
     try:
         connector.init_db()
@@ -257,8 +295,8 @@ def run_sync():
             try:
                 step_fn()
             except Exception as e:
-                logger.error(f"Sync step '{step_name}' failed: {e}")
-                sync_status["errors"].append(f"{step_name}: {str(e)}")
+                logger.error(f"Sync step '{step_name}' failed: {e}", exc_info=True)
+                sync_status["errors"].append(f"{step_name} failed")
     finally:
         sync_status["running"] = False
         sync_status["last_time"] = datetime.now().isoformat()
@@ -266,8 +304,10 @@ def run_sync():
 
 @app.post("/api/sync")
 async def sync_data(background_tasks: BackgroundTasks):
-    if sync_status["running"]:
-        return {"status": "already_running"}
+    with _sync_lock:
+        if sync_status["running"]:
+            return {"status": "already_running"}
+        sync_status["running"] = True
     background_tasks.add_task(run_sync)
     return {"status": "Sync started"}
 
@@ -279,7 +319,7 @@ async def get_sync_status():
 async def get_config():
     return {
         "hasKey": bool(connector.API_KEY),
-        "apiKey": connector.API_KEY[:4] + "*" * 10 if connector.API_KEY else None
+        "apiKey": "****" if connector.API_KEY else None
     }
 
 class ConfigUpdate(BaseModel):
@@ -291,14 +331,15 @@ async def update_config(body: ConfigUpdate):
         url = "https://api.holded.com/api/invoicing/v1/contacts"
         headers = {"key": body.apiKey}
         try:
-            response = requests.get(url, headers=headers, params={"limit": 1})
+            response = requests.get(url, headers=headers, params={"limit": 1}, timeout=15)
             if response.status_code == 200:
                 connector.save_setting("holded_api_key", body.apiKey)
                 connector.reload_config()
             else:
                 return {"status": "error", "message": "Invalid Holded API Key"}
         except Exception as e:
-            return {"status": "error", "message": f"Holded Error: {str(e)}"}
+            logger.error(f"Holded config validation error: {e}")
+            return {"status": "error", "message": "Could not validate API key with Holded"}
 
     return {"status": "success"}
 
@@ -317,8 +358,8 @@ def download_excel_report():
         }
         return StreamingResponse(output, headers=headers, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception as e:
-        logger.error(f"Excel API Error: {e}")
-        return {"status": "error", "message": str(e)}
+        logger.error(f"Excel API Error: {e}", exc_info=True)
+        return {"status": "error", "message": "Failed to generate Excel report"}
 
 @app.get("/api/reports/download/{filename}")
 async def download_report_file(filename: str):
@@ -336,14 +377,25 @@ async def download_report_file(filename: str):
 
 @app.post("/api/tickets/upload")
 async def upload_ticket(file: UploadFile = File(...)):
+    from fastapi import HTTPException
+    # Validate file type
+    allowed_exts = {".jpg", ".jpeg", ".png", ".pdf", ".csv", ".xlsx", ".xls"}
+    file_ext = os.path.splitext(file.filename or "")[1].lower()
+    if file_ext not in allowed_exts:
+        raise HTTPException(status_code=400, detail=f"File type not allowed: {file_ext}")
+
     os.makedirs(UPLOADS_DIR, exist_ok=True)
     safe_name = f"{int(time.time())}_{os.path.basename(file.filename)}"
     file_path = os.path.join(UPLOADS_DIR, safe_name)
     if not os.path.abspath(file_path).startswith(UPLOADS_DIR):
-        return {"status": "error", "message": "Invalid filename"}
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    content = await file.read()
+    if len(content) > 50 * 1024 * 1024:  # 50MB limit
+        raise HTTPException(status_code=413, detail="File too large (max 50MB)")
 
     with open(file_path, "wb") as buffer:
-        buffer.write(await file.read())
+        buffer.write(content)
 
     return {
         "status": "success",
@@ -568,6 +620,34 @@ def get_products():
         cursor.execute("SELECT * FROM products ORDER BY name ASC")
         return [dict(row) for row in cursor.fetchall()]
 
+@app.get("/api/products/web")
+def get_web_products():
+    """Products marked for website inclusion — price, stock, and identifiers only."""
+    conn = connector.get_db()
+    try:
+        cursor = connector._cursor(conn)
+        cursor.execute(connector._q(
+            'SELECT id, name, sku, price, stock, kind FROM products WHERE web_include = 1 ORDER BY name ASC'
+        ))
+        return [dict(row) for row in cursor.fetchall()]
+    finally:
+        connector.release_db(conn)
+
+class WebIncludeToggle(BaseModel):
+    web_include: bool = True
+
+@app.patch("/api/entities/products/{product_id}/web-include")
+def toggle_web_include(product_id: str, payload: WebIncludeToggle):
+    web_include = 1 if payload.web_include else 0
+    conn = connector.get_db()
+    try:
+        cursor = connector._cursor(conn)
+        cursor.execute(connector._q('UPDATE products SET web_include = ? WHERE id = ?'), (web_include, product_id))
+        conn.commit()
+        return {"ok": True, "web_include": bool(web_include)}
+    finally:
+        connector.release_db(conn)
+
 @app.get("/api/entities/products/{product_id}/history")
 def get_product_history(product_id: str):
     with get_db_connection() as conn:
@@ -638,7 +718,11 @@ def get_document_pdf(doc_type: str, doc_id: str):
         "purchases": "purchase",
         "estimates": "estimate"
     }
-    holded_type = type_map.get(doc_type, doc_type)
+    holded_type = type_map.get(doc_type)
+    if not holded_type:
+        return Response(status_code=400, content="Invalid document type")
+    if not _re_mod.match(r'^[a-zA-Z0-9]+$', doc_id):
+        return Response(status_code=400, content="Invalid document ID")
 
     # Build a meaningful filename from local DB data
     def _make_pdf_filename(doc_type: str, doc_id: str) -> str:
@@ -648,10 +732,12 @@ def get_document_pdf(doc_type: str, doc_id: str):
             if not db_table:
                 return f"document_{doc_id}.pdf"
             conn = connector.get_db()
-            cur = connector._cursor(conn)
-            cur.execute(connector._q(f"SELECT contact_name, doc_number FROM {db_table} WHERE id = ?"), (doc_id,))
-            row = cur.fetchone()
-            conn.close()
+            try:
+                cur = connector._cursor(conn)
+                cur.execute(connector._q(f"SELECT contact_name, doc_number FROM {db_table} WHERE id = ?"), (doc_id,))
+                row = cur.fetchone()
+            finally:
+                connector.release_db(conn)
             if not row:
                 return f"document_{doc_id}.pdf"
             contact_name = row["contact_name"] if isinstance(row, dict) else row[0]
@@ -686,7 +772,7 @@ def get_document_pdf(doc_type: str, doc_id: str):
     url = f"https://api.holded.com/api/invoicing/v1/documents/{holded_type}/{doc_id}/pdf"
     headers = {"key": connector.API_KEY}
 
-    response = requests.get(url, headers=headers)
+    response = requests.get(url, headers=headers, timeout=30)
 
     if response.status_code == 200:
         resp_headers = {"Content-Disposition": content_disposition}
@@ -700,16 +786,17 @@ def get_document_pdf(doc_type: str, doc_id: str):
             pass
         return Response(content=response.content, media_type="application/pdf", headers=resp_headers)
     else:
-        return Response(content=f"Error fetching PDF: {response.status_code}", status_code=response.status_code)
+        logger.warning(f"PDF fetch failed for {doc_type}/{doc_id}: HTTP {response.status_code}")
+        return Response(content="Failed to fetch PDF document", status_code=502)
 
 # ─── AI Chat Endpoints ───────────────────────────────────────────────
 
 class ChatRequest(BaseModel):
-    message: str
-    conversation_id: Optional[str] = None
+    message: str = Field(..., max_length=8000)
+    conversation_id: Optional[str] = Field(None, max_length=100)
 
 class ConfirmRequest(BaseModel):
-    pending_state_id: str
+    pending_state_id: str = Field(..., max_length=100)
     confirmed: bool
 
 @app.post("/api/ai/chat")
@@ -776,12 +863,15 @@ async def ai_config():
     return {"hasKey": has_key, "model": ai_agent._get_model(), "safeMode": connector.SAFE_MODE}
 
 class AIConfigUpdate(BaseModel):
-    claudeApiKey: Optional[str] = None
+    claudeApiKey: Optional[str] = Field(None, max_length=200)
 
 @app.post("/api/ai/config")
 async def ai_config_update(body: AIConfigUpdate):
     if body.claudeApiKey:
-        connector.save_setting("claude_api_key", body.claudeApiKey)
+        key = body.claudeApiKey.strip()
+        if not key.startswith("sk-ant-"):
+            return {"status": "error", "message": "Invalid API key format"}
+        connector.save_setting("claude_api_key", key)
     return {"status": "success"}
 
 # ────────────── File Management Endpoints ──────────────
@@ -842,7 +932,7 @@ async def upload_file(file: UploadFile = File(...)):
             raise
         except Exception as e:
             logger.error(f"File read error: {str(e)}")
-            raise HTTPException(status_code=400, detail=f"File read error: {str(e)}")
+            raise HTTPException(status_code=400, detail="File read error")
 
         # Save file with timestamp prefix (unique names)
         safe_name = f"{int(time.time())}_{os.path.basename(file.filename)}"
@@ -863,10 +953,10 @@ async def upload_file(file: UploadFile = File(...)):
         raise
     except Exception as e:
         logger.error(f"Upload error: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Upload failed")
 
 @app.get("/api/files/list")
-async def list_files(directory: str = "uploads", limit: int = 20):
+async def list_files(directory: str = "uploads", limit: int = Query(20, ge=1, le=200)):
     """List files in uploads or reports directory."""
     try:
         if directory == "uploads":
@@ -889,9 +979,20 @@ async def list_files(directory: str = "uploads", limit: int = 20):
 
         return {"files": files, "count": len(files)}
     except Exception as e:
-        return {"error": f"Error listing files: {str(e)}"}
+        logger.error(f"Error listing files: {e}")
+        return {"error": "Failed to list files"}
 
 # ────────────── Amortizations Endpoints ──────────────
+
+@app.get("/api/products/{product_id}/pack-info")
+def get_product_pack_info(product_id: str):
+    """Return pack composition (if pack) or packs containing this product (if component)."""
+    info = connector.get_pack_info(product_id)
+    if info is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Product not found")
+    return info
+
 
 @app.get("/api/amortizations")
 def get_amortizations():
@@ -909,33 +1010,44 @@ def get_product_types():
     return connector.get_product_type_rules()
 
 class AmortizationCreate(BaseModel):
-    product_id: str
-    product_name: str
-    purchase_price: float
-    purchase_date: str
-    notes: Optional[str] = ""
-    product_type: Optional[str] = "alquiler"
+    product_id: str = Field(..., max_length=100)
+    product_name: str = Field(..., max_length=300)
+    purchase_price: float = Field(..., ge=0)
+    purchase_date: str = Field(..., max_length=20)
+    notes: Optional[str] = Field("", max_length=500)
+    product_type: Optional[str] = Field("alquiler", max_length=30)
 
 @app.post("/api/amortizations")
 def create_amortization(body: AmortizationCreate):
-    new_id = connector.add_amortization(
-        body.product_id, body.product_name,
-        body.purchase_price, body.purchase_date,
-        body.notes or "", body.product_type or "alquiler"
-    )
+    from fastapi import HTTPException
+    ptype = body.product_type or "alquiler"
+    if ptype not in VALID_PRODUCT_TYPES:
+        raise HTTPException(status_code=400, detail="Invalid product type")
+    try:
+        new_id = connector.add_amortization(
+            body.product_id, body.product_name,
+            body.purchase_price, body.purchase_date,
+            body.notes or "", ptype
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if new_id is None:
-        from fastapi import HTTPException
         raise HTTPException(status_code=409, detail="Product already tracked in amortizations")
     return {"status": "success", "id": new_id}
 
+VALID_PRODUCT_TYPES = {"alquiler", "venta", "servicio", "gasto"}
+
 class AmortizationUpdate(BaseModel):
     purchase_price: Optional[float] = None
-    purchase_date: Optional[str] = None
-    notes: Optional[str] = None
-    product_type: Optional[str] = None
+    purchase_date: Optional[str] = Field(None, max_length=20)
+    notes: Optional[str] = Field(None, max_length=500)
+    product_type: Optional[str] = Field(None, max_length=30)
 
 @app.put("/api/amortizations/{amort_id}")
 def update_amortization(amort_id: int, body: AmortizationUpdate):
+    if body.product_type and body.product_type not in VALID_PRODUCT_TYPES:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="Invalid product type")
     ok = connector.update_amortization(
         amort_id, body.purchase_price, body.purchase_date,
         body.notes, body.product_type
@@ -957,7 +1069,7 @@ def delete_amortization(amort_id: int):
 # ── Purchase invoice search (for cost-source picker) ──────────────────────────
 
 @app.get("/api/purchases/search")
-def search_purchases(q: str = "", limit: int = 20):
+def search_purchases(q: str = "", limit: int = Query(20, ge=1, le=200)):
     """
     Search purchase invoices by supplier name or description.
     Returns matching invoices with their line items for the picker UI.
@@ -1111,63 +1223,169 @@ def get_category_breakdown():
     return stats.get("by_category", [])
 
 @app.get("/api/analysis/invoices")
-def get_analyzed_invoices(limit: int = 50, offset: int = 0, category: str = None, q: str = None):
+def get_analyzed_invoices(limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0), category: str = None, q: str = None):
     """List categorized invoices with analysis details, paginated. q= for text search."""
     return connector.get_analyzed_invoices(limit=limit, offset=offset, category=category, q=q)
 
 
-# ── Backup endpoints ──────────────────────────────────────────────────────────
+# ── Schema Introspection ─────────────────────────────────────────────────────
+# Used by Brain's db_schema tool to understand the Holded DB structure.
 
-@app.get("/api/backup/db")
-def backup_database():
-    """Download the raw SQLite database file (holded.db)."""
-    import os
-    db_path = os.path.abspath("holded.db")
-    if not os.path.exists(db_path):
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="Database file not found")
-    filename = f"holded_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-    return FileResponse(
-        path=db_path,
-        filename=filename,
-        media_type="application/octet-stream",
-    )
-
-@app.get("/api/backup/data")
-def backup_data_json():
-    """Export key tables as a single JSON file for portability."""
-    import json
-    tables = [
-        "invoices", "purchase_invoices", "estimates", "contacts",
-        "products", "payments", "projects", "amortizations",
-        "purchase_analysis", "inventory_matches", "product_type_rules",
-        "ai_favorites", "settings",
-    ]
-    export: dict = {"exported_at": datetime.now().isoformat(), "tables": {}}
+@app.get("/api/schema")
+def get_holded_schema():
+    """Return table names, columns, types, and row counts for the Holded DB."""
+    import re
+    _valid_table = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
+    tables = []
     conn = connector.get_db()
+    cur = connector._cursor(conn)
     try:
-        for tbl in tables:
-            try:
-                cur = connector._cursor(conn)
-                cur.execute(f"SELECT * FROM {tbl}")
-                rows = cur.fetchall()
-                if connector._USE_SQLITE:
-                    rows = [dict(r) for r in rows]
-                export["tables"][tbl] = list(rows)
-            except Exception:
-                if not connector._USE_SQLITE:
-                    conn.rollback()
-                export["tables"][tbl] = []
+        if connector._USE_SQLITE:
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            table_names = [r["name"] if isinstance(r, dict) else r[0] for r in cur.fetchall()]
+            for tname in table_names:
+                if tname.startswith("sqlite_") or not _valid_table.match(tname): continue
+                cur.execute(f"PRAGMA table_info({tname})")
+                cols = [{"name": r["name"] if isinstance(r, dict) else r[1],
+                         "type": r["type"] if isinstance(r, dict) else r[2]}
+                        for r in cur.fetchall()]
+                cur.execute(f"SELECT count(*) as c FROM {tname}")
+                row = cur.fetchone()
+                count = row["c"] if isinstance(row, dict) else row[0]
+                tables.append({"table_name": tname, "row_count": count, "columns": cols})
+        else:
+            cur.execute("""
+                SELECT table_name FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+                ORDER BY table_name
+            """)
+            table_names = [r["table_name"] if isinstance(r, dict) else r[0] for r in cur.fetchall()]
+            for tname in table_names:
+                if not _valid_table.match(tname): continue
+                cur.execute("""
+                    SELECT column_name, data_type, is_nullable
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = %s
+                    ORDER BY ordinal_position
+                """, (tname,))
+                cols = [{"name": r["column_name"] if isinstance(r, dict) else r[0],
+                         "type": r["data_type"] if isinstance(r, dict) else r[1],
+                         "nullable": (r["is_nullable"] if isinstance(r, dict) else r[2]) == "YES"}
+                        for r in cur.fetchall()]
+                cur.execute(f"SELECT count(*) as c FROM {tname}")
+                row = cur.fetchone()
+                count = row["c"] if isinstance(row, dict) else row[0]
+                tables.append({"table_name": tname, "row_count": count, "columns": cols})
     finally:
-        conn.close()
+        connector.release_db(conn)
+    return tables
 
-    body = json.dumps(export, ensure_ascii=False, default=str, indent=2)
-    filename = f"holded_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-    return Response(
-        content=body,
-        media_type="application/json",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+
+# ── Agent Write Endpoints ────────────────────────────────────────────────────
+# Used by the agent-runner accounts agent. SAFE_MODE is enforced by connector.py.
+
+class CreateDocumentBody(BaseModel):
+    contact_id: str = Field(..., max_length=100)
+    desc: Optional[str] = Field("", max_length=500)
+    items: list = Field(..., max_length=100)  # [{name, units, price, tax?}]
+
+class CreateContactBody(BaseModel):
+    name: str = Field(..., max_length=200)
+    email: Optional[str] = Field(None, max_length=200)
+    phone: Optional[str] = Field(None, max_length=50)
+    vatnumber: Optional[str] = Field(None, max_length=50)
+    type: Optional[str] = Field("client", max_length=20)
+
+class UpdateStatusBody(BaseModel):
+    status: int = Field(..., ge=0, le=5)  # 0=draft, 1=issued, 3=paid, 5=cancelled
+
+class SendDocumentBody(BaseModel):
+    emails: Optional[list] = Field(None, max_length=20)
+    subject: Optional[str] = Field(None, max_length=300)
+    body: Optional[str] = Field(None, max_length=5000)
+
+@app.post("/api/agent/invoice")
+def agent_create_invoice(body: CreateDocumentBody):
+    products = []
+    for item in body.items:
+        p = {"name": item["name"], "units": item["units"], "subtotal": item["price"]}
+        if "tax" in item:
+            p["tax"] = item["tax"]
+        products.append(p)
+    payload = {"contact": body.contact_id, "desc": body.desc, "products": products}
+    result = connector.create_invoice(payload)
+    safe = connector.SAFE_MODE
+    if result:
+        return {"success": True, "id": result, "safe_mode": safe}
+    return {"success": False, "error": "Failed to create invoice", "safe_mode": safe}
+
+@app.post("/api/agent/estimate")
+def agent_create_estimate(body: CreateDocumentBody):
+    products = []
+    for item in body.items:
+        p = {"name": item["name"], "units": item["units"], "subtotal": item["price"]}
+        if "tax" in item:
+            p["tax"] = item["tax"]
+        products.append(p)
+    payload = {"contact": body.contact_id, "desc": body.desc, "products": products}
+    result = connector.create_estimate(payload)
+    safe = connector.SAFE_MODE
+    if result:
+        return {"success": True, "id": result, "safe_mode": safe}
+    return {"success": False, "error": "Failed to create estimate", "safe_mode": safe}
+
+@app.post("/api/agent/contact")
+def agent_create_contact(body: CreateContactBody):
+    payload = {"name": body.name}
+    for key in ["email", "phone", "vatnumber", "type"]:
+        val = getattr(body, key, None)
+        if val:
+            payload[key] = val
+    result = connector.create_contact(payload)
+    safe = connector.SAFE_MODE
+    if result:
+        return {"success": True, "id": result, "safe_mode": safe}
+    return {"success": False, "error": "Failed to create contact", "safe_mode": safe}
+
+@app.put("/api/agent/invoice/{invoice_id}/status")
+def agent_update_invoice_status(invoice_id: str, body: UpdateStatusBody):
+    if not _re_mod.match(r'^[a-zA-Z0-9]+$', invoice_id):
+        return {"success": False, "error": "Invalid invoice ID"}
+    result = connector.put_data(
+        f"/invoicing/v1/documents/invoice/{invoice_id}",
+        {"status": body.status}
     )
+    safe = connector.SAFE_MODE
+    if result:
+        return {"success": True, "safe_mode": safe}
+    return {"success": False, "error": "Failed to update status", "safe_mode": safe}
+
+@app.post("/api/agent/send/{doc_type}/{doc_id}")
+def agent_send_document(doc_type: str, doc_id: str, body: SendDocumentBody):
+    allowed_types = {"invoice", "purchase", "estimate", "creditnote", "proforma"}
+    if doc_type not in allowed_types:
+        return {"success": False, "error": "Invalid document type"}
+    if not _re_mod.match(r'^[a-zA-Z0-9]+$', doc_id):
+        return {"success": False, "error": "Invalid document ID"}
+    payload = {}
+    if body.emails:
+        payload["emails"] = body.emails
+    if body.subject:
+        payload["subject"] = body.subject
+    if body.body:
+        payload["body"] = body.body
+    result = connector.post_data(
+        f"/invoicing/v1/documents/{doc_type}/{doc_id}/send",
+        payload
+    )
+    safe = connector.SAFE_MODE
+    if result:
+        return {"success": True, "safe_mode": safe}
+    return {"success": False, "error": "Failed to send document", "safe_mode": safe}
+
+
+# ── Backup endpoints (REMOVED — security risk: exposed full DB without auth) ──
+# Backups should be done via direct DB access (pg_dump) or Supabase dashboard.
 
 @app.get("/api/backup/code")
 def backup_code_zip():
@@ -1186,13 +1404,16 @@ def backup_code_zip():
             import zipfile, io
             buf = io.BytesIO()
             skip_exts = {".db", ".pyc", ".pyo", ".log"}
-            skip_dirs = {"__pycache__", ".git", "uploads", "reports", ".env"}
+            skip_files = {".env", ".env.example", "holded.db"}
+            skip_dirs = {"__pycache__", ".git", "uploads", "reports"}
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
                 for root, dirs, files in os.walk(project_dir):
                     dirs[:] = [d for d in dirs if d not in skip_dirs]
                     for fname in files:
                         fpath = os.path.join(root, fname)
                         if any(fname.endswith(ext) for ext in skip_exts):
+                            continue
+                        if fname in skip_files:
                             continue
                         arcname = os.path.relpath(fpath, project_dir)
                         zf.write(fpath, arcname)
@@ -1208,8 +1429,9 @@ def backup_code_zip():
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
     except Exception as exc:
+        logger.error(f"Backup code zip error: {exc}")
         from fastapi import HTTPException
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Failed to create backup archive")
 
 @app.get("/api/backup/status")
 def backup_status():
@@ -1238,7 +1460,7 @@ def backup_status():
                 cur = connector._cursor(conn)
                 counts[tbl] = 0
     finally:
-        conn.close()
+        connector.release_db(conn)
 
     # last git commit
     try:
