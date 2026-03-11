@@ -21,6 +21,15 @@ def _month_fmt(col="date"):
 
 WRITE_TOOLS = {"create_estimate", "create_invoice", "send_document", "create_contact", "update_invoice_status", "upload_file"}
 
+
+def get_tools_for_role(role: str = "admin") -> list:
+    """Filter AI tool definitions by user role.
+    Accountants get read-only tools (WRITE_TOOLS excluded).
+    Admin and operator get all tools."""
+    if role == "accountant":
+        return [t for t in TOOL_DEFINITIONS if t["name"] not in WRITE_TOOLS]
+    return TOOL_DEFINITIONS
+
 # Pending confirmations: { state_id: { messages, tool_block, conversation_id, expires_at } }
 pending_actions = {}
 _pending_lock = threading.Lock()
@@ -1207,7 +1216,7 @@ def _get_model():
 
 # ─── Main Chat Function ─────────────────────────────────────────────
 
-def chat(user_message, conversation_id=None):
+def chat(user_message, conversation_id=None, user_role="admin"):
     if not conversation_id:
         conversation_id = str(uuid.uuid4())
 
@@ -1227,6 +1236,7 @@ def chat(user_message, conversation_id=None):
     system_prompt = build_system_prompt()
     messages = history + [{"role": "user", "content": user_message}]
 
+    role_tools = get_tools_for_role(user_role)
     tool_calls_summary = []
     charts = []
 
@@ -1235,7 +1245,7 @@ def chat(user_message, conversation_id=None):
             model=model,
             max_tokens=4096,
             system=system_prompt,
-            tools=TOOL_DEFINITIONS,
+            tools=role_tools,
             messages=messages
         )
 
@@ -1306,7 +1316,7 @@ def chat(user_message, conversation_id=None):
                 model=model,
                 max_tokens=4096,
                 system=system_prompt,
-                tools=TOOL_DEFINITIONS,
+                tools=role_tools,
                 messages=messages
             )
 
@@ -1343,7 +1353,7 @@ def chat(user_message, conversation_id=None):
         return {"type": "error", "content": "An internal error occurred. Please try again.", "conversation_id": conversation_id}
 
 
-def chat_stream(user_message, conversation_id=None):
+def chat_stream(user_message, conversation_id=None, user_role="admin"):
     """Generator that yields SSE events for streaming responses."""
     _cleanup_pending()  # Clean expired confirmations on every chat call
     if not conversation_id:
@@ -1360,6 +1370,7 @@ def chat_stream(user_message, conversation_id=None):
     history = load_history(conversation_id, limit=20)
     system_prompt = build_system_prompt()
     messages = history + [{"role": "user", "content": user_message}]
+    role_tools = get_tools_for_role(user_role)
     tool_calls_summary = []
     charts = []
 
@@ -1377,7 +1388,7 @@ def chat_stream(user_message, conversation_id=None):
                 model=model,
                 max_tokens=4096,
                 system=system_prompt,
-                tools=TOOL_DEFINITIONS,
+                tools=role_tools,
                 messages=messages
             )
 

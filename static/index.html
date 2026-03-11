@@ -2,19 +2,20 @@
 <html lang="en">
 
 <head>
+    <base href="/panel/holded/">
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Holded Dashboard | Local Insights</title>
 
     <!-- PWA Meta Tags -->
-    <link rel="manifest" href="/static/manifest.json">
+    <link rel="manifest" href="static/manifest.json">
     <meta name="theme-color" content="#10b981">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="Holded">
-    <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
+    <link rel="apple-touch-icon" href="static/icons/icon-192.png">
 
-    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="static/style.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
@@ -23,24 +24,31 @@
 
 <body>
     <div class="dashboard-container">
-        <aside class="sidebar">
+        <!-- Shared panel sidebar (loaded from /api/panel/menu) -->
+        <aside class="sidebar" id="panelSidebar">
             <div class="sidebar-top">
-                <div class="logo">HOLDED <span>Local</span></div>
+                <div class="logo">Control Panel</div>
                 <button id="themeToggle" class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">🌙</button>
             </div>
-            <nav>
-                <div class="nav-item active" data-view="overview">Overview</div>
-                <div class="nav-item" data-view="contacts">Contacts</div>
-                <div class="nav-item" data-view="products">Inventory</div>
-                <div class="nav-item" data-view="invoices">Invoices<a class="nav-create-btn" href="https://app.holded.com/doc/invoice/new" target="_blank" title="Nueva factura">+</a></div>
-                <div class="nav-item" data-view="purchases">Expenses</div>
-                <div class="nav-item" data-view="estimates">Estimates<a class="nav-create-btn" href="https://app.holded.com/doc/estimate/new" target="_blank" title="Nuevo presupuesto">+</a></div>
-                <div class="nav-item" data-view="amortizations">📊 Amortizaciones</div>
-                <div class="nav-item" data-view="analysis">🧠 Análisis Gastos</div>
-                <div class="nav-item" data-view="backup">💾 Backup</div>
+            <nav id="panelMenuNav">
+                <!-- Populated by fetchPanelMenu() on load -->
             </nav>
-            <div class="safe-mode-badge" id="safeModeBadge">SAFE MODE ACTIVE</div>
+            <div id="panelUserInfo" style="margin-top:auto;padding:0.75rem;border-top:1px solid var(--glass-border);font-size:0.8rem;color:var(--text-gray)"></div>
         </aside>
+
+        <!-- Holded internal nav (horizontal tab bar) -->
+        <div class="holded-subnav" id="holdedSubnav" style="display:flex;gap:0.25rem;padding:0.5rem 1rem;background:var(--card-bg);border-bottom:1px solid var(--glass-border);overflow-x:auto;flex-shrink:0">
+            <div class="nav-item active" data-view="overview">Overview</div>
+            <div class="nav-item" data-view="contacts">Contacts</div>
+            <div class="nav-item" data-view="products">Inventory</div>
+            <div class="nav-item" data-view="invoices">Invoices</div>
+            <div class="nav-item" data-view="purchases">Expenses</div>
+            <div class="nav-item" data-view="estimates">Estimates</div>
+            <div class="nav-item" data-view="amortizations">Amortizaciones</div>
+            <div class="nav-item" data-view="analysis">Análisis</div>
+            <div class="nav-item" data-view="backup">Backup</div>
+            <div class="safe-mode-badge" id="safeModeBadge" style="margin-left:auto">SAFE MODE ACTIVE</div>
+        </div>
 
         <main class="content">
             <!-- SETUP VIEW -->
@@ -743,12 +751,67 @@
         <button onclick="dismissInstallBanner()" class="pwa-dismiss">&times;</button>
     </div>
 
-    <script src="/static/hdate.js"></script>
-    <script src="/static/app.js"></script>
+    <script src="static/hdate.js"></script>
+    <script src="static/app.js"></script>
     <script>
+        // ── Shared Panel Menu ────────────────────────────────────────────
+        // Fetch the panel sidebar menu from Next.js (cookie auto-sent by browser)
+        (async function fetchPanelMenu() {
+            try {
+                const res = await fetch('/api/panel/menu');
+                if (!res.ok) return;
+                const data = await res.json();
+                const nav = document.getElementById('panelMenuNav');
+                const userInfo = document.getElementById('panelUserInfo');
+
+                // Render menu sections
+                let html = '';
+                for (const section of data.sections) {
+                    if (section.title) {
+                        html += '<div style="margin-top:0.75rem;margin-bottom:0.25rem;font-size:0.7rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-gray);padding:0 0.5rem">' + section.title + '</div>';
+                    }
+                    for (const item of section.items) {
+                        const isActive = item.href === '/panel/holded/' ? ' active' : '';
+                        const el = document.createElement('a');
+                        el.href = item.href;
+                        el.className = 'nav-item' + isActive;
+                        el.textContent = item.label;
+                        nav.appendChild(el);
+                    }
+                }
+
+                // User info + logout
+                if (data.user) {
+                    const nameEl = document.createElement('div');
+                    nameEl.textContent = data.user.name;
+                    nameEl.style.fontWeight = '600';
+                    nameEl.style.marginBottom = '0.25rem';
+                    userInfo.appendChild(nameEl);
+
+                    const roleEl = document.createElement('span');
+                    roleEl.textContent = data.user.role;
+                    roleEl.style.cssText = 'font-size:0.7rem;padding:0.15rem 0.4rem;border-radius:9999px;background:rgba(255,255,255,0.1)';
+                    userInfo.appendChild(roleEl);
+
+                    const logoutBtn = document.createElement('a');
+                    logoutBtn.href = data.logout_href;
+                    logoutBtn.textContent = 'Sign out';
+                    logoutBtn.style.cssText = 'display:block;margin-top:0.5rem;color:var(--text-gray);font-size:0.8rem;text-decoration:none';
+                    logoutBtn.onclick = async function(e) {
+                        e.preventDefault();
+                        await fetch(data.logout_href, { method: 'DELETE' });
+                        window.location.href = '/panel';
+                    };
+                    userInfo.appendChild(logoutBtn);
+                }
+            } catch (e) {
+                console.warn('Failed to load panel menu:', e);
+            }
+        })();
+
         // Register Service Worker
         if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('/static/sw.js')
+            navigator.serviceWorker.register('static/sw.js')
                 .then(reg => console.log('SW registered:', reg.scope))
                 .catch(err => console.warn('SW registration failed:', err));
         }

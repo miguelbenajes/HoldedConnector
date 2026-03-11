@@ -1,0 +1,345 @@
+"""
+auth.py — Authentication module for holded-connector.
+
+Supports three auth methods (checked in order by middleware in api.py):
+  1. Legacy Bearer token (HOLDED_CONNECTOR_TOKEN) — Brain inter-service calls
+  2. Supabase Bearer JWT — API clients sending Authorization header
+  3. Supabase cookie — Panel users via nginx proxy (browser auto-sends cookies)
+
+Auth flow for cookie path (most common — panel users):
+  Browser → GET /panel/holded/api/summary
+    → browser auto-sends cookies (same domain: coyoterent.com)
+    → nginx strips /panel/holded → GET /api/summary → localhost:8000
+    → this module reads sb-<ref>-auth-token cookie from request
+    → validates JWT via JWKS (RS256) or JWT secret (HS256 fallback)
+    → looks up user role in panel.panel_users
+    → checks route permission against PERMISSION_MATRIX
+    → returns user or raises error
+
+Dependencies: PyJWT, cryptography, httpx
+"""
+
+import os
+import re
+import json
+import hmac
+import time
+import logging
+import base64
+from typing import Optional, NamedTuple
+from urllib.parse import unquote
+
+import jwt
+import httpx
+
+logger = logging.getLogger(__name__)
+
+# ── Configuration ─────────────────────────────────────────────────────────
+
+SUPABASE_PROJECT_REF = os.getenv("SUPABASE_PROJECT_REF", "mpgfivufawurjnpyvacf")
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "")
+HOLDED_CONNECTOR_TOKEN = os.getenv("HOLDED_CONNECTOR_TOKEN", "")
+JWKS_URL = f"https://{SUPABASE_PROJECT_REF}.supabase.co/auth/v1/.well-known/jwks.json"
+JWKS_CACHE_TTL = 3600  # 1 hour
+
+# ── JWKS Cache ────────────────────────────────────────────────────────────
+
+_jwks_cache: Optional[dict] = None
+_jwks_cache_time: float = 0
+
+
+def _fetch_jwks() -> dict:
+    """Fetch JWKS from Supabase and cache for 1 hour.
+    Falls back to cached keys on network failure."""
+    global _jwks_cache, _jwks_cache_time
+    now = time.time()
+
+    if _jwks_cache and (now - _jwks_cache_time) < JWKS_CACHE_TTL:
+        return _jwks_cache
+
+    try:
+        resp = httpx.get(JWKS_URL, timeout=10)
+        resp.raise_for_status()
+        _jwks_cache = resp.json()
+        _jwks_cache_time = now
+        logger.info("JWKS refreshed from Supabase")
+        return _jwks_cache
+    except Exception as e:
+        logger.warning("Failed to fetch JWKS: %s — using cached keys", e)
+        if _jwks_cache:
+            return _jwks_cache
+        raise RuntimeError("JWKS unavailable and no cached keys") from e
+
+
+def _get_signing_key(token: str) -> jwt.algorithms.RSAAlgorithm:
+    """Get the RSA public key matching the token's kid claim."""
+    jwks = _fetch_jwks()
+    header = jwt.get_unverified_header(token)
+    kid = header.get("kid")
+
+    for key_data in jwks.get("keys", []):
+        if key_data.get("kid") == kid:
+            return jwt.algorithms.RSAAlgorithm.from_jwk(key_data)
+
+    raise jwt.InvalidTokenError(f"No matching key found for kid={kid}")
+
+
+# ── JWT Validation ────────────────────────────────────────────────────────
+
+
+def validate_supabase_jwt(token: str) -> dict:
+    """Validate a Supabase JWT and return the decoded payload.
+
+    Tries RS256 (JWKS) first, then HS256 (JWT secret) as fallback.
+    Returns decoded payload with 'sub' (auth user ID), 'email', etc.
+    Raises jwt.InvalidTokenError on failure.
+    """
+    # Try RS256 with JWKS (primary — production Supabase uses this)
+    try:
+        public_key = _get_signing_key(token)
+        payload = jwt.decode(
+            token,
+            public_key,
+            algorithms=["RS256"],
+            audience="authenticated",
+            options={"verify_exp": True},
+        )
+        return payload
+    except Exception as e:
+        logger.debug("RS256 validation failed: %s — trying HS256", e)
+
+    # Fallback to HS256 with JWT secret (local dev, some Supabase configs)
+    if SUPABASE_JWT_SECRET:
+        try:
+            payload = jwt.decode(
+                token,
+                SUPABASE_JWT_SECRET,
+                algorithms=["HS256"],
+                audience="authenticated",
+                options={"verify_exp": True},
+            )
+            return payload
+        except Exception as e:
+            logger.debug("HS256 validation failed: %s", e)
+
+    raise jwt.InvalidTokenError("JWT validation failed for all methods")
+
+
+# ── Cookie Extraction ─────────────────────────────────────────────────────
+
+
+def extract_jwt_from_cookies(cookie_header: str) -> Optional[str]:
+    """Extract Supabase access token from the sb-<ref>-auth-token cookie.
+
+    @supabase/ssr stores the session as a base64-encoded JSON object in
+    httpOnly cookies. For large sessions, it chunks across multiple cookies:
+      sb-<ref>-auth-token.0, sb-<ref>-auth-token.1, etc.
+
+    This function handles both single and chunked cookie formats.
+    """
+    if not cookie_header:
+        return None
+
+    cookie_name = f"sb-{SUPABASE_PROJECT_REF}-auth-token"
+
+    # Parse cookie header into dict
+    cookies = {}
+    for part in cookie_header.split(";"):
+        part = part.strip()
+        if "=" in part:
+            k, v = part.split("=", 1)
+            cookies[k.strip()] = v.strip()
+
+    # Try single cookie first
+    token_data = cookies.get(cookie_name)
+
+    # Try chunked cookies (.0, .1, .2, ...)
+    if not token_data:
+        chunks = []
+        i = 0
+        while f"{cookie_name}.{i}" in cookies:
+            chunks.append(cookies[f"{cookie_name}.{i}"])
+            i += 1
+        if chunks:
+            token_data = "".join(chunks)
+
+    if not token_data:
+        return None
+
+    # Decode to get access_token from session JSON
+    try:
+        decoded = unquote(token_data)
+        # @supabase/ssr stores session as JSON (possibly base64-encoded)
+        try:
+            session = json.loads(decoded)
+        except json.JSONDecodeError:
+            # Try base64 decoding (some versions encode it)
+            padded = decoded + "=" * (-len(decoded) % 4)
+            session = json.loads(base64.b64decode(padded))
+        return session.get("access_token")
+    except Exception as e:
+        logger.warning("Failed to parse Supabase cookie: %s", e)
+        return None
+
+
+# ── Legacy Token ──────────────────────────────────────────────────────────
+
+
+def is_legacy_token(token: str) -> bool:
+    """Check if the token matches the legacy HOLDED_CONNECTOR_TOKEN.
+    Uses HMAC comparison to prevent timing attacks."""
+    if not HOLDED_CONNECTOR_TOKEN:
+        return False
+    return hmac.compare_digest(token, HOLDED_CONNECTOR_TOKEN)
+
+
+# ── User Lookup ───────────────────────────────────────────────────────────
+
+
+class PanelUser(NamedTuple):
+    """Authenticated panel user from panel.panel_users."""
+    id: str
+    auth_id: str
+    email: str
+    name: str
+    role: str
+    is_active: bool
+
+
+def lookup_user(auth_id: str, get_connection) -> Optional[PanelUser]:
+    """Look up a panel user by their Supabase auth ID.
+
+    Args:
+        auth_id: UUID from the JWT 'sub' claim (= auth.users.id)
+        get_connection: Callable that returns a DB connection (from connector.py)
+
+    Returns:
+        PanelUser or None if not found.
+    """
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT id, auth_id, email, name, role, is_active
+               FROM panel.panel_users
+               WHERE auth_id = %s""",
+            (auth_id,),
+        )
+        row = cur.fetchone()
+        cur.close()
+        if not row:
+            return None
+        return PanelUser(
+            id=str(row[0]),
+            auth_id=str(row[1]),
+            email=row[2],
+            name=row[3],
+            role=row[4],
+            is_active=row[5],
+        )
+    finally:
+        from connector import release_db
+        release_db(conn)
+
+
+# ── Public Paths ──────────────────────────────────────────────────────────
+
+# Paths that don't require authentication
+PUBLIC_PATHS = {"/health", "/", "/favicon.ico"}
+PUBLIC_PREFIXES = ("/static/",)
+
+
+def is_public_path(path: str) -> bool:
+    """Check if a request path is public (no auth required)."""
+    if path in PUBLIC_PATHS:
+        return True
+    return any(path.startswith(p) for p in PUBLIC_PREFIXES)
+
+
+# ── Permission Matrix ─────────────────────────────────────────────────────
+# Maps (method_pattern, path_pattern) → set of allowed roles.
+# Checked in order — first match wins. Default: DENY.
+
+PERMISSION_MATRIX = [
+    # Dashboard — all roles
+    ("GET", r"^/api/(summary|stats(/.*)?)", {"admin", "accountant", "operator"}),
+
+    # Invoices — read
+    ("GET", r"^/api/(entities/invoices|recent)", {"admin", "accountant"}),
+    # Invoices — write
+    ("(POST|PUT|PATCH|DELETE)", r"^/api/agent/(invoice|send)", {"admin"}),
+
+    # Purchases — read
+    ("GET", r"^/api/(entities/purchases|invoices/unpaid|purchases/search)", {"admin", "accountant"}),
+
+    # Contacts — read
+    ("GET", r"^/api/entities/contacts", {"admin", "accountant"}),
+    # Contacts — write
+    ("POST", r"^/api/agent/contact", {"admin"}),
+
+    # Products — read
+    ("GET", r"^/api/(entities/products|products/(web|.*/pack-info))", {"admin", "accountant", "operator"}),
+    # Products — write
+    ("PATCH", r"^/api/entities/products/.*/web-include", {"admin", "operator"}),
+
+    # Estimates — read
+    ("GET", r"^/api/entities/estimates", {"admin", "accountant"}),
+    # Estimates — write
+    ("POST", r"^/api/agent/estimate", {"admin"}),
+
+    # AI chat — read + interact
+    ("(GET|POST)", r"^/api/ai/(chat|history|favorites|conversations)", {"admin", "accountant", "operator"}),
+    # AI — write actions (confirm, delete)
+    ("(POST|DELETE)", r"^/api/ai/(confirm|history|favorites)", {"admin", "operator"}),
+
+    # Reports — read
+    ("GET", r"^/api/reports/", {"admin", "accountant"}),
+
+    # Analysis — read
+    ("GET", r"^/api/analysis/", {"admin", "accountant"}),
+    # Analysis — write
+    ("POST", r"^/api/analysis/", {"admin"}),
+
+    # Amortizations — read
+    ("GET", r"^/api/amortizations", {"admin", "accountant"}),
+    # Amortizations — write
+    ("(POST|PUT|DELETE)", r"^/api/amortizations", {"admin"}),
+
+    # Sync management
+    ("(GET|POST)", r"^/api/sync", {"admin"}),
+
+    # Settings
+    ("(GET|POST|PUT|PATCH)", r"^/api/(config|ai/config)", {"admin"}),
+
+    # Files
+    ("(GET|POST|DELETE)", r"^/api/files/", {"admin", "operator"}),
+
+    # Backup
+    ("(GET|POST)", r"^/api/backup/", {"admin"}),
+
+    # Schema
+    ("GET", r"^/api/schema$", {"admin", "accountant"}),
+
+    # Tickets
+    ("POST", r"^/api/tickets/upload", {"admin", "operator"}),
+
+    # User management
+    ("(GET|POST|PUT|PATCH|DELETE)", r"^/api/users/", {"admin"}),
+
+    # PDFs
+    ("GET", r"^/api/entities/.*/pdf", {"admin", "accountant"}),
+]
+
+
+def check_permission(role: str, method: str, path: str) -> bool:
+    """Check if a role has permission for the given HTTP method + path.
+
+    Uses PERMISSION_MATRIX — first matching rule wins.
+    Default: DENY (returns False if no rule matches).
+    """
+    for method_pattern, path_pattern, allowed_roles in PERMISSION_MATRIX:
+        if re.match(method_pattern, method, re.IGNORECASE) and re.match(path_pattern, path):
+            return role in allowed_roles
+    # Default deny
+    logger.warning("No permission rule matched: %s %s (role=%s) → DENIED", method, path, role)
+    return False

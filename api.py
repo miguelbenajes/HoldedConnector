@@ -8,7 +8,6 @@ import os
 import time
 import logging
 import json
-import hmac
 import requests
 import io
 import pandas as pd
@@ -25,26 +24,63 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 
 # ── API Authentication ─────────────────────────────────────────────────
-# Set HOLDED_CONNECTOR_TOKEN in .env to require Bearer token authentication.
-# Internal services (Brain, agent-runner) must send: Authorization: Bearer <token>
-API_TOKEN = os.getenv("HOLDED_CONNECTOR_TOKEN", "")
+# Triple-auth middleware: Supabase cookie + Supabase JWT Bearer + legacy token.
+# See auth.py for full documentation of each auth path.
+import auth as auth_module
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    # Allow health check without auth
-    if request.url.path == "/health":
+    # Public paths (health, static files, root)
+    if auth_module.is_public_path(request.url.path):
+        request.state.user = None
         return await call_next(request)
-    # Allow static files without auth (frontend UI)
-    if request.url.path.startswith("/static") or request.url.path == "/":
+
+    # Dev mode: no auth configured → allow all
+    if not auth_module.HOLDED_CONNECTOR_TOKEN and not auth_module.SUPABASE_JWT_SECRET:
+        request.state.user = None
         return await call_next(request)
-    # If no token configured, allow all (development mode)
-    if not API_TOKEN:
-        return await call_next(request)
-    # Validate Bearer token
-    auth = request.headers.get("authorization", "")
-    if not auth.startswith("Bearer ") or not hmac.compare_digest(auth[7:], API_TOKEN):
-        return JSONResponse(status_code=401, content={"error": "Unauthorized"})
-    return await call_next(request)
+
+    # Path 1: Bearer token (legacy inter-service OR Supabase JWT)
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+
+        # Legacy HOLDED_CONNECTOR_TOKEN (Brain inter-service) → full access
+        if auth_module.is_legacy_token(token):
+            request.state.user = None
+            return await call_next(request)
+
+        # Try as Supabase JWT Bearer (API clients)
+        try:
+            payload = auth_module.validate_supabase_jwt(token)
+            user = auth_module.lookup_user(payload["sub"], connector.get_db)
+            if user and user.is_active:
+                if not auth_module.check_permission(user.role, request.method, request.url.path):
+                    return JSONResponse(status_code=403, content={"error": "Insufficient permissions"})
+                request.state.user = user
+                return await call_next(request)
+        except Exception:
+            pass
+
+    # Path 2: Supabase cookie (panel users via nginx proxy)
+    cookie_header = request.headers.get("cookie", "")
+    jwt_from_cookie = auth_module.extract_jwt_from_cookies(cookie_header)
+    if jwt_from_cookie:
+        try:
+            payload = auth_module.validate_supabase_jwt(jwt_from_cookie)
+            user = auth_module.lookup_user(payload["sub"], connector.get_db)
+            if not user:
+                return JSONResponse(status_code=403, content={"error": "User not registered"})
+            if not user.is_active:
+                return JSONResponse(status_code=403, content={"error": "Account deactivated"})
+            if not auth_module.check_permission(user.role, request.method, request.url.path):
+                return JSONResponse(status_code=403, content={"error": "Insufficient permissions"})
+            request.state.user = user
+            return await call_next(request)
+        except Exception as e:
+            logger.warning("Cookie JWT validation failed: %s", e)
+
+    return JSONResponse(status_code=401, content={"error": "Authentication required"})
 
 # CORS: restrict to known origins in production.
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*")
@@ -800,21 +836,24 @@ class ConfirmRequest(BaseModel):
     confirmed: bool
 
 @app.post("/api/ai/chat")
-async def ai_chat(body: ChatRequest):
+async def ai_chat(body: ChatRequest, request: Request):
     if not ai_agent.check_rate_limit():
         return {"type": "error", "content": "Rate limit exceeded. Please wait a moment."}
-    result = ai_agent.chat(body.message, body.conversation_id)
+    user_role = getattr(getattr(request.state, "user", None), "role", "admin")
+    result = ai_agent.chat(body.message, body.conversation_id, user_role=user_role)
     return result
 
 @app.post("/api/ai/chat/stream")
-async def ai_chat_stream(body: ChatRequest):
+async def ai_chat_stream(body: ChatRequest, request: Request):
     if not ai_agent.check_rate_limit():
         async def error_gen():
             yield f"event: error\ndata: {json.dumps({'content': 'Rate limit exceeded.'})}\n\n"
         return StreamingResponse(error_gen(), media_type="text/event-stream")
 
+    user_role = getattr(getattr(request.state, "user", None), "role", "admin")
+
     def sse_generator():
-        for event in ai_agent.chat_stream(body.message, body.conversation_id):
+        for event in ai_agent.chat_stream(body.message, body.conversation_id, user_role=user_role):
             evt = event.get("event", "message")
             data = event.get("data", "{}")
             yield f"event: {evt}\ndata: {data}\n\n"

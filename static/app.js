@@ -1,3 +1,16 @@
+// ── URL rewriting for panel proxy ────────────────────────────────────────
+// When served under /panel/holded/ (via nginx proxy), absolute /api/ paths
+// would hit Next.js instead of holded-connector. Intercept fetch() globally
+// to rewrite /api/... → api/... so <base href="/panel/holded/"> resolves them
+// to /panel/holded/api/... → nginx strips prefix → /api/... on port 8000.
+const _originalFetch = window.fetch;
+window.fetch = function(input, init) {
+    if (typeof input === 'string' && input.startsWith('/api/')) {
+        input = input.slice(1);
+    }
+    return _originalFetch.call(this, input, init);
+};
+
 // Utility for formatting currency
 const formatter = new Intl.NumberFormat('es-ES', {
     style: 'currency',
