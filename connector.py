@@ -472,6 +472,39 @@ def _init_db_inner(conn):
         )
     ''')
 
+    # ── Write Audit Log ──────────────────────────────────────────────
+    cursor.execute(f'''
+        CREATE TABLE IF NOT EXISTS write_audit_log (
+            id              {_serial},
+            timestamp       TEXT DEFAULT ({_now}),
+            source          TEXT NOT NULL,
+            operation       TEXT NOT NULL,
+            entity_type     TEXT NOT NULL,
+            entity_id       TEXT,
+            payload_sent    TEXT,
+            response_received TEXT,
+            preview_data    TEXT,
+            warnings        TEXT,
+            status          TEXT NOT NULL DEFAULT 'pending',
+            tables_synced   TEXT,
+            reverse_action  TEXT,
+            reverse_payload TEXT,
+            user_confirmed  BOOLEAN,
+            error_detail    TEXT,
+            safe_mode       BOOLEAN DEFAULT FALSE,
+            conversation_id TEXT,
+            checksum        TEXT,
+            duration_ms     INTEGER
+        )
+    ''')
+
+    # Audit log indexes
+    if not _USE_SQLITE:
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON write_audit_log(timestamp)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_entity ON write_audit_log(entity_type, entity_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_operation ON write_audit_log(operation)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_status ON write_audit_log(status)')
+
     # ── Column migrations (SQLite only — PG creates all columns upfront) ──────
     if _USE_SQLITE:
         for col, definition in [
@@ -933,40 +966,343 @@ def sync_payments():
         release_db(conn)
     logger.info(f"Synced {len(data)} payments.")
 
+
+# ---------------------------------------------------------------------------
+# Single-entity sync helpers — used by Write Gateway for sync-back after writes
+# ---------------------------------------------------------------------------
+
+def _upsert_single_document(cursor, doc, table, items_table, fk_column):
+    """Upsert a single document + its line items into local DB.
+
+    Reuses the same field mapping and SQL patterns as sync_documents().
+    `doc` is a single Holded document dict (from GET /documents/{type}/{id}).
+
+    IMPORTANT: Invoices use 13 columns (includes payments_pending, payments_total,
+    due_date). Estimates and purchases use only 10 columns (no payment fields).
+    This mirrors the branching in sync_documents() at line 708.
+    """
+    doc_id = doc.get('id')
+    if not doc_id:
+        return
+
+    # Build ledger account map for human-readable account names (like sync_documents lines 697-702)
+    acc_map = {}
+    try:
+        cursor.execute(_q('SELECT id, name, num FROM ledger_accounts'))
+        for r in cursor.fetchall():
+            name = r[1] if isinstance(r, tuple) else r['name']
+            num = r[2] if isinstance(r, tuple) else r.get('num')
+            rid = r[0] if isinstance(r, tuple) else r['id']
+            acc_map[rid] = f"{name} ({num})" if num else name
+    except Exception:
+        pass  # No ledger accounts loaded yet — fall through to raw ID
+
+    is_invoice = (table == 'invoices')
+
+    if is_invoice:
+        # Invoices: 13 columns including payment fields
+        vals = (
+            doc_id,
+            doc.get('contact'),
+            doc.get('contactName'),
+            doc.get('desc', ''),
+            doc.get('date'),
+            _num(doc.get('total')),
+            doc.get('status', 0),
+            _num(doc.get('paymentsPending')),
+            _num(doc.get('paymentsTotal')),
+            doc.get('dueDate'),
+            doc.get('docNumber', ''),
+            json.dumps(doc.get('tags') or []),
+            doc.get('notes', '')
+        )
+
+        if _USE_SQLITE:
+            cursor.execute(f'''
+                INSERT OR REPLACE INTO {table}
+                    (id, contact_id, contact_name, "desc", date, amount, status,
+                     payments_pending, payments_total, due_date, doc_number, tags, notes)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ''', vals)
+        else:
+            cursor.execute(f'''
+                INSERT INTO {table}
+                    (id, contact_id, contact_name, "desc", date, amount, status,
+                     payments_pending, payments_total, due_date, doc_number, tags, notes)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (id) DO UPDATE SET
+                    contact_id=EXCLUDED.contact_id, contact_name=EXCLUDED.contact_name,
+                    "desc"=EXCLUDED."desc", date=EXCLUDED.date, amount=EXCLUDED.amount,
+                    status=EXCLUDED.status, payments_pending=EXCLUDED.payments_pending,
+                    payments_total=EXCLUDED.payments_total, due_date=EXCLUDED.due_date,
+                    doc_number=EXCLUDED.doc_number, tags=EXCLUDED.tags, notes=EXCLUDED.notes
+            ''', vals)
+    else:
+        # Estimates & purchases: 10 columns (no payment fields)
+        vals = (
+            doc_id,
+            doc.get('contact'),
+            doc.get('contactName'),
+            doc.get('desc', ''),
+            doc.get('date'),
+            _num(doc.get('total')),
+            doc.get('status', 0),
+            doc.get('docNumber', ''),
+            json.dumps(doc.get('tags') or []),
+            doc.get('notes', '')
+        )
+
+        if _USE_SQLITE:
+            cursor.execute(f'''
+                INSERT OR REPLACE INTO {table}
+                    (id, contact_id, contact_name, "desc", date, amount, status,
+                     doc_number, tags, notes)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
+            ''', vals)
+        else:
+            cursor.execute(f'''
+                INSERT INTO {table}
+                    (id, contact_id, contact_name, "desc", date, amount, status,
+                     doc_number, tags, notes)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (id) DO UPDATE SET
+                    contact_id=EXCLUDED.contact_id, contact_name=EXCLUDED.contact_name,
+                    "desc"=EXCLUDED."desc", date=EXCLUDED.date, amount=EXCLUDED.amount,
+                    status=EXCLUDED.status,
+                    doc_number=EXCLUDED.doc_number, tags=EXCLUDED.tags, notes=EXCLUDED.notes
+            ''', vals)
+
+    # Items: delete + re-insert
+    cursor.execute(_q(f'DELETE FROM {items_table} WHERE {fk_column} = ?'), (doc_id,))
+    for prod in doc.get('products', []):
+        retention = extract_ret(prod)
+        acc_id = prod.get('accountCode') or prod.get('accountName') or prod.get('account')
+        # Resolve ledger account ID to human-readable name (like sync_documents line 760)
+        account = acc_map.get(acc_id, acc_id)
+        cursor.execute(_q(f'''
+            INSERT INTO {items_table}
+                ({fk_column}, product_id, name, sku, units, price, subtotal,
+                 discount, tax, retention, account, project_id, kind)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        '''), (doc_id, prod.get('productId'), prod.get('name'), prod.get('sku'),
+               _num(prod.get('units')), _num(prod.get('price')), _num(prod.get('subtotal')),
+               _num(prod.get('discount')), _num(prod.get('tax')), _num(retention), account,
+               prod.get('projectid'), prod.get('kind')))
+
+
+def _upsert_single_contact(cursor, contact):
+    """Upsert a single contact into local DB."""
+    cid = contact.get('id')
+    if not cid:
+        return
+
+    vals = (
+        cid,
+        contact.get('name', ''),
+        contact.get('email', ''),
+        contact.get('type', ''),
+        contact.get('code', ''),
+        contact.get('vat', ''),
+        contact.get('phone', ''),
+        contact.get('mobile', '')
+    )
+
+    if _USE_SQLITE:
+        cursor.execute('''
+            INSERT OR REPLACE INTO contacts
+                (id, name, email, type, code, vat, phone, mobile)
+            VALUES (?,?,?,?,?,?,?,?)
+        ''', vals)
+    else:
+        cursor.execute('''
+            INSERT INTO contacts
+                (id, name, email, type, code, vat, phone, mobile)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (id) DO UPDATE SET
+                name=EXCLUDED.name, email=EXCLUDED.email, type=EXCLUDED.type,
+                code=EXCLUDED.code, vat=EXCLUDED.vat, phone=EXCLUDED.phone,
+                mobile=EXCLUDED.mobile
+        ''', vals)
+
+
+def _upsert_single_product(cursor, product):
+    """Upsert a single product into local DB."""
+    pid = product.get('id')
+    if not pid:
+        return
+
+    vals = (
+        pid,
+        product.get('name', ''),
+        product.get('desc', ''),
+        _num(product.get('price')),
+        _num(product.get('stock')),
+        product.get('sku', ''),
+        product.get('kind', 'simple')
+    )
+
+    if _USE_SQLITE:
+        cursor.execute('''
+            INSERT OR REPLACE INTO products
+                (id, name, "desc", price, stock, sku, kind)
+            VALUES (?,?,?,?,?,?,?)
+        ''', vals)
+    else:
+        cursor.execute('''
+            INSERT INTO products
+                (id, name, "desc", price, stock, sku, kind)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (id) DO UPDATE SET
+                name=EXCLUDED.name, "desc"=EXCLUDED."desc", price=EXCLUDED.price,
+                stock=EXCLUDED.stock, sku=EXCLUDED.sku, kind=EXCLUDED.kind
+        ''', vals)
+
+
+def sync_single_document(doc_type, doc_id):
+    """Fetch one document from Holded and upsert into local DB. Returns tables updated."""
+    table_map = {
+        "invoice":  ("invoices", "invoice_items", "invoice_id"),
+        "estimate": ("estimates", "estimate_items", "estimate_id"),
+        "purchase": ("purchase_invoices", "purchase_items", "purchase_id"),
+    }
+    if doc_type not in table_map:
+        logger.error(f"Unknown doc_type for sync: {doc_type}")
+        return []
+
+    table, items_table, fk_col = table_map[doc_type]
+    data = fetch_data(f"/invoicing/v1/documents/{doc_type}/{doc_id}")
+    if not data:
+        logger.warning(f"Sync-back: no data returned for {doc_type}/{doc_id}")
+        return []
+
+    conn = get_db()
+    try:
+        cursor = _cursor(conn)
+        _upsert_single_document(cursor, data, table, items_table, fk_col)
+        conn.commit()
+        return [table, items_table]
+    except Exception as e:
+        logger.error(f"Sync-back failed for {doc_type}/{doc_id}: {e}")
+        conn.rollback()
+        return []
+    finally:
+        release_db(conn)
+
+
+def sync_single_contact(contact_id):
+    """Fetch one contact from Holded and upsert into local DB."""
+    data = fetch_data(f"/invoicing/v1/contacts/{contact_id}")
+    if not data:
+        return []
+    conn = get_db()
+    try:
+        cursor = _cursor(conn)
+        _upsert_single_contact(cursor, data)
+        conn.commit()
+        return ["contacts"]
+    except Exception as e:
+        logger.error(f"Sync-back failed for contact/{contact_id}: {e}")
+        conn.rollback()
+        return []
+    finally:
+        release_db(conn)
+
+
+def sync_single_product(product_id):
+    """Fetch one product from Holded and upsert into local DB."""
+    data = fetch_data(f"/invoicing/v1/products/{product_id}")
+    if not data:
+        return []
+    conn = get_db()
+    try:
+        cursor = _cursor(conn)
+        _upsert_single_product(cursor, data)
+        conn.commit()
+        return ["products"]
+    except Exception as e:
+        logger.error(f"Sync-back failed for product/{product_id}: {e}")
+        conn.rollback()
+        return []
+    finally:
+        release_db(conn)
+
+
 def post_data(endpoint, payload):
+    """POST to Holded API. Returns dict with 'error' key on failure."""
     if SAFE_MODE:
         logger.info(f"[SAFE MODE] Intercepted POST to {endpoint}")
         logger.debug(f"[SAFE MODE] Payload: {payload}")
-        return {"status": 1, "id": "SAFE_MODE_ID_TEST", "info": "Dry run successful"}
+        return {"status": 1, "id": "SAFE_MODE_ID_TEST", "info": "Dry run successful", "dry_run": True}
 
     url = f"{BASE_URL}{endpoint}"
-    response = requests.post(url, headers=HEADERS, json=payload, timeout=30)
-    if response.status_code == 200:
-        return response.json()
-    else:
-        logger.error(f"Error posting to {endpoint}: {response.status_code} - {response.text}")
-        return None
+    try:
+        response = requests.post(url, headers=HEADERS, json=payload, timeout=30)
+        if response.status_code in (200, 201):
+            return response.json()
+        else:
+            logger.error(f"Error posting to {endpoint}: {response.status_code} - {response.text}")
+            return {"error": True, "status_code": response.status_code, "detail": response.text}
+    except requests.exceptions.Timeout:
+        logger.error(f"Timeout posting to {endpoint}")
+        return {"error": True, "status_code": 0, "detail": "Request timed out"}
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Network error posting to {endpoint}: {e}")
+        return {"error": True, "status_code": 0, "detail": str(e)}
 
 def put_data(endpoint, payload):
+    """PUT to Holded API. Returns dict with 'error' key on failure."""
     if SAFE_MODE:
         logger.info(f"[SAFE MODE] Intercepted PUT to {endpoint}")
         logger.debug(f"[SAFE MODE] Payload: {payload}")
-        return {"status": 1, "info": "Dry run successful"}
+        return {"status": 1, "info": "Dry run successful", "dry_run": True}
 
     url = f"{BASE_URL}{endpoint}"
-    response = requests.put(url, headers=HEADERS, json=payload, timeout=30)
-    if response.status_code == 200:
-        return response.json()
-    else:
-        logger.error(f"Error putting to {endpoint}: {response.status_code} - {response.text}")
-        return None
+    try:
+        response = requests.put(url, headers=HEADERS, json=payload, timeout=30)
+        if response.status_code in (200, 201):
+            return response.json()
+        else:
+            logger.error(f"Error putting to {endpoint}: {response.status_code} - {response.text}")
+            return {"error": True, "status_code": response.status_code, "detail": response.text}
+    except requests.exceptions.Timeout:
+        logger.error(f"Timeout putting to {endpoint}")
+        return {"error": True, "status_code": 0, "detail": "Request timed out"}
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Network error putting to {endpoint}: {e}")
+        return {"error": True, "status_code": 0, "detail": str(e)}
+
+def delete_data(endpoint):
+    """DELETE on Holded API. Returns dict with 'error' key on failure."""
+    if SAFE_MODE:
+        logger.info(f"[SAFE MODE] Intercepted DELETE to {endpoint}")
+        return {"status": 1, "info": "Dry run successful (delete)", "dry_run": True}
+
+    url = f"{BASE_URL}{endpoint}"
+    try:
+        response = requests.delete(url, headers=HEADERS, timeout=30)
+        if response.status_code in (200, 201, 204):
+            try:
+                return response.json()
+            except ValueError:
+                return {"status": 1, "info": "Deleted"}
+        else:
+            logger.error(f"Error deleting {endpoint}: {response.status_code} - {response.text}")
+            return {"error": True, "status_code": response.status_code, "detail": response.text}
+    except requests.exceptions.Timeout:
+        logger.error(f"Timeout deleting {endpoint}")
+        return {"error": True, "status_code": 0, "detail": "Request timed out"}
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Network error deleting {endpoint}: {e}")
+        return {"error": True, "status_code": 0, "detail": str(e)}
 
 def create_invoice(invoice_data):
     logger.info(f"Creating invoice for contact {invoice_data.get('contact')}...")
     result = post_data("/invoicing/v1/documents/invoice", invoice_data)
-    if result and result.get('status') == 1:
+    if result and not result.get("error") and result.get('status') == 1:
         logger.info(f"Invoice created successfully: {result.get('id')}")
         return result.get('id')
+    if result and result.get("error"):
+        return result
     return None
 
 def update_estimate(estimate_id, estimate_data):
@@ -980,9 +1316,11 @@ def update_estimate(estimate_id, estimate_data):
 def create_contact(contact_data):
     logger.info(f"Creating contact {contact_data.get('name')}...")
     result = post_data("/invoicing/v1/contacts", contact_data)
-    if result and result.get('status') == 1:
+    if result and not result.get("error") and result.get('status') == 1:
         logger.info(f"Contact created successfully: {result.get('id')}")
         return result.get('id')
+    if result and result.get("error"):
+        return result
     return None
 
 def create_estimate(estimate_data):
@@ -2053,6 +2391,75 @@ def get_amortization_summary():
         "amortized_count": amortized_count,
         "in_progress_count": len(rows) - amortized_count
     }
+
+
+# ── Write Audit Log Helpers ──────────────────────────────────────────
+
+def insert_audit_log(source, operation, entity_type, payload_sent=None,
+                     preview_data=None, warnings=None, status='pending',
+                     safe_mode=False, conversation_id=None):
+    """Insert a new audit log entry. Returns the new row ID."""
+    conn = get_db()
+    try:
+        cursor = _cursor(conn)
+        insert_params = (source, operation, entity_type,
+               json.dumps(payload_sent) if payload_sent else None,
+               json.dumps(preview_data) if preview_data else None,
+               json.dumps(warnings) if warnings else None,
+               status, safe_mode, conversation_id)
+        if _USE_SQLITE:
+            cursor.execute('''
+                INSERT INTO write_audit_log
+                    (source, operation, entity_type, payload_sent, preview_data,
+                     warnings, status, safe_mode, conversation_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', insert_params)
+            audit_id = cursor.lastrowid
+        else:
+            cursor.execute('''
+                INSERT INTO write_audit_log
+                    (source, operation, entity_type, payload_sent, preview_data,
+                     warnings, status, safe_mode, conversation_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            ''', insert_params)
+            row = cursor.fetchone()
+            audit_id = row['id'] if row else None
+        conn.commit()
+        return audit_id
+    except Exception as e:
+        logger.error(f"Failed to insert audit log: {e}")
+        conn.rollback()
+        return None
+    finally:
+        release_db(conn)
+
+
+def update_audit_log(audit_id, **kwargs):
+    """Update an existing audit log entry. Accepts any column as kwarg."""
+    if not audit_id:
+        return
+    json_fields = {'payload_sent', 'response_received', 'preview_data',
+                   'warnings', 'tables_synced', 'reverse_action', 'reverse_payload'}
+    conn = get_db()
+    try:
+        cursor = _cursor(conn)
+        sets = []
+        vals = []
+        for k, v in kwargs.items():
+            sets.append(f'{k} = {_q("?")}')
+            if k in json_fields and v is not None and not isinstance(v, str):
+                vals.append(json.dumps(v))
+            else:
+                vals.append(v)
+        vals.append(audit_id)
+        cursor.execute(_q(f'UPDATE write_audit_log SET {", ".join(sets)} WHERE id = ?'), vals)
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Failed to update audit log {audit_id}: {e}")
+        conn.rollback()
+    finally:
+        release_db(conn)
 
 
 if __name__ == "__main__":
