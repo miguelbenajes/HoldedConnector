@@ -36,21 +36,23 @@
             <div id="panelUserInfo" style="margin-top:auto;padding:0.75rem;border-top:1px solid var(--glass-border);font-size:0.8rem;color:var(--text-gray)"></div>
         </aside>
 
-        <!-- Holded internal nav (horizontal tab bar) -->
-        <div class="holded-subnav" id="holdedSubnav" style="display:flex;gap:0.25rem;padding:0.5rem 1rem;background:var(--card-bg);border-bottom:1px solid var(--glass-border);overflow-x:auto;flex-shrink:0">
-            <div class="nav-item active" data-view="overview">Overview</div>
-            <div class="nav-item" data-view="contacts">Contacts</div>
-            <div class="nav-item" data-view="products">Inventory</div>
-            <div class="nav-item" data-view="invoices">Invoices</div>
-            <div class="nav-item" data-view="purchases">Expenses</div>
-            <div class="nav-item" data-view="estimates">Estimates</div>
-            <div class="nav-item" data-view="amortizations">Amortizaciones</div>
-            <div class="nav-item" data-view="analysis">Análisis</div>
-            <div class="nav-item" data-view="backup">Backup</div>
-            <div class="safe-mode-badge" id="safeModeBadge" style="margin-left:auto">SAFE MODE ACTIVE</div>
-        </div>
+        <!-- Right side: subnav + content stacked vertically -->
+        <div class="holded-main" style="display:flex;flex-direction:column;flex-grow:1;min-width:0;overflow:hidden">
+            <!-- Holded internal nav (horizontal tab bar) -->
+            <div class="holded-subnav" id="holdedSubnav" style="display:flex;gap:0.25rem;padding:0.5rem 1rem;background:var(--card-bg);border-bottom:1px solid var(--glass-border);overflow-x:auto;flex-shrink:0">
+                <div class="nav-item active" data-view="overview">Overview</div>
+                <div class="nav-item" data-view="contacts">Contacts</div>
+                <div class="nav-item" data-view="products">Inventory</div>
+                <div class="nav-item" data-view="invoices">Invoices</div>
+                <div class="nav-item" data-view="purchases">Expenses</div>
+                <div class="nav-item" data-view="estimates">Estimates</div>
+                <div class="nav-item" data-view="amortizations">Amortizaciones</div>
+                <div class="nav-item" data-view="analysis">Análisis</div>
+                <div class="nav-item" data-view="backup">Backup</div>
+                <div class="safe-mode-badge" id="safeModeBadge" style="margin-left:auto">SAFE MODE ACTIVE</div>
+            </div>
 
-        <main class="content">
+            <main class="content">
             <!-- SETUP VIEW -->
             <div id="view-setup" class="view-container">
                 <div class="setup-box card">
@@ -444,6 +446,7 @@
             </div>
 
         </main>
+        </div><!-- /.holded-main -->
     </div>
 
     <!-- Amortization Add/Edit Modal -->
@@ -758,7 +761,8 @@
         // Fetch the panel sidebar menu from Next.js (cookie auto-sent by browser)
         (async function fetchPanelMenu() {
             try {
-                const res = await fetch('/api/panel/menu');
+                // Use full URL to bypass the fetch interceptor (panel menu is on Next.js, not holded)
+                const res = await _originalFetch('/api/panel/menu');
                 if (!res.ok) return;
                 const data = await res.json();
                 const nav = document.getElementById('panelMenuNav');
@@ -799,7 +803,7 @@
                     logoutBtn.style.cssText = 'display:block;margin-top:0.5rem;color:var(--text-gray);font-size:0.8rem;text-decoration:none';
                     logoutBtn.onclick = async function(e) {
                         e.preventDefault();
-                        await fetch(data.logout_href, { method: 'DELETE' });
+                        await _originalFetch(data.logout_href, { method: 'DELETE' });
                         window.location.href = '/panel';
                     };
                     userInfo.appendChild(logoutBtn);
