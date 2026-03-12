@@ -956,18 +956,26 @@ def post_data(endpoint, payload):
         return {"error": True, "status_code": 0, "detail": str(e)}
 
 def put_data(endpoint, payload):
+    """PUT to Holded API. Returns dict with 'error' key on failure."""
     if SAFE_MODE:
         logger.info(f"[SAFE MODE] Intercepted PUT to {endpoint}")
         logger.debug(f"[SAFE MODE] Payload: {payload}")
-        return {"status": 1, "info": "Dry run successful"}
+        return {"status": 1, "info": "Dry run successful", "dry_run": True}
 
     url = f"{BASE_URL}{endpoint}"
-    response = requests.put(url, headers=HEADERS, json=payload, timeout=30)
-    if response.status_code == 200:
-        return response.json()
-    else:
-        logger.error(f"Error putting to {endpoint}: {response.status_code} - {response.text}")
-        return None
+    try:
+        response = requests.put(url, headers=HEADERS, json=payload, timeout=30)
+        if response.status_code in (200, 201):
+            return response.json()
+        else:
+            logger.error(f"Error putting to {endpoint}: {response.status_code} - {response.text}")
+            return {"error": True, "status_code": response.status_code, "detail": response.text}
+    except requests.exceptions.Timeout:
+        logger.error(f"Timeout putting to {endpoint}")
+        return {"error": True, "status_code": 0, "detail": "Request timed out"}
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Network error putting to {endpoint}: {e}")
+        return {"error": True, "status_code": 0, "detail": str(e)}
 
 def create_invoice(invoice_data):
     logger.info(f"Creating invoice for contact {invoice_data.get('contact')}...")

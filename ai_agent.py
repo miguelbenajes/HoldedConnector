@@ -819,11 +819,12 @@ def exec_update_invoice_status(params):
         return {"error": "Invalid status (must be 0-5)"}
 
     result = connector.put_data(f"/invoicing/v1/documents/{holded_type}/{doc_id}", {"status": status})
-    if result:
+    if result and not result.get("error"):
         is_safe = connector.SAFE_MODE
         return {"success": True, "safe_mode": is_safe,
                 "message": f"Status updated to {status} (dry run)" if is_safe else f"Status updated to {status}"}
-    return {"success": False, "error": "Failed to update status"}
+    else:
+        return {"success": False, "error": result.get("detail", "Unknown error") if result else "No response"}
 
 
 def exec_render_chart(params):
