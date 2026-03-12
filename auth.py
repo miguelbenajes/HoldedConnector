@@ -71,15 +71,27 @@ def _fetch_jwks() -> dict:
         raise RuntimeError("JWKS unavailable and no cached keys") from e
 
 
-def _get_signing_key(token: str) -> jwt.algorithms.RSAAlgorithm:
-    """Get the RSA public key matching the token's kid claim."""
+def _get_signing_key(token: str) -> tuple:
+    """Get the public key and algorithm matching the token's kid claim.
+
+    Supabase JWKS may use EC (ES256) or RSA (RS256) keys.
+    Returns (public_key, algorithm_string) tuple.
+    """
     jwks = _fetch_jwks()
     header = jwt.get_unverified_header(token)
     kid = header.get("kid")
 
     for key_data in jwks.get("keys", []):
         if key_data.get("kid") == kid:
-            return jwt.algorithms.RSAAlgorithm.from_jwk(key_data)
+            kty = key_data.get("kty", "").upper()
+            if kty == "EC":
+                return jwt.algorithms.ECAlgorithm.from_jwk(key_data), "ES256"
+            elif kty == "RSA":
+                return jwt.algorithms.RSAAlgorithm.from_jwk(key_data), "RS256"
+            elif kty == "OKP":
+                return jwt.algorithms.OKPAlgorithm.from_jwk(key_data), "EdDSA"
+            else:
+                raise jwt.InvalidTokenError(f"Unsupported key type: {kty}")
 
     raise jwt.InvalidTokenError(f"No matching key found for kid={kid}")
 
@@ -90,23 +102,23 @@ def _get_signing_key(token: str) -> jwt.algorithms.RSAAlgorithm:
 def validate_supabase_jwt(token: str) -> dict:
     """Validate a Supabase JWT and return the decoded payload.
 
-    Tries RS256 (JWKS) first, then HS256 (JWT secret) as fallback.
+    Tries JWKS first (auto-detects ES256/RS256), then HS256 as fallback.
     Returns decoded payload with 'sub' (auth user ID), 'email', etc.
     Raises jwt.InvalidTokenError on failure.
     """
-    # Try RS256 with JWKS (primary — production Supabase uses this)
+    # Try JWKS (primary — production Supabase uses ES256 or RS256)
     try:
-        public_key = _get_signing_key(token)
+        public_key, algorithm = _get_signing_key(token)
         payload = jwt.decode(
             token,
             public_key,
-            algorithms=["RS256"],
+            algorithms=[algorithm],
             audience="authenticated",
             options={"verify_exp": True},
         )
         return payload
     except Exception as e:
-        logger.debug("RS256 validation failed: %s — trying HS256", e)
+        logger.debug("JWKS validation failed (%s): %s — trying HS256", type(e).__name__, e)
 
     # Fallback to HS256 with JWT secret (local dev, some Supabase configs)
     if SUPABASE_JWT_SECRET:
