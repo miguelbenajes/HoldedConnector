@@ -378,6 +378,11 @@ PERMISSION_MATRIX = [
 
     # PDFs
     ("GET", r"^/api/entities/.*/pdf", {"admin", "accountant"}),
+
+    # Jobs — job tracker
+    ("GET", r"^/api/jobs", {"admin", "accountant"}),
+    ("POST", r"^/api/jobs", {"admin"}),
+    ("PATCH", r"^/api/jobs/", {"admin"}),
 ]
 
 
