@@ -103,13 +103,14 @@ _fetch_one_val(c,k) # Fetches single scalar from either cursor type
 7. **get_upcoming_payments** — Payments in next N days
 8. **get_amortization_status** — ROI tracking data for amortized products
 
-### Write Tools (6) — Require User Confirmation
+### Write Tools (7) — Require User Confirmation
 1. **create_estimate** — Draft presupuesto
-2. **create_invoice** — Sales invoice
+2. **create_invoice** — Sales invoice (always as borrador — NEVER approveDoc)
 3. **send_document** — Email via Holded's API
 4. **create_contact** — New client/supplier
-5. **update_invoice_status** — Mark invoice as paid, cancelled, etc.
-6. **upload_file** — Register uploaded file for analysis
+5. **update_invoice_status** — Mark invoice as paid, cancelled, etc. (**CRITICAL:** status 0→1 submits to Hacienda via SII — irreversible)
+6. **convert_estimate_to_invoice** — Convert presupuesto to factura (borrador). Supports natural language: "convierte el último presupuesto a factura"
+7. **upload_file** — Register uploaded file for analysis
 
 ### Utility Tools (5)
 1. **generate_report** — PDF report with analysis
@@ -155,6 +156,11 @@ _fetch_one_val(c,k) # Fetches single scalar from either cursor type
 - `GET /api/products/web` — Products with `web_include=1` (id, name, sku, price, stock, kind) — consumed by `apps/web` catalog
 - `PATCH /api/entities/products/{id}/web-include` — Toggle `web_include` flag (`{"web_include": true|false}`)
 
+### Treasury & Payment Endpoints
+- `GET /api/treasury` — Fetch bank accounts from Holded API (id, name, type, iban, bankname)
+- `POST /api/documents/{docType}/{docId}/pay` — Register payment in Holded (body: `{date, amount, treasury, desc}`)
+- `POST /api/agent/convert-estimate` — Convert estimate to draft invoice via Safe Write Gateway (body: `{estimate_id}`)
+
 ### Amortizations Endpoints
 - `GET /api/products/{id}/pack-info` — Pack composition or pack membership
 - `GET /api/amortizations` — List all with calculated revenue/profit/ROI (includes pack-attributed revenue)
@@ -191,6 +197,19 @@ _fetch_one_val(c,k) # Fetches single scalar from either cursor type
 - Column resizer on data tables
 - Dark/light theme toggle
 
+### Entity Table Action Buttons
+Each entity view has a header "New" button linking to Holded web (e.g., "+ Nueva Factura").
+Row-level action buttons per entity:
+- **All documents:** PDF viewer, Holded edit link
+- **Estimates (status != 4):** "Facturar" — converts to draft invoice via gateway (`POST /api/agent/convert-estimate`)
+- **Invoices (status 1/2/4):** "Pagar" — opens payment modal with bank account selector (from `GET /api/treasury`), date, amount (pre-filled from `payments_pending`), description
+
+### Hacienda / SII Safety (CRITICAL)
+- Approving an invoice (borrador→aprobada, status 0→1) submits it to Hacienda via SII — **irreversible and legally binding**
+- All invoices are created as borrador — gateway NEVER sets `approveDoc`
+- Estimates/quotes are safe to approve — they do NOT go to Hacienda
+- `update_invoice_status` tool shows critical warning when status=1 is requested
+
 ### Frontend View Routing
 - `showView(name)` in app.js maps special views via `specialViews` dict
 - Entity views auto-route to `view-entity` + `loadEntityData()`
@@ -203,7 +222,7 @@ _fetch_one_val(c,k) # Fetches single scalar from either cursor type
 ### Environment Variables (.env)
 ```bash
 HOLDED_API_KEY=your_key_here            # Holded API key
-HOLDED_SAFE_MODE=true                   # Dry-run mode for writes
+HOLDED_SAFE_MODE=false                  # Dry-run mode for writes (LIVE since 2026-03-12)
 ANTHROPIC_API_KEY=sk-ant-...            # Claude API key (optional, can set in UI)
 
 # PostgreSQL (Supabase) — leave blank for SQLite dev mode
@@ -369,6 +388,10 @@ holded-connector/
 ├── api.py              # FastAPI server, all HTTP endpoints
 ├── connector.py        # DB abstraction, Holded API sync, all data access
 ├── ai_agent.py         # Claude tool_use agent, 19 tools, streaming
+├── write_gateway.py    # Safe Write Gateway — 6-stage pipeline for all Holded writes
+├── write_validators.py # Input validation, sanitization, status transitions
+├── write_preview.py    # Rich previews, warnings, reversibility assessment
+├── auth.py             # Triple-auth middleware (Supabase cookie + JWT + legacy token)
 ├── reports.py          # PDF/Excel report generation
 ├── inventory_matcher.py         # Generate Excel with fuzzy-matched products (phase 1)
 ├── link_matched_products.py     # Bulk link invoice_items to products + create amortizations
@@ -453,6 +476,12 @@ conn.close()
 - [x] Website integration — `web_include` field on products + `/api/products/web` endpoint (2026-03-09)
 - [x] Knowledge DB linking — 71 products mapped via `link_holded_to_knowledge.py` → `knowledge.holded_product_links` (2026-03-09)
 - [x] Merged catalog endpoint in `apps/web` — `GET /api/products/catalog` joins knowledge specs + Holded pricing (2026-03-09)
+- [x] Safe Write Gateway — 6-stage write pipeline (validate→preview→confirm→execute→sync→audit) with HMAC audit trail (2026-03-12)
+- [x] Convert estimate to invoice — gateway operation + AI tool + REST endpoint + UI button (2026-03-12)
+- [x] Hacienda/SII safety — critical warnings on invoice approval, never auto-approveDoc (2026-03-12)
+- [x] UI action buttons — pay invoice modal (treasury API), convert estimate, new document links to Holded web (2026-03-12)
+- [x] SAFE_MODE disabled — live writes to Holded API enabled (2026-03-12)
+- [x] Triple-auth middleware — Supabase cookie + JWT Bearer + legacy token (2026-03-12)
 
 ### Pending (Tasks 8+)
 - [ ] Create 34 new real products + fill cost prices (`products_processed.xlsx` Sheets 1 & 2)
@@ -469,8 +498,7 @@ conn.close()
 1. **Raw sqlite3 in api.py/ai_agent.py** — These files bypass the abstraction layer (migration pending)
 2. **No Real Streaming in Agent Loop** — Tool calls are non-streaming (full response before text)
 3. **Simple SQL Validation** — Regex-based, not foolproof
-4. **No Authentication** — Anyone with server access can use the AI
-5. **Rate Limiting** — 10 requests/min per IP (basic)
+4. **Rate Limiting** — 10 requests/min per IP (basic) + gateway rate limits per source
 6. **SAFE_MODE Simulation** — Doesn't actually call Holded, returns fake ID
 
 ---
@@ -522,5 +550,5 @@ See global `~/.claude/CLAUDE.md` for full rules. Document Holded connector chang
 
 ---
 
-**Last Updated:** 2026-03-09
-**Latest Milestone:** Website integration — `web_include` flag + `/api/products/web` price feed; 71 products linked to knowledge DB via `holded_product_links`; merged catalog endpoint live in `apps/web`
+**Last Updated:** 2026-03-12
+**Latest Milestone:** Safe Write Gateway (6-stage pipeline for all Holded writes) + UI action buttons (pay invoice, convert estimate, new document links) + Hacienda/SII safety controls + SAFE_MODE disabled (live writes)
