@@ -57,14 +57,21 @@ body.light-mode table th {
 body.light-mode table tr:hover {
     background: rgba(16, 185, 129, 0.06);
 }
-body.light-mode .nav-item {
+body.light-mode .nav-item,
+body.light-mode a.nav-item,
+body.light-mode a.nav-item:link,
+body.light-mode a.nav-item:visited {
     color: #64748b;
 }
-body.light-mode .nav-item:hover {
+body.light-mode .nav-item:hover,
+body.light-mode a.nav-item:hover {
     background: rgba(0, 0, 0, 0.04);
     color: #1e293b;
 }
-body.light-mode .nav-item.active {
+body.light-mode .nav-item.active,
+body.light-mode a.nav-item.active,
+body.light-mode a.nav-item.active:link,
+body.light-mode a.nav-item.active:visited {
     background: var(--primary);
     color: #fff;
 }
@@ -198,7 +205,11 @@ body {
     color: var(--primary);
 }
 
-.nav-item {
+/* Nav items — explicit overrides for <a> and <div> variants */
+.nav-item,
+a.nav-item,
+a.nav-item:link,
+a.nav-item:visited {
     padding: 0.375rem 0.75rem;
     margin-bottom: 0;
     border-radius: 8px;
@@ -209,16 +220,21 @@ body {
     font-size: 0.875rem;
     display: flex;
     align-items: center;
-    text-decoration: none;
+    text-decoration: none !important;
+    line-height: 1.4;
 }
 
-.nav-item:hover {
+.nav-item:hover,
+a.nav-item:hover {
     background: rgba(255, 255, 255, 0.06);
     color: var(--text-white);
-    text-decoration: none;
+    text-decoration: none !important;
 }
 
-.nav-item.active {
+.nav-item.active,
+a.nav-item.active,
+a.nav-item.active:link,
+a.nav-item.active:visited {
     background: var(--primary);
     color: #fff;
 }
