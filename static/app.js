@@ -332,7 +332,8 @@ function showView(viewName) {
         v.classList.remove('active');
         v.style.display = 'none'; // Backup for CSS
     });
-    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    // Only clear active from subnav tabs (not panel sidebar links)
+    document.querySelectorAll('#holdedSubnav .nav-item').forEach(n => n.classList.remove('active'));
 
     const specialViews = { 'overview': 'view-overview', 'setup': 'view-setup', 'amortizations': 'view-amortizations', 'analysis': 'view-analysis', 'backup': 'view-backup' };
     const targetViewId = specialViews[viewName] || 'view-entity';
