@@ -6,6 +6,7 @@ Receives pre-fetched data from validation context to avoid duplicate queries.
 """
 
 import logging
+import time
 import connector
 from write_validators import _row_to_dict
 
@@ -14,13 +15,15 @@ logger = logging.getLogger(__name__)
 
 # ── Line Item Calculations ───────────────────────────────────────────
 
+DEFAULT_TAX_PCT = 21  # Spanish standard IVA rate
+
 def _calculate_items(items, products_map=None):
     """Calculate line-by-line totals for invoice/estimate items."""
     calculated = []
     for item in items:
         units = float(item.get("units", 1))
         price = float(item.get("price", 0))
-        tax_pct = float(item.get("tax", 21))
+        tax_pct = float(item.get("tax", DEFAULT_TAX_PCT))
         discount_pct = float(item.get("discount", 0))
 
         line_subtotal = units * price
@@ -91,7 +94,7 @@ def _get_contact_warnings(contact, doc_type="invoice"):
                 })
             if unpaid and unpaid > 0:
                 warnings.append({
-                    "level": "critical",
+                    "level": "warning",
                     "code": "UNPAID_INVOICES",
                     "msg": f"Contact has {unpaid} unpaid invoice(s) totaling EUR {float(unpaid_total):,.2f}"
                 })
@@ -157,7 +160,8 @@ def _get_item_warnings(calculated_items, high_amount_threshold=5000):
 
 def _check_duplicate_recent(contact_id, grand_total, window_hours=24):
     """Check for similar documents created recently."""
-    import time
+    if not contact_id or grand_total <= 0:
+        return None
     cutoff = int(time.time()) - (window_hours * 3600)
     conn = connector.get_db()
     try:
@@ -175,7 +179,8 @@ def _check_duplicate_recent(contact_id, grand_total, window_hours=24):
                 "msg": f"Found {len(rows)} similar invoice(s) in last {window_hours}h for this contact"
             }
         return None
-    except Exception:
+    except Exception as e:
+        logger.warning(f"Duplicate check failed for contact {contact_id}: {e}")
         return None
     finally:
         connector.release_db(conn)

@@ -11,13 +11,16 @@ Usage:
 """
 
 import hashlib
+import hmac
 import json
 import logging
+import os
 import threading
 import time
 
 import connector
 import write_validators
+from write_validators import _sanitize_text
 import write_preview
 
 logger = logging.getLogger(__name__)
@@ -92,6 +95,12 @@ class RateLimiter:
 
 _rate_limiter = RateLimiter()
 
+# Operations that bypass the OPERATIONS registry (handled by api.py directly)
+PASSTHROUGH_OPERATIONS = frozenset({
+    "create_amortization", "update_amortization", "delete_amortization",
+    "toggle_web_include", "link_amortization_purchase",
+})
+
 # Daily budget counter
 _daily_budget = {"date": "", "count": 0, "lock": threading.Lock()}
 
@@ -111,9 +120,14 @@ def _check_daily_budget(max_budget=50):
 
 # ── Audit Checksum ───────────────────────────────────────────────────
 
+_AUDIT_SECRET = os.getenv("AUDIT_HMAC_SECRET", "").encode() or None
+
 def _compute_checksum(audit_id, timestamp, operation, entity_id, payload):
-    """SHA-256 checksum for audit log tamper detection."""
+    """HMAC-SHA256 checksum for audit log tamper detection.
+    Falls back to plain SHA-256 if AUDIT_HMAC_SECRET env var is not set."""
     data = f"{audit_id}|{timestamp}|{operation}|{entity_id}|{json.dumps(payload, sort_keys=True)}"
+    if _AUDIT_SECRET:
+        return hmac.new(_AUDIT_SECRET, data.encode(), hashlib.sha256).hexdigest()
     return hashlib.sha256(data.encode()).hexdigest()
 
 
@@ -125,25 +139,26 @@ def _build_holded_payload(operation, params):
         items = params.get("items", [])
         products = []
         for item in items:
-            p = {"name": item.get("name"), "units": item.get("units", 1),
+            p = {"name": _sanitize_text(item.get("name"), 200),
+                 "units": item.get("units", 1),
                  "subtotal": item.get("price")}
             if "tax" in item:
                 p["tax"] = item["tax"]
             if "desc" in item:
-                p["desc"] = item["desc"]
+                p["desc"] = _sanitize_text(item["desc"], 500)
             products.append(p)
 
         payload = {"contact": params.get("contact_id"), "products": products}
         if params.get("desc"):
-            payload["desc"] = params["desc"]
+            payload["desc"] = _sanitize_text(params["desc"], 1000)
         if params.get("date"):
             payload["date"] = params["date"]
         if params.get("notes"):
-            payload["notes"] = params["notes"]
+            payload["notes"] = _sanitize_text(params["notes"], 2000)
         return payload
 
     elif operation == "create_contact":
-        payload = {"name": params.get("name")}
+        payload = {"name": _sanitize_text(params.get("name"), 200)}
         # Holded API uses 'code' for NIF/CIF/VAT — map both 'code' and 'vat' params
         for field in ("email", "type", "phone", "mobile", "code", "tradeName", "isperson"):
             if params.get(field):
@@ -159,22 +174,26 @@ def _build_holded_payload(operation, params):
     elif operation == "send_document":
         payload = {"emails": params.get("emails")}
         if params.get("subject"):
-            payload["subject"] = params["subject"]
+            payload["subject"] = _sanitize_text(params["subject"], 200)
         if params.get("message"):
-            payload["message"] = params["message"]
+            payload["message"] = _sanitize_text(params["message"], 2000)
         return payload
 
-    return {}
+    return None
 
 
 def _resolve_endpoint(operation, params):
-    """Resolve endpoint template with params."""
+    """Resolve endpoint template with params. Raises ValueError if required params missing."""
     op = OPERATIONS[operation]
     endpoint = op.get("endpoint", "")
     if "{doc_type}" in endpoint:
-        endpoint = endpoint.replace("{doc_type}", params.get("doc_type", "invoice"))
+        doc_type = params.get("doc_type", "invoice")
+        endpoint = endpoint.replace("{doc_type}", doc_type)
     if "{doc_id}" in endpoint:
-        endpoint = endpoint.replace("{doc_id}", params.get("doc_id", ""))
+        doc_id = params.get("doc_id")
+        if not doc_id:
+            raise ValueError(f"doc_id required for operation {operation}")
+        endpoint = endpoint.replace("{doc_id}", doc_id)
     return endpoint
 
 
@@ -232,18 +251,17 @@ class WriteGateway:
         """
         start_time = time.time()
 
-        if operation not in OPERATIONS and operation not in (
-            "create_amortization", "update_amortization", "delete_amortization",
-            "toggle_web_include", "link_amortization_purchase",
-        ):
+        if operation not in OPERATIONS and operation not in PASSTHROUGH_OPERATIONS:
             return {"success": False, "errors": [{"field": "operation", "msg": f"Unknown operation: {operation}"}]}
 
         # ── Rate Limiting ────────────────────────────────────
-        if source == "ai_agent":
-            if not _rate_limiter.check(f"ai_{source}", 5, 60):
-                return {"success": False, "errors": [{"field": "rate_limit", "msg": "Rate limit exceeded: max 5 AI writes per minute"}]}
-            if not _check_daily_budget():
-                return {"success": False, "errors": [{"field": "daily_budget", "msg": "Daily write budget exhausted (max 50 AI writes per day)"}]}
+        # All sources get basic rate limiting; AI agent has tighter limits + daily budget
+        rate_limits = {"ai_agent": (5, 60), "rest_api": (30, 60), "cli_script": (60, 60)}
+        limit, window = rate_limits.get(source, (10, 60))
+        if not _rate_limiter.check(source, limit, window):
+            return {"success": False, "errors": [{"field": "rate_limit", "msg": f"Rate limit exceeded: max {limit} writes per minute for {source}"}]}
+        if source == "ai_agent" and not _check_daily_budget():
+            return {"success": False, "errors": [{"field": "daily_budget", "msg": "Daily write budget exhausted (max 50 AI writes per day)"}]}
 
         # ── Stage 1: Validate ────────────────────────────────
         is_valid, errors, context = write_validators.validate(operation, params)
@@ -310,15 +328,16 @@ class WriteGateway:
             connector.update_audit_log(audit_id, status="failed",
                                         error_detail="No response from Holded API",
                                         duration_ms=duration)
-            return {"success": False, "error": "No response from Holded API", "audit_id": audit_id}
+            return {"success": False, "errors": [{"field": "api", "msg": "No response from Holded API"}], "audit_id": audit_id}
 
         if result.get("error"):
-            status = "timeout" if "timed out" in str(result.get("detail", "")) else "failed"
+            detail = result.get("detail", "Unknown API error")
+            status = "timeout" if "timed out" in str(detail) else "failed"
             connector.update_audit_log(audit_id, status=status,
-                                        error_detail=result.get("detail"),
+                                        error_detail=detail,
                                         response_received=result,
                                         duration_ms=duration)
-            return {"success": False, "error": result.get("detail"), "audit_id": audit_id}
+            return {"success": False, "errors": [{"field": "api", "msg": str(detail)}], "audit_id": audit_id}
 
         # Success
         entity_id = result.get("id", "")

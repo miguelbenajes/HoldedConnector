@@ -7,6 +7,7 @@ The context dict carries pre-fetched DB data to avoid duplicate queries in previ
 
 import re
 import logging
+import time
 import connector
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,11 @@ def _sanitize_text(value, max_length=500):
     if not value:
         return value
     value = str(value).strip()
-    value = re.sub(r'<[^>]+>', '', value)  # strip HTML
+    # Iteratively strip HTML tags to handle nested constructs like <scr<script>ipt>
+    prev = None
+    while prev != value:
+        prev = value
+        value = re.sub(r'<[^>]+>', '', value)
     return value[:max_length]
 
 
@@ -61,8 +66,10 @@ def _validate_email(email):
     """Basic email format validation."""
     if not email:
         return None  # optional
+    if len(str(email)) > 254:  # RFC 5321 max email length
+        return {"field": "email", "msg": "Email too long (max 254 chars)"}
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    if not re.match(pattern, email):
+    if not re.match(pattern, str(email)):
         return {"field": "email", "msg": f"Invalid email format: {email}"}
     return None
 
@@ -81,15 +88,16 @@ def _validate_amount(value, field_name, min_val=0, max_val=999999.99):
 
 
 def _validate_date(value, field_name):
-    """Validate Unix timestamp is reasonable (2020-2027)."""
+    """Validate Unix timestamp is reasonable (2020 to ~2 years ahead)."""
     if value is None:
         return None  # optional
     try:
         ts = int(value)
     except (ValueError, TypeError):
         return {"field": field_name, "msg": f"{field_name} must be an integer (Unix timestamp)"}
-    if ts < 1577836800 or ts > 1798761600:  # 2020-01-01 to 2027-01-01
-        return {"field": field_name, "msg": f"{field_name} timestamp out of range (2020-2027)"}
+    max_ts = int(time.time()) + (2 * 365 * 86400)
+    if ts < 1577836800 or ts > max_ts:  # 2020-01-01 to ~2 years ahead
+        return {"field": field_name, "msg": f"{field_name} timestamp out of range"}
     return None
 
 
@@ -121,22 +129,12 @@ def _fetch_contact(contact_id):
         connector.release_db(conn)
 
 
-def _fetch_product(product_id):
-    """Fetch product from local DB. Returns dict or None."""
-    conn = connector.get_db()
-    try:
-        cursor = connector._cursor(conn)
-        cursor.execute(connector._q('SELECT * FROM products WHERE id = ?'), (product_id,))
-        row = cursor.fetchone()
-        return _row_to_dict(cursor, row)
-    finally:
-        connector.release_db(conn)
-
-
 def _fetch_products_batch(product_ids):
     """Fetch multiple products in one query. Returns {id: dict}."""
     if not product_ids:
         return {}
+    # Cap to prevent oversized IN clauses (items already limited to 100)
+    product_ids = list(set(product_ids))[:100]
     conn = connector.get_db()
     try:
         cursor = connector._cursor(conn)
@@ -226,8 +224,14 @@ def _validate_create_document(params, doc_type):
                 errors.append(err)
 
             tax = item.get("tax")
-            if tax is not None and int(tax) not in VALID_TAX_RATES:
-                errors.append({"field": f"items[{idx}].tax", "msg": f"Tax must be one of {VALID_TAX_RATES}"})
+            if tax is not None:
+                try:
+                    tax_int = int(tax)
+                except (ValueError, TypeError):
+                    errors.append({"field": f"items[{idx}].tax", "msg": "Tax must be numeric"})
+                    continue
+                if tax_int not in VALID_TAX_RATES:
+                    errors.append({"field": f"items[{idx}].tax", "msg": f"Tax must be one of {VALID_TAX_RATES}"})
 
             pid = item.get("product_id")
             if pid and pid not in products_map:
@@ -335,6 +339,10 @@ def validate_send_document(params):
     doc_id = params.get("doc_id")
 
     if doc_id:
+        id_err = _validate_holded_id(doc_id, "doc_id")
+        if id_err:
+            errors.append(id_err)
+            return (False, errors, context)
         doc = _fetch_document(doc_type, doc_id)
         if not doc:
             errors.append({"field": "doc_id", "msg": f"Document {doc_type}/{doc_id} not found"})
@@ -348,6 +356,8 @@ def validate_send_document(params):
         emails = [e.strip() for e in emails.split(",")]
     if not emails:
         errors.append({"field": "emails", "msg": "At least one email is required"})
+    elif len(emails) > 10:
+        errors.append({"field": "emails", "msg": "Maximum 10 recipients per send"})
     for email in emails:
         err = _validate_email(email)
         if err:
