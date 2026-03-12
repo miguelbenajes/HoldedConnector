@@ -787,12 +787,18 @@
                         nav.appendChild(el);
                     }
                 }
-                // Ensure Holded is highlighted as active (post-render for reliability)
-                nav.querySelectorAll('a.nav-item').forEach(function(a) {
-                    if (a.pathname.replace(/\/$/, '') === '/panel/holded') {
-                        a.classList.add('active');
-                    }
-                });
+                // Mark Holded as active in sidebar — delayed to survive showView race
+                function markHoldedActive() {
+                    nav.querySelectorAll('a.nav-item').forEach(function(a) {
+                        if (a.pathname.replace(/\/$/, '') === '/panel/holded') {
+                            a.classList.add('active');
+                        }
+                    });
+                }
+                markHoldedActive();
+                // Re-apply after showView settles (config load is async, races with menu)
+                setTimeout(markHoldedActive, 500);
+                setTimeout(markHoldedActive, 1500);
 
                 // User info + logout
                 if (data.user) {
