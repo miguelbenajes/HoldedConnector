@@ -66,6 +66,12 @@ OPERATIONS = {
         "entity_type": "file",
         "sync_type": None,
     },
+    "convert_estimate_to_invoice": {
+        "method": None,  # Custom multi-step execution
+        "entity_type": "invoice",
+        "sync_type": "document",
+        "sync_doc_type": "invoice",
+    },
 }
 
 
@@ -296,6 +302,13 @@ class WriteGateway:
         )
 
         # ── Stage 4: Execute on Holded API ───────────────────
+
+        # Custom multi-step: convert estimate to invoice
+        if operation == "convert_estimate_to_invoice":
+            return self._execute_convert_estimate(
+                params, context, preview_result, audit_id, start_time, source, conversation_id
+            )
+
         if operation not in OPERATIONS or OPERATIONS[operation].get("method") is None:
             # Local-only operation — mark success immediately
             duration = int((time.time() - start_time) * 1000)
@@ -384,6 +397,116 @@ class WriteGateway:
             "entity_id": entity_id,
             "entity_type": OPERATIONS[operation]["entity_type"],
             "doc_number": result.get("invoiceNum", ""),
+            "audit_id": audit_id,
+            "safe_mode": is_dry_run,
+        }
+
+    def _execute_convert_estimate(self, params, context, preview_result,
+                                   audit_id, start_time, source, conversation_id):
+        """Convert an estimate to an invoice (multi-step execution).
+
+        Steps:
+        1. Create invoice as borrador with estimate's items
+        2. Approve the estimate (status changes are safe for quotes)
+        3. Mark estimate as invoiced (status 4)
+        4. Sync-back the new invoice
+        """
+        estimate = context.get("estimate", {})
+        estimate_items = context.get("estimate_items", [])
+        estimate_id = estimate.get("id")
+
+        # Build invoice payload from estimate data
+        products = []
+        for item in estimate_items:
+            p = {
+                "name": _sanitize_text(item.get("name"), 200),
+                "units": item.get("units", 1),
+                "subtotal": item.get("price", 0),
+            }
+            if item.get("tax") is not None:
+                p["tax"] = item["tax"]
+            if item.get("desc"):
+                p["desc"] = _sanitize_text(item["desc"], 500)
+            if item.get("sku"):
+                p["sku"] = item["sku"]
+            products.append(p)
+
+        invoice_payload = {
+            "contact": estimate.get("contact_id"),
+            "products": products,
+        }
+        if estimate.get("desc"):
+            invoice_payload["desc"] = _sanitize_text(estimate["desc"], 1000)
+        if estimate.get("notes"):
+            invoice_payload["notes"] = _sanitize_text(estimate["notes"], 2000)
+        if estimate.get("date"):
+            invoice_payload["date"] = estimate["date"]
+
+        # Step 1: Create invoice as borrador (never approveDoc!)
+        result = connector.post_data("/invoicing/v1/documents/invoice", invoice_payload)
+
+        duration = int((time.time() - start_time) * 1000)
+
+        if not result or result.get("error"):
+            detail = result.get("detail", "No response") if result else "No response from Holded API"
+            connector.update_audit_log(audit_id, status="failed",
+                                        error_detail=f"Invoice creation failed: {detail}",
+                                        duration_ms=duration)
+            return {"success": False, "errors": [{"field": "api", "msg": str(detail)}], "audit_id": audit_id}
+
+        invoice_id = result.get("id", "")
+        is_dry_run = result.get("dry_run", False)
+
+        # Step 2+3: Approve estimate and mark as invoiced (safe — quotes don't go to Hacienda)
+        if not is_dry_run and estimate_id:
+            # Transition estimate through valid states to invoiced (4)
+            # Current status → need to reach 4: accepted(2) → invoiced(4)
+            current_status = estimate.get("status", 0)
+            transitions_needed = []
+            if current_status == 0:
+                transitions_needed = [1, 2, 4]  # draft → pending → accepted → invoiced
+            elif current_status == 1:
+                transitions_needed = [2, 4]      # pending → accepted → invoiced
+            elif current_status == 2:
+                transitions_needed = [4]          # accepted → invoiced
+            # status 3 (rejected) or 4 (already invoiced) — skip
+
+            for new_status in transitions_needed:
+                connector.put_data(
+                    f"/invoicing/v1/documents/estimate/{estimate_id}",
+                    {"status": new_status}
+                )
+
+        # Update audit log
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        checksum = _compute_checksum(audit_id, ts, "convert_estimate_to_invoice",
+                                      invoice_id, invoice_payload)
+
+        connector.update_audit_log(
+            audit_id,
+            status="dry_run" if is_dry_run else "success",
+            entity_id=invoice_id,
+            response_received=result,
+            checksum=checksum,
+            duration_ms=duration,
+        )
+
+        # Sync-back the new invoice
+        if not is_dry_run and invoice_id:
+            _sync_back_async("convert_estimate_to_invoice", invoice_id, {}, audit_id)
+
+        logger.info(
+            f"[GATEWAY] convert_estimate_to_invoice | estimate:{estimate_id} → "
+            f"invoice:{invoice_id} | duration:{duration}ms | "
+            f"status:{'dry_run' if is_dry_run else 'success'}"
+        )
+
+        return {
+            "success": True,
+            "entity_id": invoice_id,
+            "entity_type": "invoice",
+            "doc_number": result.get("invoiceNum", ""),
+            "estimate_id": estimate_id,
             "audit_id": audit_id,
             "safe_mode": is_dry_run,
         }

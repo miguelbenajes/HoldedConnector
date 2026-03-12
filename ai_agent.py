@@ -20,7 +20,7 @@ def _month_fmt(col="date"):
         return f"strftime('%Y-%m', datetime({col}, 'unixepoch'))"
     return f"to_char(to_timestamp({col}), 'YYYY-MM')"
 
-WRITE_TOOLS = {"create_estimate", "create_invoice", "send_document", "create_contact", "update_invoice_status", "upload_file"}
+WRITE_TOOLS = {"create_estimate", "create_invoice", "send_document", "create_contact", "update_invoice_status", "upload_file", "convert_estimate_to_invoice"}
 
 
 def get_tools_for_role(role: str = "admin") -> list:
@@ -316,6 +316,17 @@ TOOL_DEFINITIONS = [
                 "description": {"type": "string", "description": "Optional description of file contents"}
             },
             "required": ["filename"]
+        }
+    },
+    {
+        "name": "convert_estimate_to_invoice",
+        "description": "Convert an estimate (presupuesto/quote) to an invoice (factura). Creates a new invoice as BORRADOR with the same items, and marks the estimate as invoiced. The estimate is automatically approved (safe — quotes don't go to Hacienda).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "estimate_id": {"type": "string", "description": "The Holded ID of the estimate to convert"}
+            },
+            "required": ["estimate_id"]
         }
     }
 ]
@@ -788,6 +799,22 @@ def exec_update_invoice_status(params):
     return {"success": False, "error": result.get("error") or result.get("errors", "Unknown error")}
 
 
+def exec_convert_estimate_to_invoice(params):
+    """Convert estimate to invoice via WriteGateway."""
+    result = gateway.execute("convert_estimate_to_invoice", params, source="ai_agent", skip_confirm=True)
+    if result.get("success"):
+        return {
+            "success": True,
+            "safe_mode": result.get("safe_mode", False),
+            "invoice_id": result.get("entity_id", ""),
+            "doc_number": result.get("doc_number", ""),
+            "estimate_id": result.get("estimate_id", ""),
+            "message": "Converted (dry run)" if result.get("safe_mode") else
+                       f"Invoice {result.get('doc_number', '')} created as borrador. Estimate marked as invoiced.",
+        }
+    return {"success": False, "error": result.get("errors") or "Unknown error"}
+
+
 def exec_render_chart(params):
     return {
         "chart_type": params["chart_type"],
@@ -971,6 +998,7 @@ TOOL_EXECUTORS = {
     "list_files": exec_list_files,
     "upload_file": exec_upload_file,
     "get_amortization_status": exec_get_amortization_status,
+    "convert_estimate_to_invoice": exec_convert_estimate_to_invoice,
 }
 
 # ─── System Prompt Builder ───────────────────────────────────────────
@@ -1618,4 +1646,6 @@ def _describe_write_action(tool_name, tool_input):
         st = status_labels.get(new_status, str(new_status))
         hacienda_warn = " ⚠️ ENVIARÁ A HACIENDA" if new_status == 1 else ""
         return f"Update {tool_input.get('doc_type')} {tool_input.get('doc_id')} status to {st}{hacienda_warn}"
+    elif tool_name == "convert_estimate_to_invoice":
+        return f"Convert estimate {tool_input.get('estimate_id', '?')} to invoice (borrador)"
     return f"Execute {tool_name}"

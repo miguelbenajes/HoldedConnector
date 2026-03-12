@@ -219,6 +219,12 @@ REVERSIBILITY = {
         "can_reverse": True,
         "conditions": "File can be deleted from filesystem",
     },
+    "convert_estimate_to_invoice": {
+        "can_reverse": True,
+        "method": "DELETE",
+        "endpoint": "/invoicing/v1/documents/invoice/{id}",
+        "conditions": "Invoice can be deleted while in borrador. Estimate status change is permanent.",
+    },
 }
 
 
@@ -305,6 +311,41 @@ def build_preview(operation, params, context=None):
             "type": params.get("doc_type"),
         }
         preview["recipients"] = params.get("emails", [])
+
+    elif operation == "convert_estimate_to_invoice":
+        estimate = context.get("estimate", {})
+        contact = context.get("contact", {})
+        estimate_items = context.get("estimate_items", [])
+
+        # Build calculated items from estimate_items
+        calc_items = []
+        for item in estimate_items:
+            calc_items.append({
+                "name": item.get("name", ""),
+                "units": float(item.get("units", 1)),
+                "price": float(item.get("price", 0)),
+                "tax_pct": float(item.get("tax", DEFAULT_TAX_PCT)),
+            })
+        calculated = _calculate_items(calc_items)
+
+        grand_total = sum(i["line_total"] for i in calculated)
+
+        preview["estimate"] = {
+            "id": estimate.get("id"),
+            "doc_number": estimate.get("doc_number", ""),
+            "status": estimate.get("status", 0),
+        }
+        preview["contact"] = {
+            "id": contact.get("id", estimate.get("contact_id")),
+            "name": contact.get("name", estimate.get("contact_name", "Unknown")),
+        }
+        preview["items"] = calculated
+        preview["grand_total"] = round(grand_total, 2)
+        preview["currency"] = "EUR"
+        preview["note"] = "Invoice will be created as BORRADOR. Estimate will be marked as invoiced."
+
+        warnings.extend(_get_contact_warnings(contact, "invoice"))
+        warnings.extend(_get_item_warnings(calculated))
 
     reversibility = REVERSIBILITY.get(operation, {"can_reverse": False, "conditions": "Unknown"})
 

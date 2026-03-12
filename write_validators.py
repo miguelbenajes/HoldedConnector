@@ -366,6 +366,61 @@ def validate_send_document(params):
     return (len(errors) == 0, errors, context)
 
 
+def validate_convert_estimate_to_invoice(params):
+    """Validate estimate-to-invoice conversion."""
+    errors = []
+    context = {}
+
+    estimate_id = params.get("estimate_id")
+    id_err = _validate_holded_id(estimate_id, "estimate_id")
+    if id_err:
+        errors.append(id_err)
+        return (False, errors, context)
+
+    estimate = _fetch_document("estimate", estimate_id)
+    if not estimate:
+        errors.append({"field": "estimate_id", "msg": f"Estimate '{estimate_id}' not found"})
+        return (False, errors, context)
+
+    context["estimate"] = estimate
+
+    # Fetch estimate items
+    conn = connector.get_db()
+    try:
+        cursor = connector._cursor(conn)
+        cursor.execute(connector._q(
+            'SELECT * FROM estimate_items WHERE estimate_id = ?'
+        ), (estimate_id,))
+        rows = cursor.fetchall()
+        items = [_row_to_dict(cursor, r) for r in rows]
+        items = [i for i in items if i]  # filter None
+    finally:
+        connector.release_db(conn)
+
+    if not items:
+        errors.append({"field": "items", "msg": "Estimate has no line items to convert"})
+        return (False, errors, context)
+
+    context["estimate_items"] = items
+
+    # Check estimate isn't already invoiced
+    if estimate.get("status") == 4:
+        errors.append({"field": "status", "msg": "Estimate is already invoiced"})
+
+    # Fetch contact for the invoice creation
+    contact_id = estimate.get("contact_id")
+    if contact_id:
+        contact = _fetch_contact(contact_id)
+        if contact:
+            context["contact"] = contact
+        else:
+            errors.append({"field": "contact_id", "msg": f"Contact '{contact_id}' not found in database"})
+    else:
+        errors.append({"field": "contact_id", "msg": "Estimate has no associated contact"})
+
+    return (len(errors) == 0, errors, context)
+
+
 # ── Validator Registry ───────────────────────────────────────────────
 
 VALIDATORS = {
@@ -374,7 +429,7 @@ VALIDATORS = {
     "create_contact": validate_create_contact,
     "update_document_status": validate_update_document_status,
     "send_document": validate_send_document,
-    # upload_file: no Holded validation needed
+    "convert_estimate_to_invoice": validate_convert_estimate_to_invoice,
 }
 
 
