@@ -1094,6 +1094,7 @@ RULES:
 - Use render_chart to show inline charts when the user asks for visual data, trends, or comparisons.
 - Use get_overdue_invoices to find overdue/unpaid invoices.
 - Use compare_periods for period-over-period analysis (e.g., this month vs last month).
+- For convert_estimate_to_invoice: if the user refers to an estimate by contact name, date, or "the last one" instead of by ID, first use query_database to find the estimate ID (e.g., SELECT id, doc_number, contact_name, amount FROM estimates WHERE contact_name ILIKE '%name%' ORDER BY date DESC LIMIT 5), then use convert_estimate_to_invoice with the resolved ID.
 
 {skills_content}"""
 
