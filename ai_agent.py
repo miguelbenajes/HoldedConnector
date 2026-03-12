@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import anthropic
 import connector
 import reports
+from write_gateway import gateway
 
 logger = logging.getLogger(__name__)
 
@@ -604,70 +605,43 @@ def _prepare_line_items(items):
 
 
 def exec_create_estimate(params):
-    contact_id = params["contact_id"]
-    items = params.get("items", [])
-    if not items:
-        return {"error": "At least one line item is required"}
-
-    products = _prepare_line_items(items)
-    if not products:
-        return {"error": "No valid line items provided"}
-
-    payload = {"contact": contact_id, "desc": params.get("desc", ""), "products": products}
-    result = connector.post_data("/invoicing/v1/documents/estimate", payload)
-    if result and not result.get("error"):
-        is_safe = connector.SAFE_MODE
-        return {"success": True, "id": result.get("id", "SAFE_MODE"), "safe_mode": is_safe,
-                "message": "Estimate created (dry run)" if is_safe else "Estimate created successfully"}
-    else:
-        return {"success": False, "error": result.get("detail", "Unknown error") if result else "No response"}
+    """Create estimate via WriteGateway."""
+    result = gateway.execute("create_estimate", params, source="ai_agent", skip_confirm=True)
+    if result.get("success"):
+        return {
+            "success": True,
+            "id": result.get("entity_id", ""),
+            "doc_number": result.get("doc_number", ""),
+            "safe_mode": result.get("safe_mode", False),
+            "message": "Estimate created (dry run)" if result.get("safe_mode") else "Estimate created successfully",
+        }
+    return {"success": False, "error": result.get("error") or result.get("errors", "Unknown error")}
 
 
 def exec_create_invoice(params):
-    contact_id = params["contact_id"]
-    items = params.get("items", [])
-    if not items:
-        return {"error": "At least one line item is required"}
-
-    products = _prepare_line_items(items)
-    if not products:
-        return {"error": "No valid line items provided"}
-
-    payload = {"contact": contact_id, "desc": params.get("desc", ""), "products": products}
-    result = connector.create_invoice(payload)
-    if result and not (isinstance(result, dict) and result.get("error")):
-        is_safe = connector.SAFE_MODE
-        return {"success": True, "id": result, "safe_mode": is_safe,
-                "message": "Invoice created (dry run)" if is_safe else "Invoice created successfully"}
-    else:
-        return {"success": False, "error": result.get("detail", "Unknown error") if isinstance(result, dict) else "No response"}
+    """Create invoice via WriteGateway."""
+    result = gateway.execute("create_invoice", params, source="ai_agent", skip_confirm=True)
+    if result.get("success"):
+        return {
+            "success": True,
+            "id": result.get("entity_id", ""),
+            "doc_number": result.get("doc_number", ""),
+            "safe_mode": result.get("safe_mode", False),
+            "message": "Invoice created (dry run)" if result.get("safe_mode") else "Invoice created successfully",
+        }
+    return {"success": False, "error": result.get("error") or result.get("errors", "Unknown error")}
 
 
 def exec_send_document(params):
-    doc_type = params["doc_type"]
-    doc_id = params["doc_id"]
-
-    allowed_types = {"invoice", "purchase", "estimate", "creditnote", "proforma"}
-    if doc_type not in allowed_types:
-        return {"error": f"Unknown doc_type: {doc_type}"}
-    if not _re.match(r'^[a-zA-Z0-9]+$', doc_id):
-        return {"error": "Invalid document ID"}
-
-    payload = {}
-    if "emails" in params:
-        payload["emails"] = params["emails"]
-    if "subject" in params:
-        payload["subject"] = params["subject"]
-    if "body" in params:
-        payload["body"] = params["body"]
-
-    result = connector.post_data(f"/invoicing/v1/documents/{doc_type}/{doc_id}/send", payload)
-    if result and not result.get("error"):
-        is_safe = connector.SAFE_MODE
-        return {"success": True, "safe_mode": is_safe,
-                "message": "Document sent (dry run)" if is_safe else "Document sent successfully"}
-    else:
-        return {"success": False, "error": result.get("detail", "Unknown error") if result else "No response"}
+    """Send document via WriteGateway."""
+    result = gateway.execute("send_document", params, source="ai_agent", skip_confirm=True)
+    if result.get("success"):
+        return {
+            "success": True,
+            "safe_mode": result.get("safe_mode", False),
+            "message": "Document sent (dry run)" if result.get("safe_mode") else "Document sent successfully",
+        }
+    return {"success": False, "error": result.get("error") or result.get("errors", "Unknown error")}
 
 
 def exec_generate_report(params):
@@ -680,18 +654,16 @@ def exec_generate_report(params):
 
 
 def exec_create_contact(params):
-    payload = {"name": params["name"]}
-    for key in ["email", "type", "vat", "phone", "code"]:
-        if key in params:
-            payload[key] = params[key]
-
-    result = connector.create_contact(payload)
-    if result and not (isinstance(result, dict) and result.get("error")):
-        is_safe = connector.SAFE_MODE
-        return {"success": True, "id": result, "safe_mode": is_safe,
-                "message": "Contact created (dry run)" if is_safe else "Contact created successfully"}
-    else:
-        return {"success": False, "error": result.get("detail", "Unknown error") if isinstance(result, dict) else "No response"}
+    """Create contact via WriteGateway."""
+    result = gateway.execute("create_contact", params, source="ai_agent", skip_confirm=True)
+    if result.get("success"):
+        return {
+            "success": True,
+            "id": result.get("entity_id", ""),
+            "safe_mode": result.get("safe_mode", False),
+            "message": "Contact created (dry run)" if result.get("safe_mode") else "Contact created successfully",
+        }
+    return {"success": False, "error": result.get("error") or result.get("errors", "Unknown error")}
 
 
 def exec_get_overdue_invoices(params):
@@ -805,26 +777,15 @@ def exec_compare_periods(params):
 
 
 def exec_update_invoice_status(params):
-    doc_type = params["doc_type"]
-    doc_id = params["doc_id"]
-    status = params["status"]
-
-    type_map = {"invoice": "invoice", "purchase": "purchase"}
-    holded_type = type_map.get(doc_type)
-    if not holded_type:
-        return {"error": f"Unknown doc_type: {doc_type}"}
-    if not _re.match(r'^[a-zA-Z0-9]+$', doc_id):
-        return {"error": "Invalid document ID"}
-    if not isinstance(status, int) or status < 0 or status > 5:
-        return {"error": "Invalid status (must be 0-5)"}
-
-    result = connector.put_data(f"/invoicing/v1/documents/{holded_type}/{doc_id}", {"status": status})
-    if result and not result.get("error"):
-        is_safe = connector.SAFE_MODE
-        return {"success": True, "safe_mode": is_safe,
-                "message": f"Status updated to {status} (dry run)" if is_safe else f"Status updated to {status}"}
-    else:
-        return {"success": False, "error": result.get("detail", "Unknown error") if result else "No response"}
+    """Update document status via WriteGateway."""
+    result = gateway.execute("update_document_status", params, source="ai_agent", skip_confirm=True)
+    if result.get("success"):
+        return {
+            "success": True,
+            "safe_mode": result.get("safe_mode", False),
+            "message": "Status updated (dry run)" if result.get("safe_mode") else "Status updated successfully",
+        }
+    return {"success": False, "error": result.get("error") or result.get("errors", "Unknown error")}
 
 
 def exec_render_chart(params):
@@ -1275,6 +1236,13 @@ def chat(user_message, conversation_id=None, user_role="admin"):
                         # Build description for user
                         desc = _describe_write_action(tool_name, tool_input)
 
+                        # Run gateway validation + preview for write operations
+                        gateway_result = None
+                        op_name = tool_name
+                        if op_name == "update_invoice_status":
+                            op_name = "update_document_status"
+                        gateway_result = gateway.execute(op_name, tool_input, source="ai_agent", conversation_id=conversation_id)
+
                         with _pending_lock:
                             pending_actions[state_id] = {
                                 "messages": messages + [{"role": "assistant", "content": [b.model_dump() for b in response.content]}],
@@ -1283,7 +1251,8 @@ def chat(user_message, conversation_id=None, user_role="admin"):
                                 "expires_at": time.time() + 300,
                                 "model": model,
                                 "system_prompt": system_prompt,
-                                "user_message": user_message
+                                "user_message": user_message,
+                                "gateway_preview": gateway_result,  # Safe Write Gateway preview data
                             }
 
                         return {
@@ -1291,7 +1260,10 @@ def chat(user_message, conversation_id=None, user_role="admin"):
                             "action": {
                                 "tool": tool_name,
                                 "description": desc,
-                                "details": tool_input
+                                "details": tool_input,
+                                "preview": gateway_result.get("preview") if gateway_result else None,
+                                "warnings": gateway_result.get("warnings") if gateway_result else None,
+                                "reversibility": gateway_result.get("reversibility") if gateway_result else None,
                             },
                             "pending_state_id": state_id,
                             "conversation_id": conversation_id
@@ -1410,6 +1382,14 @@ def chat_stream(user_message, conversation_id=None, user_role="admin"):
                             state_id = str(uuid.uuid4())
                             _cleanup_pending()
                             desc = _describe_write_action(tool_name, tool_input)
+
+                            # Run gateway validation + preview for write operations
+                            gateway_result = None
+                            op_name = tool_name
+                            if op_name == "update_invoice_status":
+                                op_name = "update_document_status"
+                            gateway_result = gateway.execute(op_name, tool_input, source="ai_agent", conversation_id=conversation_id)
+
                             with _pending_lock:
                                 pending_actions[state_id] = {
                                     "messages": messages + [{"role": "assistant", "content": [b.model_dump() for b in response.content]}],
@@ -1418,10 +1398,18 @@ def chat_stream(user_message, conversation_id=None, user_role="admin"):
                                     "expires_at": time.time() + 300,
                                     "model": model,
                                     "system_prompt": system_prompt,
-                                    "user_message": user_message
+                                    "user_message": user_message,
+                                    "gateway_preview": gateway_result,  # Safe Write Gateway preview data
                                 }
                             yield {"event": "confirmation_needed", "data": json.dumps({
-                                "action": {"tool": tool_name, "description": desc, "details": tool_input},
+                                "action": {
+                                    "tool": tool_name,
+                                    "description": desc,
+                                    "details": tool_input,
+                                    "preview": gateway_result.get("preview") if gateway_result else None,
+                                    "warnings": gateway_result.get("warnings") if gateway_result else None,
+                                    "reversibility": gateway_result.get("reversibility") if gateway_result else None,
+                                },
                                 "pending_state_id": state_id,
                                 "conversation_id": conversation_id
                             })}
