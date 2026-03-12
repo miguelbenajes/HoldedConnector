@@ -472,6 +472,39 @@ def _init_db_inner(conn):
         )
     ''')
 
+    # ── Write Audit Log ──────────────────────────────────────────────
+    cursor.execute(f'''
+        CREATE TABLE IF NOT EXISTS write_audit_log (
+            id              {_serial},
+            timestamp       TEXT DEFAULT ({_now}),
+            source          TEXT NOT NULL,
+            operation       TEXT NOT NULL,
+            entity_type     TEXT NOT NULL,
+            entity_id       TEXT,
+            payload_sent    TEXT,
+            response_received TEXT,
+            preview_data    TEXT,
+            warnings        TEXT,
+            status          TEXT NOT NULL DEFAULT 'pending',
+            tables_synced   TEXT,
+            reverse_action  TEXT,
+            reverse_payload TEXT,
+            user_confirmed  BOOLEAN,
+            error_detail    TEXT,
+            safe_mode       BOOLEAN DEFAULT FALSE,
+            conversation_id TEXT,
+            checksum        TEXT,
+            duration_ms     INTEGER
+        )
+    ''')
+
+    # Audit log indexes
+    if not _USE_SQLITE:
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON write_audit_log(timestamp)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_entity ON write_audit_log(entity_type, entity_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_operation ON write_audit_log(operation)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_status ON write_audit_log(status)')
+
     # ── Column migrations (SQLite only — PG creates all columns upfront) ──────
     if _USE_SQLITE:
         for col, definition in [
@@ -2097,6 +2130,75 @@ def get_amortization_summary():
         "amortized_count": amortized_count,
         "in_progress_count": len(rows) - amortized_count
     }
+
+
+# ── Write Audit Log Helpers ──────────────────────────────────────────
+
+def insert_audit_log(source, operation, entity_type, payload_sent=None,
+                     preview_data=None, warnings=None, status='pending',
+                     safe_mode=False, conversation_id=None):
+    """Insert a new audit log entry. Returns the new row ID."""
+    conn = get_db()
+    try:
+        cursor = _cursor(conn)
+        insert_params = (source, operation, entity_type,
+               json.dumps(payload_sent) if payload_sent else None,
+               json.dumps(preview_data) if preview_data else None,
+               json.dumps(warnings) if warnings else None,
+               status, safe_mode, conversation_id)
+        if _USE_SQLITE:
+            cursor.execute('''
+                INSERT INTO write_audit_log
+                    (source, operation, entity_type, payload_sent, preview_data,
+                     warnings, status, safe_mode, conversation_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', insert_params)
+            audit_id = cursor.lastrowid
+        else:
+            cursor.execute('''
+                INSERT INTO write_audit_log
+                    (source, operation, entity_type, payload_sent, preview_data,
+                     warnings, status, safe_mode, conversation_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+            ''', insert_params)
+            row = cursor.fetchone()
+            audit_id = row['id'] if row else None
+        conn.commit()
+        return audit_id
+    except Exception as e:
+        logger.error(f"Failed to insert audit log: {e}")
+        conn.rollback()
+        return None
+    finally:
+        release_db(conn)
+
+
+def update_audit_log(audit_id, **kwargs):
+    """Update an existing audit log entry. Accepts any column as kwarg."""
+    if not audit_id:
+        return
+    json_fields = {'payload_sent', 'response_received', 'preview_data',
+                   'warnings', 'tables_synced', 'reverse_action', 'reverse_payload'}
+    conn = get_db()
+    try:
+        cursor = _cursor(conn)
+        sets = []
+        vals = []
+        for k, v in kwargs.items():
+            sets.append(f'{k} = {_q("?")}')
+            if k in json_fields and v is not None and not isinstance(v, str):
+                vals.append(json.dumps(v))
+            else:
+                vals.append(v)
+        vals.append(audit_id)
+        cursor.execute(_q(f'UPDATE write_audit_log SET {", ".join(sets)} WHERE id = ?'), vals)
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Failed to update audit log {audit_id}: {e}")
+        conn.rollback()
+    finally:
+        release_db(conn)
 
 
 if __name__ == "__main__":
