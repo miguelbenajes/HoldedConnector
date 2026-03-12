@@ -169,6 +169,7 @@ def extract_jwt_from_cookies(cookie_header: str) -> Optional[str]:
     # Decode to get access_token from session JSON
     try:
         decoded = unquote(token_data)
+        logger.info("Cookie raw (first 200 chars): %s", decoded[:200])
         # @supabase/ssr stores session as JSON (possibly base64-encoded)
         try:
             session = json.loads(decoded)
