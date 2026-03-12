@@ -81,6 +81,10 @@ _fetch_one_val(c,k) # Fetches single scalar from either cursor type
 - `ai_favorites` — Saved queries (id, query, label, created_at)
 - `settings` — Key-value configuration (key TEXT PRIMARY KEY, value TEXT)
 
+### Job Tracker Tables
+- `jobs` — One row per project code (PK: project_code), tracks client, shooting dates, quarter, estimate/invoice refs, Obsidian note path, status (open/shooting/invoiced/closed)
+- `job_note_queue` — Pending Obsidian note sync queue (retry_count, processed_at)
+
 ### Analysis Tables
 - `amortizations` — Rental ROI tracking (product_id UNIQUE, purchase_price, purchase_date, notes)
 - `purchase_analysis` — AI-categorized purchases (purchase_id UNIQUE, category, subcategory, confidence)
@@ -160,6 +164,14 @@ _fetch_one_val(c,k) # Fetches single scalar from either cursor type
 - `GET /api/treasury` — Fetch bank accounts from Holded API (id, name, type, iban, bankname)
 - `POST /api/documents/{docType}/{docId}/pay` — Register payment in Holded (body: `{date, amount, treasury, desc}`)
 - `POST /api/agent/convert-estimate` — Convert estimate to draft invoice via Safe Write Gateway (body: `{estimate_id}`)
+
+### Job Tracker Endpoints
+- `GET /api/jobs` — List jobs (filter: status, quarter)
+- `POST /api/jobs` — Create job (Brain entry point)
+- `GET /api/jobs/{code}` — Job detail + expenses
+- `PATCH /api/jobs/{code}` — Update status/dates/invoice
+- `POST /api/jobs/{code}/sync-note` — Force re-render to Obsidian
+- `POST /api/jobs/flush-queue` — Process pending note queue
 
 ### Amortizations Endpoints
 - `GET /api/products/{id}/pack-info` — Pack composition or pack membership
@@ -414,7 +426,9 @@ holded-connector/
 │   ├── products_final_review.xlsx      # Output: Expenses matched to inventory
 │   └── products_for_import.xlsx        # Output: Master file ready for import
 ├── docs/plans/         # Migration/design documents
-├── skills/             # AI skill templates
+├── skills/
+│   ├── __init__.py
+│   └── job_tracker.py           # Job dossier system: date parser, note renderer, Obsidian sync
 └── static/
     ├── index.html      # Main HTML (single-page app)
     ├── app.js          # All frontend logic (~2400 lines)
@@ -482,6 +496,7 @@ conn.close()
 - [x] UI action buttons — pay invoice modal (treasury API), convert estimate, new document links to Holded web (2026-03-12)
 - [x] SAFE_MODE disabled — live writes to Holded API enabled (2026-03-12)
 - [x] Triple-auth middleware — Supabase cookie + JWT Bearer + legacy token (2026-03-12)
+- [x] Job tracker — Obsidian dossier per project with PDF, expenses, checklist (2026-03-12)
 
 ### Pending (Tasks 8+)
 - [ ] Create 34 new real products + fill cost prices (`products_processed.xlsx` Sheets 1 & 2)
