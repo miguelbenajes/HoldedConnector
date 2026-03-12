@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 import connector
 import reports
 import ai_agent
+from write_gateway import gateway
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -1517,6 +1518,95 @@ def agent_send_document(doc_type: str, doc_id: str, body: SendDocumentBody):
     if result:
         return {"success": True, "safe_mode": safe}
     return {"success": False, "error": "Failed to send document", "safe_mode": safe}
+
+
+class ConvertEstimateBody(BaseModel):
+    estimate_id: str = Field(..., min_length=24, max_length=24)
+
+
+@app.post("/api/agent/convert-estimate")
+def agent_convert_estimate(body: ConvertEstimateBody):
+    """Convert an estimate to a draft invoice via the Safe Write Gateway."""
+    result = gateway.execute(
+        "convert_estimate_to_invoice",
+        {"estimate_id": body.estimate_id},
+        source="rest_api",
+        skip_confirm=True,
+    )
+    if result.get("success"):
+        return {
+            "success": True,
+            "invoice_id": result.get("result", {}).get("invoice_id", ""),
+        }
+    return JSONResponse(
+        status_code=400,
+        content={
+            "success": False,
+            "error": result.get("error", "Conversion failed"),
+            "errors": result.get("errors", []),
+        }
+    )
+
+
+# ── Treasury & Payment endpoints ─────────────────────────────────────────────
+
+@app.get("/api/treasury")
+def get_treasury_accounts():
+    """Fetch bank/treasury accounts from Holded API."""
+    try:
+        url = f"{connector.BASE_URL}/invoicing/v1/treasury"
+        response = requests.get(url, headers=connector.HEADERS, timeout=15)
+        if response.status_code == 200:
+            accounts = response.json()
+            # Return only safe fields
+            return [
+                {
+                    "id": a.get("id", ""),
+                    "name": a.get("name", ""),
+                    "type": a.get("type", ""),
+                    "iban": a.get("iban", ""),
+                    "bankname": a.get("bankname", ""),
+                }
+                for a in accounts
+            ]
+        return JSONResponse(
+            status_code=response.status_code,
+            content={"error": f"Holded API returned {response.status_code}"}
+        )
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Treasury fetch failed: {e}")
+        return JSONResponse(status_code=502, content={"error": "Failed to reach Holded API"})
+
+
+class PayDocumentBody(BaseModel):
+    date: int = Field(..., description="Payment date as Unix timestamp")
+    amount: float = Field(..., description="Payment amount in EUR")
+    treasury: str = Field(..., description="Treasury/bank account ID from Holded")
+    desc: str = Field("", description="Payment description")
+
+
+@app.post("/api/documents/{doc_type}/{doc_id}/pay")
+def pay_document(doc_type: str, doc_id: str, body: PayDocumentBody):
+    """Register a payment against an invoice/purchase in Holded."""
+    allowed_types = {"invoice", "purchase"}
+    if doc_type not in allowed_types:
+        return JSONResponse(status_code=400, content={"error": "doc_type must be 'invoice' or 'purchase'"})
+    if not _re_mod.match(r'^[a-f0-9]{24}$', doc_id):
+        return JSONResponse(status_code=400, content={"error": "Invalid document ID format"})
+    if body.amount <= 0:
+        return JSONResponse(status_code=400, content={"error": "Amount must be positive"})
+
+    payload = {
+        "date": body.date,
+        "amount": body.amount,
+        "treasury": body.treasury,
+        "desc": body.desc,
+    }
+    result = connector.post_data(f"/invoicing/v1/documents/{doc_type}/{doc_id}/pay", payload)
+    if result and not result.get("error"):
+        return {"success": True, "result": result, "safe_mode": connector.SAFE_MODE}
+    detail = result.get("detail", "Unknown error") if result else "No response"
+    return JSONResponse(status_code=502, content={"success": False, "error": detail})
 
 
 # ── Backup endpoints (REMOVED — security risk: exposed full DB without auth) ──

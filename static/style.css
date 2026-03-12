@@ -883,6 +883,30 @@ td {
     box-shadow: 0 0 15px var(--primary);
 }
 
+.action-btn.btn-convert {
+    font-size: 0.82rem;
+    padding: 4px 8px;
+    border-color: var(--secondary);
+    color: var(--secondary);
+}
+.action-btn.btn-convert:hover {
+    background: var(--secondary);
+    color: #fff;
+    box-shadow: 0 0 12px rgba(59, 130, 246, 0.4);
+}
+
+.action-btn.btn-pay {
+    font-size: 0.82rem;
+    padding: 4px 8px;
+    border-color: var(--primary);
+    color: var(--primary);
+}
+.action-btn.btn-pay:hover {
+    background: var(--primary);
+    color: #fff;
+    box-shadow: 0 0 12px rgba(16, 185, 129, 0.4);
+}
+
 #entitySearch {
     background: transparent;
     border: none;

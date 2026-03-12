@@ -384,6 +384,38 @@ async function loadEntityData(entity) {
     if (datePickerEl) datePickerEl.style.visibility = isFinancial ? 'visible' : 'hidden';
 
     document.getElementById('entityViewTitle').textContent = titleMap[entity] || 'Entity Details';
+
+    // Dynamic "New" header buttons per entity type
+    var existingNewBtn = document.getElementById('entityNewBtn');
+    if (existingNewBtn) existingNewBtn.remove();
+    const holdedNewUrls = {
+        'invoices':  'https://app.holded.com/sales#open:invoice-new',
+        'estimates': 'https://app.holded.com/sales#open:estimate-new',
+        'purchases': 'https://app.holded.com/purchases#open:purchase-new',
+        'contacts':  'https://app.holded.com/contacts/new',
+        'products':  'https://app.holded.com/inventory/products/new',
+    };
+    var newUrl = holdedNewUrls[entity];
+    if (newUrl) {
+        var newBtnLabels = {
+            'invoices': '+ Nueva Factura',
+            'estimates': '+ Nuevo Presupuesto',
+            'purchases': '+ Nueva Compra',
+            'contacts': '+ Nuevo Contacto',
+            'products': '+ Nuevo Producto',
+        };
+        var newBtn = document.createElement('a');
+        newBtn.id = 'entityNewBtn';
+        newBtn.className = 'sync-btn';
+        newBtn.href = newUrl;
+        newBtn.target = '_blank';
+        newBtn.rel = 'noopener noreferrer';
+        newBtn.textContent = newBtnLabels[entity] || '+ Nuevo';
+        newBtn.style.cssText = 'text-decoration:none;display:inline-flex;align-items:center';
+        var filterControls = document.querySelector('#view-entity .filter-controls');
+        if (filterControls) filterControls.insertBefore(newBtn, filterControls.firstChild);
+    }
+
     const thead = document.getElementById('entityThead');
     const tbody = document.getElementById('entityTbody');
 
@@ -690,6 +722,31 @@ function renderEntityTable(entity) {
                 pdfBtn.textContent = '👁️ PDF';
                 pdfBtn.addEventListener('click', (function(ent, rid) { return function(e) { e.stopPropagation(); openPdfModal(ent, rid); }; })(entity, row.id));
                 wrap.appendChild(pdfBtn);
+            }
+
+            // Entity-specific action buttons
+            if (entity === 'estimates' && row.status !== 4) {
+                var convertBtn = document.createElement('button');
+                convertBtn.className = 'action-btn btn-convert';
+                convertBtn.title = 'Convertir a factura';
+                convertBtn.textContent = '📄 Facturar';
+                convertBtn.addEventListener('click', (function(rid, docNum) { return function(e) {
+                    e.stopPropagation();
+                    confirmConvertEstimate(rid, docNum);
+                }; })(row.id, row.doc_number || row.id));
+                wrap.appendChild(convertBtn);
+            }
+
+            if (entity === 'invoices' && [1, 2, 4].includes(parseInt(row.status))) {
+                var payBtn = document.createElement('button');
+                payBtn.className = 'action-btn btn-pay';
+                payBtn.title = 'Registrar pago';
+                payBtn.textContent = '💰 Pagar';
+                payBtn.addEventListener('click', (function(rid, amt) { return function(e) {
+                    e.stopPropagation();
+                    openPayModal(rid, amt);
+                }; })(row.id, row.amount || 0));
+                wrap.appendChild(payBtn);
             }
 
             var hUrl = holdedUrl(entity, row.id);
@@ -3343,4 +3400,127 @@ function renderAgingTable() {
         </tr>`;
     }).join('');
     liveSearch('agingSearch', 'agingBody');
+}
+
+// ============================================================
+//  PAY INVOICE MODAL
+// ============================================================
+
+let _treasuryCache = null;
+
+async function fetchTreasury() {
+    if (_treasuryCache) return _treasuryCache;
+    try {
+        const res = await safeFetch('/api/treasury');
+        _treasuryCache = await res.json();
+        return _treasuryCache;
+    } catch (e) {
+        console.error('Failed to fetch treasury accounts:', e);
+        return [];
+    }
+}
+
+function _setSelectPlaceholder(sel, text) {
+    sel.textContent = '';
+    var opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = text;
+    sel.appendChild(opt);
+}
+
+async function openPayModal(docId, pendingAmount) {
+    document.getElementById('payDocId').value = docId;
+    document.getElementById('payDocType').value = 'invoice';
+    document.getElementById('payAmount').value = pendingAmount > 0 ? pendingAmount.toFixed(2) : '';
+    document.getElementById('payDesc').value = '';
+    document.getElementById('payError').textContent = '';
+
+    // Set today's date
+    var today = new Date().toISOString().slice(0, 10);
+    document.getElementById('payDate').value = today;
+
+    // Populate treasury dropdown
+    var sel = document.getElementById('payTreasury');
+    _setSelectPlaceholder(sel, 'Cargando...');
+    document.getElementById('payModal').style.display = 'flex';
+
+    var accounts = await fetchTreasury();
+    sel.textContent = '';
+    if (accounts.length === 0) {
+        _setSelectPlaceholder(sel, 'Sin cuentas disponibles');
+        return;
+    }
+    accounts.forEach(function(a) {
+        var opt = document.createElement('option');
+        opt.value = a.id;
+        var label = a.name;
+        if (a.iban) label += ' (' + a.iban.slice(-4) + ')';
+        opt.textContent = label;
+        sel.appendChild(opt);
+    });
+}
+
+function closePayModal() {
+    document.getElementById('payModal').style.display = 'none';
+}
+
+async function submitPayment() {
+    var docId = document.getElementById('payDocId').value;
+    var docType = document.getElementById('payDocType').value;
+    var treasury = document.getElementById('payTreasury').value;
+    var dateStr = document.getElementById('payDate').value;
+    var amount = parseFloat(document.getElementById('payAmount').value);
+    var desc = document.getElementById('payDesc').value.trim();
+    var errEl = document.getElementById('payError');
+    errEl.textContent = '';
+
+    if (!treasury) { errEl.textContent = 'Selecciona una cuenta bancaria'; return; }
+    if (!dateStr) { errEl.textContent = 'La fecha es obligatoria'; return; }
+    if (!amount || amount <= 0) { errEl.textContent = 'El importe debe ser mayor que 0'; return; }
+
+    // Convert date to Unix timestamp (start of day UTC)
+    var dateTs = Math.floor(new Date(dateStr + 'T00:00:00').getTime() / 1000);
+
+    try {
+        var res = await fetch('/api/documents/' + encodeURIComponent(docType) + '/' + encodeURIComponent(docId) + '/pay', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ date: dateTs, amount: amount, treasury: treasury, desc: desc })
+        });
+        var data = await res.json();
+        if (res.ok && data.success) {
+            closePayModal();
+            loadEntityData('invoices');
+        } else {
+            errEl.textContent = data.error || 'Error al registrar el pago';
+        }
+    } catch (e) {
+        errEl.textContent = 'Error de red: ' + e.message;
+    }
+}
+
+// ============================================================
+//  CONVERT ESTIMATE TO INVOICE
+// ============================================================
+
+async function confirmConvertEstimate(estimateId, docNumber) {
+    var label = docNumber || estimateId;
+    if (!confirm('Convertir presupuesto ' + label + ' a factura?\n\nSe creara la factura como borrador.')) return;
+
+    try {
+        var res = await fetch('/api/agent/convert-estimate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ estimate_id: estimateId })
+        });
+        var data = await res.json();
+        if (res.ok && data.success) {
+            alert('Factura creada correctamente (borrador).\nID: ' + (data.invoice_id || ''));
+            loadEntityData('estimates');
+        } else {
+            alert('Error: ' + (data.error || JSON.stringify(data.errors || data)));
+        }
+    } catch (e) {
+        alert('Error de red: ' + e.message);
+    }
 }
