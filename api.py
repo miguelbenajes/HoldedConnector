@@ -680,6 +680,14 @@ def toggle_web_include(product_id: str, payload: WebIncludeToggle):
         cursor = connector._cursor(conn)
         cursor.execute(connector._q('UPDATE products SET web_include = ? WHERE id = ?'), (web_include, product_id))
         conn.commit()
+        connector.insert_audit_log(
+            source="rest_api",
+            operation="toggle_web_include",
+            entity_type="product",
+            entity_id=product_id,
+            payload_sent={"web_include": payload.web_include},
+            status="success",
+        )
         return {"ok": True, "web_include": bool(web_include)}
     finally:
         connector.release_db(conn)
@@ -1072,6 +1080,14 @@ def create_amortization(body: AmortizationCreate):
         raise HTTPException(status_code=400, detail=str(e))
     if new_id is None:
         raise HTTPException(status_code=409, detail="Product already tracked in amortizations")
+    connector.insert_audit_log(
+        source="rest_api",
+        operation="create_amortization",
+        entity_type="amortization",
+        entity_id=str(new_id),
+        payload_sent=body.dict(),
+        status="success",
+    )
     return {"status": "success", "id": new_id}
 
 VALID_PRODUCT_TYPES = {"alquiler", "venta", "servicio", "gasto"}
@@ -1094,6 +1110,14 @@ def update_amortization(amort_id: int, body: AmortizationUpdate):
     if not ok:
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Amortization not found")
+    connector.insert_audit_log(
+        source="rest_api",
+        operation="update_amortization",
+        entity_type="amortization",
+        entity_id=str(amort_id),
+        payload_sent=body.dict(),
+        status="success",
+    )
     return {"status": "success"}
 
 @app.delete("/api/amortizations/{amort_id}")
@@ -1102,6 +1126,14 @@ def delete_amortization(amort_id: int):
     if not ok:
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Amortization not found")
+    connector.insert_audit_log(
+        source="rest_api",
+        operation="delete_amortization",
+        entity_type="amortization",
+        entity_id=str(amort_id),
+        payload_sent={"amort_id": amort_id},
+        status="success",
+    )
     return {"status": "success"}
 
 
@@ -1208,6 +1240,70 @@ def delete_amortization_purchase(link_id: int):
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Purchase link not found")
     return {"status": "success"}
+
+
+# ────────────── Audit Log Endpoints ──────────────
+
+@app.get("/api/audit-log")
+def list_audit_log(limit: int = 50, offset: int = 0, operation: str = None,
+                   entity_type: str = None, status: str = None):
+    """List recent write audit log entries with optional filters."""
+    conn = connector.get_db()
+    try:
+        cursor = connector._cursor(conn)
+        where = []
+        vals = []
+        if operation:
+            where.append(connector._q("operation = ?"))
+            vals.append(operation)
+        if entity_type:
+            where.append(connector._q("entity_type = ?"))
+            vals.append(entity_type)
+        if status:
+            where.append(connector._q("status = ?"))
+            vals.append(status)
+
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        vals.extend([limit, offset])
+
+        cursor.execute(connector._q(f'''
+            SELECT id, timestamp, source, operation, entity_type, entity_id,
+                   status, safe_mode, duration_ms, error_detail
+            FROM write_audit_log {where_sql}
+            ORDER BY id DESC LIMIT ? OFFSET ?
+        '''), tuple(vals))
+        rows = cursor.fetchall()
+        from write_validators import _row_to_dict
+        return [_row_to_dict(cursor, r) for r in rows] if rows else []
+    finally:
+        connector.release_db(conn)
+
+
+@app.get("/api/audit-log/{audit_id}")
+def get_audit_log_detail(audit_id: int):
+    """Get full audit log entry including payload, preview, warnings, and reverse action."""
+    conn = connector.get_db()
+    try:
+        cursor = connector._cursor(conn)
+        cursor.execute(connector._q(
+            'SELECT * FROM write_audit_log WHERE id = ?'
+        ), (audit_id,))
+        row = cursor.fetchone()
+        if not row:
+            return {"error": "Audit entry not found"}
+        from write_validators import _row_to_dict
+        entry = _row_to_dict(cursor, row)
+        # Parse JSON fields for structured output
+        for field in ('payload_sent', 'response_received', 'preview_data',
+                      'warnings', 'tables_synced', 'reverse_action', 'reverse_payload'):
+            if entry.get(field) and isinstance(entry[field], str):
+                try:
+                    entry[field] = json.loads(entry[field])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        return entry
+    finally:
+        connector.release_db(conn)
 
 
 # ────────────── Invoice Analysis Endpoints ──────────────
