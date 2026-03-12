@@ -184,6 +184,16 @@ body {
     height: 100vh;
 }
 
+/* Reset all <a> tags inside sidebar — override browser defaults */
+.sidebar a,
+.sidebar a:link,
+.sidebar a:visited,
+.sidebar a:hover,
+.sidebar a:active {
+    color: inherit;
+    text-decoration: none;
+}
+
 /* Sidebar — compact, matches Next.js panel sidebar */
 .sidebar {
     width: 208px;
