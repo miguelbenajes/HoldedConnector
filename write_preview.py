@@ -280,13 +280,22 @@ def build_preview(operation, params, context=None):
 
     elif operation == "update_document_status":
         doc = context.get("document", {})
-        status_labels = {0: "draft", 1: "issued", 2: "partial", 3: "paid", 4: "overdue", 5: "cancelled"}
+        status_labels = {0: "borrador", 1: "aprobada", 2: "partial", 3: "paid", 4: "overdue", 5: "cancelled"}
+        old_status = doc.get("status", 0)
+        new_status = params.get("status")
         preview["document"] = {
             "id": params.get("doc_id"),
             "doc_number": doc.get("doc_number", ""),
-            "current_status": status_labels.get(doc.get("status"), "unknown"),
-            "new_status": status_labels.get(params.get("status"), "unknown"),
+            "current_status": status_labels.get(old_status, "unknown"),
+            "new_status": status_labels.get(new_status, "unknown"),
         }
+        # CRITICAL: Approving an invoice (borrador→aprobada) submits it to Hacienda via SII
+        if old_status == 0 and new_status == 1:
+            warnings.append({
+                "level": "critical",
+                "code": "HACIENDA_SUBMISSION",
+                "msg": "APROBAR esta factura la enviará a Hacienda (SII). Esta acción es IRREVERSIBLE."
+            })
 
     elif operation == "send_document":
         doc = context.get("document", {})

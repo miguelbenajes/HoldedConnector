@@ -236,13 +236,13 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "update_invoice_status",
-        "description": "Update the status of an invoice or purchase invoice in Holded (e.g., mark as paid). In safe mode, simulates without writing.",
+        "description": "Update the status of an invoice or purchase invoice in Holded. CRITICAL: Changing from borrador(0) to aprobada(1) submits to Hacienda (SII) — IRREVERSIBLE. NEVER approve without explicit user confirmation.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "doc_type": {"type": "string", "enum": ["invoice", "purchase"]},
                 "doc_id": {"type": "string", "description": "The document ID"},
-                "status": {"type": "integer", "description": "New status: 0=draft, 1=issued, 2=partial, 3=paid, 4=overdue, 5=cancelled"}
+                "status": {"type": "integer", "description": "New status: 0=borrador, 1=aprobada (HACIENDA!), 2=partial, 3=paid, 4=overdue, 5=cancelled"}
             },
             "required": ["doc_type", "doc_id", "status"]
         }
@@ -1613,7 +1613,9 @@ def _describe_write_action(tool_name, tool_input):
     elif tool_name == "create_contact":
         return f"Create contact: {tool_input.get('name', 'Unknown')}"
     elif tool_name == "update_invoice_status":
-        status_labels = {0: "draft", 1: "issued", 2: "partial", 3: "paid", 4: "overdue", 5: "cancelled"}
-        st = status_labels.get(tool_input.get("status"), str(tool_input.get("status")))
-        return f"Update {tool_input.get('doc_type')} {tool_input.get('doc_id')} status to {st}"
+        status_labels = {0: "borrador", 1: "aprobada", 2: "partial", 3: "paid", 4: "overdue", 5: "cancelled"}
+        new_status = tool_input.get("status")
+        st = status_labels.get(new_status, str(new_status))
+        hacienda_warn = " ⚠️ ENVIARÁ A HACIENDA" if new_status == 1 else ""
+        return f"Update {tool_input.get('doc_type')} {tool_input.get('doc_id')} status to {st}{hacienda_warn}"
     return f"Execute {tool_name}"
