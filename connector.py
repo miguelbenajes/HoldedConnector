@@ -966,6 +966,267 @@ def sync_payments():
         release_db(conn)
     logger.info(f"Synced {len(data)} payments.")
 
+
+# ---------------------------------------------------------------------------
+# Single-entity sync helpers — used by Write Gateway for sync-back after writes
+# ---------------------------------------------------------------------------
+
+def _upsert_single_document(cursor, doc, table, items_table, fk_column):
+    """Upsert a single document + its line items into local DB.
+
+    Reuses the same field mapping and SQL patterns as sync_documents().
+    `doc` is a single Holded document dict (from GET /documents/{type}/{id}).
+
+    IMPORTANT: Invoices use 13 columns (includes payments_pending, payments_total,
+    due_date). Estimates and purchases use only 10 columns (no payment fields).
+    This mirrors the branching in sync_documents() at line 708.
+    """
+    doc_id = doc.get('id')
+    if not doc_id:
+        return
+
+    # Build ledger account map for human-readable account names (like sync_documents lines 697-702)
+    acc_map = {}
+    try:
+        cursor.execute(_q('SELECT id, name, num FROM ledger_accounts'))
+        for r in cursor.fetchall():
+            name = r[1] if isinstance(r, tuple) else r['name']
+            num = r[2] if isinstance(r, tuple) else r.get('num')
+            rid = r[0] if isinstance(r, tuple) else r['id']
+            acc_map[rid] = f"{name} ({num})" if num else name
+    except Exception:
+        pass  # No ledger accounts loaded yet — fall through to raw ID
+
+    is_invoice = (table == 'invoices')
+
+    if is_invoice:
+        # Invoices: 13 columns including payment fields
+        vals = (
+            doc_id,
+            doc.get('contact'),
+            doc.get('contactName'),
+            doc.get('desc', ''),
+            doc.get('date'),
+            _num(doc.get('total')),
+            doc.get('status', 0),
+            _num(doc.get('paymentsPending')),
+            _num(doc.get('paymentsTotal')),
+            doc.get('dueDate'),
+            doc.get('docNumber', ''),
+            json.dumps(doc.get('tags') or []),
+            doc.get('notes', '')
+        )
+
+        if _USE_SQLITE:
+            cursor.execute(f'''
+                INSERT OR REPLACE INTO {table}
+                    (id, contact_id, contact_name, "desc", date, amount, status,
+                     payments_pending, payments_total, due_date, doc_number, tags, notes)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ''', vals)
+        else:
+            cursor.execute(f'''
+                INSERT INTO {table}
+                    (id, contact_id, contact_name, "desc", date, amount, status,
+                     payments_pending, payments_total, due_date, doc_number, tags, notes)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (id) DO UPDATE SET
+                    contact_id=EXCLUDED.contact_id, contact_name=EXCLUDED.contact_name,
+                    "desc"=EXCLUDED."desc", date=EXCLUDED.date, amount=EXCLUDED.amount,
+                    status=EXCLUDED.status, payments_pending=EXCLUDED.payments_pending,
+                    payments_total=EXCLUDED.payments_total, due_date=EXCLUDED.due_date,
+                    doc_number=EXCLUDED.doc_number, tags=EXCLUDED.tags, notes=EXCLUDED.notes
+            ''', vals)
+    else:
+        # Estimates & purchases: 10 columns (no payment fields)
+        vals = (
+            doc_id,
+            doc.get('contact'),
+            doc.get('contactName'),
+            doc.get('desc', ''),
+            doc.get('date'),
+            _num(doc.get('total')),
+            doc.get('status', 0),
+            doc.get('docNumber', ''),
+            json.dumps(doc.get('tags') or []),
+            doc.get('notes', '')
+        )
+
+        if _USE_SQLITE:
+            cursor.execute(f'''
+                INSERT OR REPLACE INTO {table}
+                    (id, contact_id, contact_name, "desc", date, amount, status,
+                     doc_number, tags, notes)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
+            ''', vals)
+        else:
+            cursor.execute(f'''
+                INSERT INTO {table}
+                    (id, contact_id, contact_name, "desc", date, amount, status,
+                     doc_number, tags, notes)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (id) DO UPDATE SET
+                    contact_id=EXCLUDED.contact_id, contact_name=EXCLUDED.contact_name,
+                    "desc"=EXCLUDED."desc", date=EXCLUDED.date, amount=EXCLUDED.amount,
+                    status=EXCLUDED.status,
+                    doc_number=EXCLUDED.doc_number, tags=EXCLUDED.tags, notes=EXCLUDED.notes
+            ''', vals)
+
+    # Items: delete + re-insert
+    cursor.execute(_q(f'DELETE FROM {items_table} WHERE {fk_column} = ?'), (doc_id,))
+    for prod in doc.get('products', []):
+        retention = extract_ret(prod)
+        acc_id = prod.get('accountCode') or prod.get('accountName') or prod.get('account')
+        # Resolve ledger account ID to human-readable name (like sync_documents line 760)
+        account = acc_map.get(acc_id, acc_id)
+        cursor.execute(_q(f'''
+            INSERT INTO {items_table}
+                ({fk_column}, product_id, name, sku, units, price, subtotal,
+                 discount, tax, retention, account, project_id, kind)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        '''), (doc_id, prod.get('productId'), prod.get('name'), prod.get('sku'),
+               _num(prod.get('units')), _num(prod.get('price')), _num(prod.get('subtotal')),
+               _num(prod.get('discount')), _num(prod.get('tax')), _num(retention), account,
+               prod.get('projectid'), prod.get('kind')))
+
+
+def _upsert_single_contact(cursor, contact):
+    """Upsert a single contact into local DB."""
+    cid = contact.get('id')
+    if not cid:
+        return
+
+    vals = (
+        cid,
+        contact.get('name', ''),
+        contact.get('email', ''),
+        contact.get('type', ''),
+        contact.get('code', ''),
+        contact.get('vat', ''),
+        contact.get('phone', ''),
+        contact.get('mobile', '')
+    )
+
+    if _USE_SQLITE:
+        cursor.execute('''
+            INSERT OR REPLACE INTO contacts
+                (id, name, email, type, code, vat, phone, mobile)
+            VALUES (?,?,?,?,?,?,?,?)
+        ''', vals)
+    else:
+        cursor.execute('''
+            INSERT INTO contacts
+                (id, name, email, type, code, vat, phone, mobile)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (id) DO UPDATE SET
+                name=EXCLUDED.name, email=EXCLUDED.email, type=EXCLUDED.type,
+                code=EXCLUDED.code, vat=EXCLUDED.vat, phone=EXCLUDED.phone,
+                mobile=EXCLUDED.mobile
+        ''', vals)
+
+
+def _upsert_single_product(cursor, product):
+    """Upsert a single product into local DB."""
+    pid = product.get('id')
+    if not pid:
+        return
+
+    vals = (
+        pid,
+        product.get('name', ''),
+        product.get('desc', ''),
+        _num(product.get('price')),
+        _num(product.get('stock')),
+        product.get('sku', ''),
+        product.get('kind', 'simple')
+    )
+
+    if _USE_SQLITE:
+        cursor.execute('''
+            INSERT OR REPLACE INTO products
+                (id, name, "desc", price, stock, sku, kind)
+            VALUES (?,?,?,?,?,?,?)
+        ''', vals)
+    else:
+        cursor.execute('''
+            INSERT INTO products
+                (id, name, "desc", price, stock, sku, kind)
+            VALUES (%s,%s,%s,%s,%s,%s,%s)
+            ON CONFLICT (id) DO UPDATE SET
+                name=EXCLUDED.name, "desc"=EXCLUDED."desc", price=EXCLUDED.price,
+                stock=EXCLUDED.stock, sku=EXCLUDED.sku, kind=EXCLUDED.kind
+        ''', vals)
+
+
+def sync_single_document(doc_type, doc_id):
+    """Fetch one document from Holded and upsert into local DB. Returns tables updated."""
+    table_map = {
+        "invoice":  ("invoices", "invoice_items", "invoice_id"),
+        "estimate": ("estimates", "estimate_items", "estimate_id"),
+        "purchase": ("purchase_invoices", "purchase_items", "purchase_id"),
+    }
+    if doc_type not in table_map:
+        logger.error(f"Unknown doc_type for sync: {doc_type}")
+        return []
+
+    table, items_table, fk_col = table_map[doc_type]
+    data = fetch_data(f"/invoicing/v1/documents/{doc_type}/{doc_id}")
+    if not data:
+        logger.warning(f"Sync-back: no data returned for {doc_type}/{doc_id}")
+        return []
+
+    conn = get_db()
+    try:
+        cursor = _cursor(conn)
+        _upsert_single_document(cursor, data, table, items_table, fk_col)
+        conn.commit()
+        return [table, items_table]
+    except Exception as e:
+        logger.error(f"Sync-back failed for {doc_type}/{doc_id}: {e}")
+        conn.rollback()
+        return []
+    finally:
+        release_db(conn)
+
+
+def sync_single_contact(contact_id):
+    """Fetch one contact from Holded and upsert into local DB."""
+    data = fetch_data(f"/invoicing/v1/contacts/{contact_id}")
+    if not data:
+        return []
+    conn = get_db()
+    try:
+        cursor = _cursor(conn)
+        _upsert_single_contact(cursor, data)
+        conn.commit()
+        return ["contacts"]
+    except Exception as e:
+        logger.error(f"Sync-back failed for contact/{contact_id}: {e}")
+        conn.rollback()
+        return []
+    finally:
+        release_db(conn)
+
+
+def sync_single_product(product_id):
+    """Fetch one product from Holded and upsert into local DB."""
+    data = fetch_data(f"/invoicing/v1/products/{product_id}")
+    if not data:
+        return []
+    conn = get_db()
+    try:
+        cursor = _cursor(conn)
+        _upsert_single_product(cursor, data)
+        conn.commit()
+        return ["products"]
+    except Exception as e:
+        logger.error(f"Sync-back failed for product/{product_id}: {e}")
+        conn.rollback()
+        return []
+    finally:
+        release_db(conn)
+
+
 def post_data(endpoint, payload):
     """POST to Holded API. Returns dict with 'error' key on failure."""
     if SAFE_MODE:
