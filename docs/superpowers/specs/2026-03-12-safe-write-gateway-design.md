@@ -28,6 +28,8 @@ The holded-connector is Miguel's core invoicing system (Holded ERP). The AI agen
 4. **Full reversibility** — Every write stores enough info to generate an undo action
 5. **Validate before execute** — Block invalid operations before they reach Holded
 6. **Fail safe** — If any post-write step fails (sync, audit), the write still succeeds but errors are logged and surfaced
+7. **Defense in depth** — Multiple independent safety layers (validation, confirmation, audit, rate limiting) so no single failure compromises safety
+8. **Least privilege** — AI agent tools only expose the minimum operations needed; dangerous operations (bulk delete, schema changes) are never exposed
 
 ---
 
@@ -348,6 +350,18 @@ For delete operations: remove from local DB tables after Holded confirms deletio
 
 For status updates: re-fetch the document and update the local record.
 
+#### Sync-Back Performance Optimizations
+
+1. **Async sync-back:** The sync-back fetch runs after the Holded API returns success. It should NOT block the response to the user. Run it in a background thread and update the audit log when complete. The user sees the success immediately; the local DB updates within 1-2 seconds.
+
+2. **Connection pooling for sync-back:** Single-entity fetches should reuse the existing DB connection from the gateway pipeline rather than opening a new one. Pass the connection through the pipeline context.
+
+3. **Skip sync-back for send_document:** Sending an email doesn't change any data — no need to fetch the document back.
+
+4. **Skip sync-back for delete operations:** After a successful delete, just DELETE from local DB. No need to fetch from Holded (the entity is gone).
+
+5. **Conditional sync-back for status updates:** Only re-fetch if the status change affects calculated fields (e.g., `payments_pending`). For simple draft→issued transitions, update the status column directly without a Holded fetch.
+
 ### Stage 6: Audit Log
 
 #### Table Schema
@@ -412,6 +426,8 @@ holded-connector/
 - Operation registry mapping operation names to their config (endpoint, method, entity_type, tables)
 - Error handling and recovery logic
 - Safe mode integration
+- **Pipeline context:** A `dict` passed through all stages to share DB lookups (contact data, product data) — avoids duplicate queries between validate and preview
+- **Single DB connection per pipeline:** Opens one connection at start, passes through all stages, commits at end. No per-stage connection overhead.
 
 #### `write_validators.py`
 - One validation function per operation type
@@ -419,14 +435,16 @@ holded-connector/
 - `validate_create_contact(params)` → returns `(is_valid, errors[])`
 - Status transition map and validator
 - Shared helpers: `_contact_exists(id)`, `_product_exists(id)`, `_document_exists(type, id)`
+- **Performance:** Validation and preview share DB lookups. Validation fetches the contact/product rows and passes them forward to the preview stage via a shared `context` dict — avoiding duplicate queries.
 
 #### `write_preview.py`
-- `build_preview(operation, params)` → returns preview dict
-- `generate_warnings(operation, params)` → returns warnings array
+- `build_preview(operation, params, context)` → returns preview dict (receives pre-fetched data from validation)
+- `generate_warnings(operation, params, context)` → returns warnings array
 - Contact enrichment (resolve name, check unpaid invoices)
 - Product enrichment (check stock, resolve pack info)
 - Line item calculation (subtotals, taxes, grand total)
 - Reversibility assessment per operation type
+- **Performance:** Warning queries (unpaid invoices count, recent duplicates) run as a single batch query with `UNION ALL`, not N+1 individual queries. Product stock checks for all line items run as a single `WHERE id IN (...)` query.
 
 ### Modified Files
 
@@ -610,20 +628,169 @@ The chat confirmation dialog needs to render:
 
 ---
 
-## 11. Configuration
+## 11. Security
+
+### 11.1 Input Sanitization
+
+All parameters entering the gateway are sanitized before reaching Holded API or local DB:
+
+| Field Type | Sanitization |
+|------------|-------------|
+| `contact_id`, `product_id`, entity IDs | Regex: `/^[a-f0-9]{24}$/` (Holded MongoDB ObjectId format). Reject anything else. |
+| `name`, `desc`, text fields | Strip leading/trailing whitespace. Max length 500 chars. No HTML tags (strip with `bleach` or regex). |
+| `email` | RFC 5322 validation via `email-validator` library. |
+| `amount`, `price`, `units` | Must be numeric. Reject NaN, Infinity. Clamp to reasonable range (0–999,999.99). |
+| `date` (Unix timestamp) | Must be integer. Reject dates before 2020 or more than 1 year in the future. |
+| `status` | Integer, must be in allowed set per doc type. |
+| `tax` | Must be in `{0, 4, 10, 21}` (Spanish tax rates). |
+| `items` array | Max 100 items per document. Reject empty names. |
+
+### 11.2 Rate Limiting (Write Operations)
+
+Gateway-level rate limiting, independent of the existing 10 req/min API rate limit:
+
+| Scope | Limit | Window | Action on exceed |
+|-------|-------|--------|-----------------|
+| AI agent writes | 5 writes | per minute | Block + warn in chat |
+| AI agent writes | 20 writes | per hour | Block + warn in chat |
+| REST API writes | 30 writes | per minute | HTTP 429 |
+| Same entity writes | 3 writes | per 5 minutes | Block + warn "rapid modification detected" |
+| Delete operations | 5 deletes | per hour | Block + require manual confirmation even for REST |
+
+Implementation: In-memory counter dict keyed by `(source, operation)` with sliding window. No external dependencies.
+
+### 11.3 AI Agent Guardrails
+
+The AI agent has additional constraints beyond the gateway:
+
+| Guard | Description |
+|-------|-------------|
+| **No bulk operations** | AI tools can only create/modify ONE entity per call. No batch endpoints exposed. |
+| **No schema access** | AI cannot run DDL (CREATE/ALTER/DROP TABLE). `query_database` tool already blocks non-SELECT. |
+| **Amount ceiling** | AI cannot create invoices exceeding EUR 10,000 without explicit user override in the confirmation dialog. |
+| **Daily write budget** | Max 50 AI-initiated writes per day. Counter resets at midnight. Configurable via `WRITE_AI_DAILY_BUDGET`. |
+| **No self-confirmation** | AI cannot confirm its own pending actions — only the human user can. This is enforced by the `pending_actions` flow (state_id required from frontend). |
+| **Payload integrity** | The payload stored at confirmation time is the payload executed. AI cannot modify the action between preview and execution — the gateway re-validates but uses the stored payload, not a new one from the agent. |
+
+### 11.4 Audit Log Integrity
+
+| Protection | Description |
+|------------|-------------|
+| **Append-only** | No UPDATE or DELETE on `write_audit_log` except for status transitions (`pending` → `success`/`failed`). No endpoint exposes audit deletion. |
+| **Tamper detection** | Each audit entry stores a SHA-256 hash of `(id, timestamp, operation, entity_id, payload_sent)`. Hash is verified on read by the audit viewer. |
+| **Retention** | Audit entries are never auto-deleted. `WRITE_AUDIT_RETENTION_DAYS` controls the default query window, not deletion. |
+
+### 11.5 Prompt Injection Defense
+
+The AI agent constructs write operations from user chat input. A malicious or accidental prompt could attempt to:
+
+| Attack Vector | Defense |
+|---------------|---------|
+| **"Create 1000 invoices"** | AI tools create ONE entity per call. Even if the agent loops, the daily budget (50) and rate limit (5/min) cap the damage. |
+| **"Create invoice for €0.01 to drain stock"** | Minimum amount validation: `price >= 1.00` for invoice items (configurable via `WRITE_MIN_ITEM_PRICE`). Zero-price items allowed only for `kind='service'`. |
+| **"Delete all contacts"** | Delete tools process one entity at a time. Rate limit: 5 deletes/hour. No bulk delete tool exists. |
+| **"Update status to 99"** | Status must be in the allowed set per doc type. Invalid values rejected at validation. |
+| **"Create contact with SQL in name"** | All text fields are parameterized queries (never string-interpolated). Holded API also rejects invalid input. |
+| **"Send invoice to attacker@evil.com"** | `send_document` requires confirmation. The preview shows the recipient email prominently. User must approve. |
+| **Agent tool confusion** | Tools have strict JSON schemas. The gateway re-validates params independently of what the AI thinks it passed — the AI's interpretation doesn't bypass validation. |
+
+### 11.6 Replay & TOCTOU Protection
+
+| Risk | Defense |
+|------|---------|
+| **Replay attack on pending_actions** | `state_id` is a UUID, used exactly once (popped from `pending_actions` dict after use). Cannot be replayed. |
+| **TOCTOU (time-of-check-time-of-use)** | Validation runs at preview time (Stage 2). Between preview and execution (up to 5 min), the state could change (e.g., contact deleted). The gateway **re-validates** at execution time (Stage 4) using the same validators. If re-validation fails, the action is blocked and the user is informed. |
+| **Expired pending action** | `pending_actions` entries expire after 5 minutes. `_cleanup_pending()` removes stale entries. Confirming an expired action returns an error, not a silent failure. |
+| **Concurrent modification** | `_pending_lock` (threading.Lock) prevents race conditions on the `pending_actions` dict. The gateway also uses a per-entity lock during execution to prevent two writes to the same entity_id simultaneously. |
+
+### 11.7 Holded API Key Protection
+
+| Protection | Description |
+|------------|-------------|
+| **Never in logs** | API key is masked in all log output (`HOLDED_***`). |
+| **Never in audit** | Audit `payload_sent` strips the `key` header before storage. |
+| **Never in previews** | Preview objects contain no authentication data. |
+| **Never in error responses** | Error details from Holded are sanitized before returning to frontend. |
+
+---
+
+## 12. Performance Budget & Monitoring
+
+### 12.1 Latency Targets
+
+The gateway adds overhead to every write. These are the target latencies per stage:
+
+| Stage | Target Latency | Notes |
+|-------|---------------|-------|
+| 1. Validate | < 50ms | 1-3 DB queries (batched) |
+| 2. Preview + Warn | < 100ms | Reuses validation context, batch warning queries |
+| 3. Confirm/Log | < 10ms | In-memory dict operation + audit INSERT |
+| 4. Execute (Holded API) | 500-2000ms | Network call, outside our control |
+| 5. Sync-back | 500-1500ms | **Async** — does not block response |
+| 6. Audit update | < 10ms | Single UPDATE query |
+| **Total (user-perceived)** | **< 2.2s** | Stages 1-4 + 6 (sync-back is async) |
+
+Without the gateway, a raw Holded API write takes 500-2000ms. The gateway adds ~170ms of overhead (validate + preview + audit) — acceptable for the safety it provides.
+
+### 12.2 Pipeline Instrumentation
+
+Every gateway execution logs timing per stage to `server.log`:
+
+```
+[GATEWAY] create_invoice | validate:32ms preview:67ms execute:1203ms sync:async audit:4ms | total:1306ms | status:success
+```
+
+If any stage exceeds 2x its target latency, log a warning:
+
+```
+[GATEWAY][SLOW] preview:245ms (target:100ms) for create_invoice — check warning query performance
+```
+
+### 12.3 Audit Log Size Management
+
+The audit log stores full payloads and previews. Estimated row size:
+
+| Field | Avg Size |
+|-------|----------|
+| `payload_sent` | ~500 bytes (typical invoice JSON) |
+| `response_received` | ~200 bytes |
+| `preview_data` | ~1 KB (includes resolved contact, items, warnings) |
+| **Total per row** | ~2 KB |
+
+At 50 writes/day max: ~100 KB/day, ~36 MB/year. No size concern for PostgreSQL.
+
+For SQLite dev mode: monthly cleanup of entries older than `WRITE_AUDIT_RETENTION_DAYS` via a scheduled task (not auto-delete — move to archive table).
+
+### 12.4 Connection Efficiency
+
+| Optimization | Impact |
+|-------------|--------|
+| Single DB connection per pipeline | Eliminates 4-5 connection handshakes per write |
+| Shared validation→preview context | Eliminates 2-3 duplicate queries per write |
+| Batch `IN (...)` queries for items | Reduces N product lookups to 1 query |
+| Async sync-back | Reduces user-perceived latency by 500-1500ms |
+| Re-use existing `fetch_data()` for sync-back | No new HTTP client needed |
+
+---
+
+## 14. Configuration
 
 New settings (can be stored in `settings` table or `.env`):
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `WRITE_HIGH_AMOUNT_THRESHOLD` | 5000 | EUR amount that triggers HIGH_AMOUNT warning |
+| `WRITE_AI_AMOUNT_CEILING` | 10000 | EUR max for AI-created documents without override |
 | `WRITE_DUPLICATE_WINDOW_HOURS` | 24 | Hours to check for duplicate documents |
-| `WRITE_AUDIT_RETENTION_DAYS` | 365 | Days to keep audit log entries |
+| `WRITE_AUDIT_RETENTION_DAYS` | 365 | Default audit query window (entries never deleted) |
 | `WRITE_CONFIRM_CLI` | true | Whether CLI scripts require y/n confirmation |
+| `WRITE_AI_DAILY_BUDGET` | 50 | Max AI-initiated writes per day |
+| `WRITE_RATE_LIMIT_PER_MIN` | 5 | AI write rate limit per minute |
+| `WRITE_MIN_ITEM_PRICE` | 1.00 | Minimum price per invoice item (0 allowed for services) |
 
 ---
 
-## 12. Testing Strategy
+## 15. Testing Strategy
 
 ### Unit Tests
 - Each validator function: valid inputs pass, invalid inputs return correct errors
@@ -644,9 +811,29 @@ New settings (can be stored in `settings` table or `.env`):
 - Verify audit log written even on failure
 - Verify reverse actions are correctly stored
 
+### Security Tests
+- Input sanitization: inject HTML/SQL in name fields → stripped/parameterized
+- Entity ID format: pass non-ObjectId strings → rejected
+- Rate limiting: burst 10 writes in 1 second → 5 succeed, 5 blocked with 429
+- Daily budget: exhaust 50 writes → subsequent writes blocked
+- Amount ceiling: AI creates invoice > EUR 10,000 → blocked without override
+- Replay: reuse state_id after confirmation → rejected
+- TOCTOU: delete contact between preview and confirmation → re-validation blocks execution
+- Concurrent: two writes to same entity simultaneously → one succeeds, one waits
+- Audit integrity: verify SHA-256 hash on stored audit entries
+- API key: verify key never appears in logs, audit, or error responses
+- Minimum price: create invoice item with price=0.001 → rejected for non-service items
+
+### Performance Tests
+- Pipeline latency: full write cycle < 2.2s (excluding Holded API time)
+- Validation stage: < 50ms with 10 line items
+- Preview stage: < 100ms with warning queries
+- Async sync-back: verify response returns before sync completes
+- Batch queries: 20-item invoice uses single product lookup query, not 20
+
 ---
 
-## 13. Migration Plan
+## 16. Migration Plan
 
 ### Phase 0 — Prerequisites (connector.py fixes)
 1. Fix `post_data()` / `put_data()` to accept HTTP 201 as success
