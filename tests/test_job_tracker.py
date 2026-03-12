@@ -101,3 +101,65 @@ class TestSanitizeForMarkdown:
     def test_pipe(self):
         result = sanitize_for_markdown("col1 | col2")
         assert "\\|" in result
+
+
+from skills.job_tracker import render_job_note
+
+
+class TestRenderJobNote:
+    def test_basic_render(self):
+        job = {
+            "project_code": "NETFLIX-260315",
+            "client_name": "Netflix Spain",
+            "client_email": "prod@netflix.com",
+            "status": "open",
+            "shooting_dates_raw": "15/3-18/3",
+            "shooting_dates": '["2026-03-15", "2026-03-16", "2026-03-17", "2026-03-18"]',
+            "created_at": "2026-03-12",
+            "estimate_id": "abc123",
+            "estimate_number": "QUOTE-26/0015",
+            "invoice_id": None,
+            "invoice_number": None,
+        }
+        result = render_job_note(job, expenses=[])
+        assert "NETFLIX-260315" in result
+        assert "Netflix Spain" in result
+        assert "prod@netflix.com" in result
+        assert "project_code: NETFLIX-260315" in result
+        assert "## Quote" in result
+        assert "## Expenses" in result
+        assert "## Invoicing Checklist" in result
+
+    def test_with_expenses(self):
+        job = {
+            "project_code": "TEST-260101",
+            "client_name": "Test Client",
+            "client_email": "",
+            "status": "shooting",
+            "shooting_dates_raw": "1/1",
+            "shooting_dates": '["2026-01-01"]',
+            "created_at": "2026-01-01",
+            "estimate_id": None,
+            "estimate_number": None,
+            "invoice_id": None,
+            "invoice_number": None,
+        }
+        expenses = [
+            {"date": 1704067200, "name": "Taxi", "amount": 25.0, "doc_number": "EXP-001"},
+            {"date": 1704153600, "name": "Lunch", "amount": 18.5, "doc_number": "EXP-002"},
+        ]
+        result = render_job_note(job, expenses)
+        assert "Taxi" in result
+        assert "25" in result
+        assert "43.5" in result or "43.50" in result
+
+    def test_status_emoji(self):
+        for status, emoji in [("open", "🟢"), ("shooting", "🎬"), ("invoiced", "📄"), ("closed", "✅")]:
+            job = {
+                "project_code": "T-1", "client_name": "", "client_email": "",
+                "status": status, "shooting_dates_raw": "", "shooting_dates": "[]",
+                "created_at": "", "estimate_id": None, "estimate_number": None,
+                "invoice_id": None, "invoice_number": None,
+            }
+            result = render_job_note(job, [])
+            assert emoji in result
