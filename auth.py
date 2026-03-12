@@ -206,17 +206,35 @@ class PanelUser(NamedTuple):
     is_active: bool
 
 
-def lookup_user(auth_id: str, get_connection) -> Optional[PanelUser]:
+# Separate connection to the main Supabase project for panel.panel_users.
+# The holded-connector's DATABASE_URL points to the holded-specific project,
+# but panel_users lives on the main project (mpgfivufawurjnpyvacf).
+PANEL_DATABASE_URL = os.getenv("PANEL_DATABASE_URL", "")
+
+
+def _get_panel_connection():
+    """Get a connection to the main Supabase project (panel schema)."""
+    if not PANEL_DATABASE_URL:
+        raise RuntimeError("PANEL_DATABASE_URL not set — cannot look up panel users")
+    import psycopg2
+    conn = psycopg2.connect(PANEL_DATABASE_URL)
+    return conn
+
+
+def lookup_user(auth_id: str, get_connection=None) -> Optional[PanelUser]:
     """Look up a panel user by their Supabase auth ID.
+
+    Uses PANEL_DATABASE_URL to connect to the main project where
+    panel.panel_users lives (separate from the holded DB).
 
     Args:
         auth_id: UUID from the JWT 'sub' claim (= auth.users.id)
-        get_connection: Callable that returns a DB connection (from connector.py)
+        get_connection: Unused (kept for API compatibility)
 
     Returns:
         PanelUser or None if not found.
     """
-    conn = get_connection()
+    conn = _get_panel_connection()
     try:
         cur = conn.cursor()
         cur.execute(
@@ -238,8 +256,7 @@ def lookup_user(auth_id: str, get_connection) -> Optional[PanelUser]:
             is_active=row[5],
         )
     finally:
-        from connector import release_db
-        release_db(conn)
+        conn.close()
 
 
 # ── Public Paths ──────────────────────────────────────────────────────────
