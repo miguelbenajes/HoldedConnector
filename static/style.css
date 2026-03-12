@@ -165,6 +165,7 @@ body {
     font-weight: 500;
     display: flex;
     align-items: center;
+    text-decoration: none;
 }
 
 .nav-item:hover {
@@ -175,6 +176,15 @@ body {
 .nav-item.active {
     background: rgba(16, 185, 129, 0.1);
     color: var(--primary);
+}
+
+/* ── Holded subnav tabs (horizontal, compact) ── */
+.holded-subnav .nav-item {
+    padding: 0.5rem 0.9rem;
+    margin-bottom: 0;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    white-space: nowrap;
 }
 
 /* Quick-create + button inside nav items */
@@ -1636,4 +1646,44 @@ td {
 }
 #unpaidInvoicesTable table {
     min-width: 750px;
+}
+
+/* Web Include Toggle Switch */
+.web-toggle {
+    position: relative;
+    display: inline-block;
+    width: 36px;
+    height: 20px;
+    cursor: pointer;
+}
+.web-toggle input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+.web-toggle-slider {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: var(--card-bg, #334155);
+    border-radius: 20px;
+    transition: background 0.2s;
+    border: 1px solid rgba(255,255,255,0.1);
+}
+.web-toggle-slider::before {
+    content: "";
+    position: absolute;
+    height: 14px;
+    width: 14px;
+    left: 2px;
+    bottom: 2px;
+    background: #94a3b8;
+    border-radius: 50%;
+    transition: transform 0.2s, background 0.2s;
+}
+.web-toggle input:checked + .web-toggle-slider {
+    background: var(--primary, #10b981);
+}
+.web-toggle input:checked + .web-toggle-slider::before {
+    transform: translateX(16px);
+    background: #fff;
 }

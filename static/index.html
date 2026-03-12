@@ -768,14 +768,16 @@
                 const nav = document.getElementById('panelMenuNav');
                 const userInfo = document.getElementById('panelUserInfo');
 
-                // Render menu sections
-                let html = '';
+                // Render menu sections with group headers
                 for (const section of data.sections) {
                     if (section.title) {
-                        html += '<div style="margin-top:0.75rem;margin-bottom:0.25rem;font-size:0.7rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-gray);padding:0 0.5rem">' + section.title + '</div>';
+                        const header = document.createElement('div');
+                        header.textContent = section.title;
+                        header.style.cssText = 'margin-top:0.75rem;margin-bottom:0.25rem;font-size:0.7rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-gray);padding:0 0.5rem';
+                        nav.appendChild(header);
                     }
                     for (const item of section.items) {
-                        const isActive = item.href === '/panel/holded/' ? ' active' : '';
+                        const isActive = (item.href === '/panel/holded/' || item.href === '/panel/holded') ? ' active' : '';
                         const el = document.createElement('a');
                         el.href = item.href;
                         el.className = 'nav-item' + isActive;
