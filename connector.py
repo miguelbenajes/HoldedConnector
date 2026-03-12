@@ -19,6 +19,11 @@ SAFE_MODE = os.getenv("HOLDED_SAFE_MODE", "true").lower() == "true"
 PROYECTO_PRODUCT_ID = "69b2b35f75ae381d8f05c133"
 PROYECTO_PRODUCT_NAME = "proyect ref:"  # lowercase for case-insensitive comparison
 
+# ── Shooting dates detection ─────────────────────────────────────────────────
+# Product "Shooting Dates:" in Holded — its description field carries the dates
+SHOOTING_DATES_PRODUCT_ID = "69b2cfcd0df77ff4010e4ac8"
+SHOOTING_DATES_PRODUCT_NAME = "shooting dates:"  # lowercase for case-insensitive
+
 BASE_URL = "https://api.holded.com/api"
 HEADERS = {
     "key": API_KEY,
@@ -511,12 +516,52 @@ def _init_db_inner(conn):
         )
     ''')
 
+    # ── Job Tracker tables ────────────────────────────────────────────────────
+    cursor.execute(f'''
+        CREATE TABLE IF NOT EXISTS jobs (
+            project_code TEXT PRIMARY KEY,
+            client_id TEXT,
+            client_name TEXT,
+            client_email TEXT,
+            status TEXT DEFAULT 'open',
+            shooting_dates_raw TEXT,
+            shooting_dates TEXT,
+            quarter TEXT,
+            estimate_id TEXT,
+            estimate_number TEXT,
+            invoice_id TEXT,
+            invoice_number TEXT,
+            note_path TEXT,
+            pdf_hash TEXT,
+            created_at TEXT DEFAULT {_now},
+            updated_at TEXT DEFAULT {_now}
+        )
+    ''')
+
+    cursor.execute(f'''
+        CREATE TABLE IF NOT EXISTS job_note_queue (
+            id {_serial},
+            project_code TEXT NOT NULL,
+            action TEXT NOT NULL,
+            retry_count INTEGER DEFAULT 0,
+            last_error TEXT,
+            created_at TEXT DEFAULT {_now},
+            processed_at TEXT
+        )
+    ''')
+
     # Audit log indexes
     if not _USE_SQLITE:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON write_audit_log(timestamp)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_entity ON write_audit_log(entity_type, entity_id)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_operation ON write_audit_log(operation)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_status ON write_audit_log(status)')
+
+        try:
+            cursor.execute("""CREATE INDEX IF NOT EXISTS idx_job_queue_pending
+                ON job_note_queue (created_at) WHERE processed_at IS NULL AND retry_count < 5""")
+        except Exception:
+            pass
 
     # ── Column migrations (SQLite only — PG creates all columns upfront) ──────
     if _USE_SQLITE:
@@ -558,6 +603,10 @@ def _init_db_inner(conn):
             ("invoices",          "project_code", "TEXT"),
             ("purchase_invoices", "project_code", "TEXT"),
             ("estimates",         "project_code", "TEXT"),
+            # shooting dates raw text from "Shooting Dates:" line item
+            ("invoices",          "shooting_dates_raw", "TEXT"),
+            ("purchase_invoices", "shooting_dates_raw", "TEXT"),
+            ("estimates",         "shooting_dates_raw", "TEXT"),
         ]:
             try:
                 cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {defn}")
@@ -609,6 +658,10 @@ def _init_db_inner(conn):
             "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS project_code TEXT",
             "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS project_code TEXT",
             "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS project_code TEXT",
+            # shooting dates raw text from "Shooting Dates:" line item
+            "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS shooting_dates_raw TEXT",
+            "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS shooting_dates_raw TEXT",
+            "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS shooting_dates_raw TEXT",
         ]:
             try:
                 cursor.execute(stmt)
@@ -742,6 +795,17 @@ def _extract_project_code(products):
     return None
 
 
+def _extract_shooting_dates(products):
+    """Scan line items for 'Shooting Dates:' product and return its desc.
+    Detection: by productId (reliable) or by name (fallback, case-insensitive)."""
+    for prod in (products or []):
+        pid = prod.get('productId')
+        name = (prod.get('name') or '').strip().lower()
+        if pid == SHOOTING_DATES_PRODUCT_ID or name == SHOOTING_DATES_PRODUCT_NAME:
+            return (prod.get('desc') or '').strip() or None
+    return None
+
+
 def _row_val(row, key, idx):
     """Retrieve a value from a DB row that may be a dict (PG) or tuple (SQLite)."""
     if isinstance(row, dict):
@@ -842,10 +906,11 @@ def sync_documents(doc_type, table, items_table, fk_column):
                        _num(prod.get('discount')), _num(prod.get('tax')), _num(retention), account,
                        prod.get('projectid'), prod.get('kind'), prod.get('desc')))
 
-            # Extract and store project code from "Proyect REF:" line item (or clear it)
+            # Extract project code + shooting dates from line items
             project_code = _extract_project_code(item.get('products'))
-            cursor.execute(_q(f'UPDATE {table} SET project_code = ? WHERE id = ?'),
-                           (project_code, doc_id))
+            shooting_raw = _extract_shooting_dates(item.get('products'))
+            cursor.execute(_q(f'UPDATE {table} SET project_code = ?, shooting_dates_raw = ? WHERE id = ?'),
+                           (project_code, shooting_raw, doc_id))
 
         conn.commit()
     finally:
@@ -1135,10 +1200,11 @@ def _upsert_single_document(cursor, doc, table, items_table, fk_column):
                _num(prod.get('discount')), _num(prod.get('tax')), _num(retention), account,
                prod.get('projectid'), prod.get('kind'), prod.get('desc')))
 
-    # Extract and store project code from "Proyect REF:" line item (or clear it)
+    # Extract project code + shooting dates from line items
     project_code = _extract_project_code(doc.get('products'))
-    cursor.execute(_q(f'UPDATE {table} SET project_code = ? WHERE id = ?'),
-                   (project_code, doc_id))
+    shooting_raw = _extract_shooting_dates(doc.get('products'))
+    cursor.execute(_q(f'UPDATE {table} SET project_code = ?, shooting_dates_raw = ? WHERE id = ?'),
+                   (project_code, shooting_raw, doc_id))
 
 
 def _upsert_single_contact(cursor, contact):
