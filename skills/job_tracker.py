@@ -123,3 +123,34 @@ def _parse_single(s, default_month, year):
             return date(year, default_month, day)
         except (ValueError, TypeError):
             return None
+
+
+# ── Quarter Helper ─────────────────────────────────────────────────────────────
+
+def get_quarter(date_str):
+    """Map ISO date string to quarter: '2026-03-17' → '1T_2026'."""
+    d = date.fromisoformat(date_str)
+    q = (d.month - 1) // 3 + 1
+    return f"{q}T_{d.year}"
+
+
+# ── Sanitizers ─────────────────────────────────────────────────────────────────
+
+def sanitize_for_path(text):
+    """Strip path-unsafe characters. Prevents path traversal."""
+    if not text:
+        return ""
+    text = text.replace("..", "")
+    text = re.sub(r'[/\\<>:"|?*]', '', text)
+    text = text.replace(" ", "-")
+    text = re.sub(r'-{2,}', '-', text)
+    return text.strip("-")
+
+
+def sanitize_for_markdown(text):
+    """Escape markdown-active characters in user-supplied strings."""
+    if not text:
+        return ""
+    for ch in ['\\', '`', '*', '_', '{', '}', '[', ']', '(', ')', '#', '+', '-', '.', '!', '|']:
+        text = text.replace(ch, '\\' + ch)
+    return text

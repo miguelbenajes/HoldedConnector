@@ -55,3 +55,49 @@ class TestParseShootingDates:
     def test_deduplication(self):
         result = parse_shooting_dates("17/3, 17/3", 2026)
         assert result == ["2026-03-17"]
+
+
+from skills.job_tracker import get_quarter, sanitize_for_path, sanitize_for_markdown
+
+
+class TestGetQuarter:
+    def test_q1(self):
+        assert get_quarter("2026-02-15") == "1T_2026"
+    def test_q2(self):
+        assert get_quarter("2026-05-01") == "2T_2026"
+    def test_q3(self):
+        assert get_quarter("2026-09-30") == "3T_2026"
+    def test_q4(self):
+        assert get_quarter("2026-12-31") == "4T_2026"
+    def test_boundary_march(self):
+        assert get_quarter("2026-03-31") == "1T_2026"
+    def test_boundary_april(self):
+        assert get_quarter("2026-04-01") == "2T_2026"
+
+
+class TestSanitizeForPath:
+    def test_normal(self):
+        assert sanitize_for_path("NETFLIX-260312") == "NETFLIX-260312"
+    def test_spaces(self):
+        assert sanitize_for_path("MY PROJECT") == "MY-PROJECT"
+    def test_path_traversal(self):
+        result = sanitize_for_path("../../etc/passwd")
+        assert ".." not in result
+        assert "/" not in result
+    def test_special_chars(self):
+        result = sanitize_for_path('test<>:"|?*file')
+        assert "<" not in result
+        assert ">" not in result
+    def test_empty(self):
+        assert sanitize_for_path("") == ""
+
+
+class TestSanitizeForMarkdown:
+    def test_normal_text(self):
+        assert sanitize_for_markdown("Hello World") == "Hello World"
+    def test_brackets(self):
+        result = sanitize_for_markdown("[link](url)")
+        assert "[" not in result or "\\[" in result
+    def test_pipe(self):
+        result = sanitize_for_markdown("col1 | col2")
+        assert "\\|" in result
