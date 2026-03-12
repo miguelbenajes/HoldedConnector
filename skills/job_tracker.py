@@ -409,3 +409,217 @@ def ensure_job(project_code, doc_data, cursor):
         cols = [d[0] for d in cursor.description]
         row = dict(zip(cols, row))
     return row
+
+
+# ── Obsidian Sync ──────────────────────────────────────────────────────────────
+
+import requests as http_requests  # avoid shadowing
+
+MAX_PDF_SIZE = 5 * 1024 * 1024  # 5MB
+
+
+def _brain_write(path, content, append=False, binary=False):
+    """Write to Obsidian vault via Brain's /internal/obsidian-write endpoint.
+
+    Args:
+        path: vault-relative path (e.g. "ACCOUNTS/SEGUIMIENTO_TRABAJOS/2026/1T_2026/CODE")
+        content: markdown string or base64-encoded binary data
+        append: if True, append to existing note
+        binary: if True, treat content as base64 binary (for PDFs)
+
+    Returns:
+        True on success, False on failure.
+    """
+    if not BRAIN_INTERNAL_KEY:
+        logger.warning("[JOB_TRACKER] BRAIN_INTERNAL_KEY not configured, skipping Obsidian write")
+        return False
+
+    try:
+        resp = http_requests.post(
+            f"{BRAIN_API_URL}/internal/obsidian-write",
+            json={"path": path, "content": content, "append": append, "binary": binary},
+            headers={"x-api-key": BRAIN_INTERNAL_KEY},
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            return True
+        logger.error(f"[JOB_TRACKER] Brain write failed: {resp.status_code} {resp.text}")
+        return False
+    except Exception as e:
+        logger.error(f"[JOB_TRACKER] Brain unreachable: {e}")
+        return False
+
+
+def sync_job_to_obsidian(project_code):
+    """Render and push a job note + PDF to Obsidian vault via Brain API.
+
+    Flow:
+      1. Load job row from DB
+      2. Load associated expenses (purchases with matching project_code)
+      3. Render markdown note via render_job_note()
+      4. Fetch PDF from Holded API (if estimate/invoice exists), push as binary
+      5. Push note via _brain_write()
+      6. Update job.note_path on success
+
+    Returns:
+        True on success, False on failure.
+    """
+    conn_mod = _get_connector()
+    conn = conn_mod.get_db()
+    try:
+        cur = conn_mod._cursor(conn)
+
+        cur.execute(conn_mod._q("SELECT * FROM jobs WHERE project_code = ?"), (project_code,))
+        row = cur.fetchone()
+        if not row:
+            logger.warning(f"[JOB_TRACKER] Job not found: {project_code}")
+            return False
+        if not isinstance(row, dict):
+            cols = [d[0] for d in cur.description]
+            row = dict(zip(cols, row))
+
+        job = row
+        quarter = job.get("quarter") or get_quarter(date.today().isoformat())
+        year = quarter.split("_")[1] if "_" in quarter else str(date.today().year)
+
+        # Load expenses (purchases with matching project_code)
+        cur.execute(conn_mod._q("""
+            SELECT pi.date, pi."desc" as name, pi.amount, pi.doc_number
+            FROM purchase_invoices pi
+            WHERE pi.project_code = ?
+            ORDER BY pi.date
+        """), (project_code,))
+        expenses = []
+        for r in cur.fetchall():
+            if not isinstance(r, dict):
+                cols = [d[0] for d in cur.description]
+                r = dict(zip(cols, r))
+            expenses.append(r)
+
+        note_content = render_job_note(job, expenses)
+
+        safe_code = sanitize_for_path(project_code)
+        base_path = f"ACCOUNTS/SEGUIMIENTO_TRABAJOS/{year}/{quarter}"
+        note_path = f"{base_path}/{safe_code}"
+        attach_dir = f"{base_path}/attachments"
+
+        # Fetch PDF if we have an estimate or invoice
+        doc_id = job.get("estimate_id") or job.get("invoice_id")
+        doc_type = "estimate" if job.get("estimate_id") else "invoice"
+        doc_num = sanitize_for_path(job.get("estimate_number") or job.get("invoice_number") or "")
+
+        if doc_id:
+            try:
+                api_key = conn_mod.API_KEY
+                pdf_resp = http_requests.get(
+                    f"https://api.holded.com/api/invoicing/v1/documents/{doc_type}/{doc_id}/pdf",
+                    headers={"key": api_key},
+                    timeout=30,
+                )
+                if pdf_resp.status_code == 200:
+                    pdf_data = None
+                    try:
+                        json_data = pdf_resp.json()
+                        if "data" in json_data:
+                            import base64
+                            pdf_data = base64.b64decode(json_data["data"])
+                    except Exception:
+                        pdf_data = pdf_resp.content
+
+                    if pdf_data:
+                        new_hash = hashlib.md5(pdf_data).hexdigest()
+                        if new_hash != job.get("pdf_hash"):
+                            if len(pdf_data) <= MAX_PDF_SIZE:
+                                import base64
+                                pdf_b64 = base64.b64encode(pdf_data).decode()
+                                pdf_filename = f"{safe_code}_{doc_num}.pdf"
+                                _brain_write(f"{attach_dir}/{pdf_filename}", pdf_b64, binary=True)
+
+                            cur.execute(conn_mod._q(
+                                "UPDATE jobs SET pdf_hash = ? WHERE project_code = ?"
+                            ), (new_hash, project_code))
+                            conn.commit()
+            except Exception as e:
+                logger.warning(f"[JOB_TRACKER] PDF fetch failed for {project_code}: {e}")
+
+        success = _brain_write(note_path, note_content)
+
+        if success:
+            cur.execute(conn_mod._q(
+                "UPDATE jobs SET note_path = ? WHERE project_code = ?"
+            ), (f"{note_path}.md", project_code))
+            conn.commit()
+
+        return success
+
+    finally:
+        conn_mod.release_db(conn)
+
+
+def flush_note_queue():
+    """Process all pending items in job_note_queue.
+
+    Iterates through unprocessed queue items (retry_count < 5), calls
+    sync_job_to_obsidian for each, and marks as processed on success.
+    Failed items get their retry_count incremented.
+    Old processed items (30+ days) are purged.
+
+    Returns:
+        Count of successfully processed items.
+    """
+    conn_mod = _get_connector()
+    conn = conn_mod.get_db()
+    processed = 0
+    try:
+        cur = conn_mod._cursor(conn)
+
+        cur.execute(conn_mod._q("""
+            SELECT id, project_code, action FROM job_note_queue
+            WHERE processed_at IS NULL AND retry_count < 5
+            ORDER BY created_at
+        """))
+        pending = cur.fetchall()
+
+        for item in pending:
+            if not isinstance(item, dict):
+                cols = [d[0] for d in cur.description]
+                item = dict(zip(cols, item))
+
+            item_id = item["id"]
+            code = item["project_code"]
+
+            try:
+                success = sync_job_to_obsidian(code)
+                if success:
+                    if conn_mod._USE_SQLITE:
+                        cur.execute(
+                            "UPDATE job_note_queue SET processed_at = datetime('now') WHERE id = ?",
+                            (item_id,))
+                    else:
+                        cur.execute(
+                            "UPDATE job_note_queue SET processed_at = NOW() WHERE id = %s",
+                            (item_id,))
+                    processed += 1
+                else:
+                    cur.execute(conn_mod._q(
+                        "UPDATE job_note_queue SET retry_count = retry_count + 1, last_error = ? WHERE id = ?"
+                    ), ("sync_job_to_obsidian returned False", item_id))
+            except Exception as e:
+                cur.execute(conn_mod._q(
+                    "UPDATE job_note_queue SET retry_count = retry_count + 1, last_error = ? WHERE id = ?"
+                ), (str(e)[:500], item_id))
+
+        # Purge old processed items (30+ days)
+        try:
+            if conn_mod._USE_SQLITE:
+                cur.execute("DELETE FROM job_note_queue WHERE processed_at IS NOT NULL AND processed_at < datetime('now', '-30 days')")
+            else:
+                cur.execute("DELETE FROM job_note_queue WHERE processed_at IS NOT NULL AND processed_at::timestamp < NOW() - INTERVAL '30 days'")
+        except Exception:
+            pass
+
+        conn.commit()
+    finally:
+        conn_mod.release_db(conn)
+
+    return processed
