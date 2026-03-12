@@ -226,6 +226,13 @@ def _sync_back_async(operation, entity_id, params, audit_id):
             if tables and audit_id:
                 connector.update_audit_log(audit_id, tables_synced=tables)
                 logger.info(f"[GATEWAY] Sync-back complete for {operation}/{entity_id}: {tables}")
+
+            # Flush job note queue (if a job was created/updated by this sync)
+            try:
+                from skills.job_tracker import flush_note_queue
+                flush_note_queue()
+            except Exception:
+                pass  # queue will be flushed on next full sync
         except Exception as e:
             logger.error(f"[GATEWAY] Sync-back failed for {operation}/{entity_id}: {e}")
             if audit_id:

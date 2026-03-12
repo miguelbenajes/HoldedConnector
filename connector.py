@@ -2625,4 +2625,14 @@ if __name__ == "__main__":
         sync_purchases()
         sync_projects()
         sync_payments()
+
+        # Flush pending job notes to Obsidian
+        try:
+            from skills.job_tracker import flush_note_queue
+            count = flush_note_queue()
+            if count:
+                logger.info(f"[JOB_TRACKER] Flushed {count} job notes to Obsidian")
+        except Exception as e:
+            logger.error(f"[JOB_TRACKER] Queue flush failed: {e}")
+
         logger.info("Synchronization complete!")
