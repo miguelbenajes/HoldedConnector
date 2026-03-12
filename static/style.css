@@ -58,12 +58,15 @@ body.light-mode table tr:hover {
     background: rgba(16, 185, 129, 0.06);
 }
 body.light-mode .nav-item {
-    color: #475569;
+    color: #64748b;
 }
-body.light-mode .nav-item.active,
 body.light-mode .nav-item:hover {
-    background: rgba(16, 185, 129, 0.12);
-    color: #10b981;
+    background: rgba(0, 0, 0, 0.04);
+    color: #1e293b;
+}
+body.light-mode .nav-item.active {
+    background: var(--primary);
+    color: #fff;
 }
 body.light-mode input,
 body.light-mode select {
@@ -81,35 +84,75 @@ body, .sidebar, .card, .stat-card, table th, table td, .nav-item, input, select 
     transition: background-color 0.25s ease, color 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
 }
 
-/* ── Sidebar top (logo + theme toggle) ── */
+/* ── Sidebar top (logo only, toggle moved to bottom) ── */
 .sidebar-top {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 1.75rem;
+    margin-bottom: 1rem;
+    padding: 0 0.75rem;
 }
 .sidebar-top .logo {
     margin-bottom: 0;
 }
 
-/* ── Theme toggle button ── */
+/* ── Theme toggle button (sidebar bottom) ── */
 .theme-toggle {
-    background: var(--card-bg);
-    border: 1px solid var(--glass-border);
+    background: transparent;
+    border: none;
     border-radius: 8px;
-    width: 34px;
-    height: 34px;
-    font-size: 1rem;
+    padding: 0.375rem 0.75rem;
+    font-size: 0.875rem;
     cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: background 0.2s, transform 0.15s;
-    flex-shrink: 0;
+    color: var(--text-gray);
+    text-align: left;
+    transition: background 0.2s;
+    width: 100%;
 }
 .theme-toggle:hover {
-    background: rgba(16, 185, 129, 0.15);
-    transform: scale(1.1);
+    background: rgba(255, 255, 255, 0.06);
+}
+body.light-mode .theme-toggle:hover {
+    background: rgba(0, 0, 0, 0.04);
+}
+
+/* ── Sidebar section headers ── */
+.sidebar-section-header {
+    margin-top: 0.75rem;
+    margin-bottom: 0.25rem;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-gray);
+    padding: 0 0.75rem;
+}
+
+/* ── Sidebar bottom (theme toggle + user info) ── */
+.sidebar-bottom {
+    margin-top: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+.sidebar-bottom .user-info {
+    padding: 0.75rem;
+    border-top: 1px solid var(--glass-border);
+    font-size: 0.8rem;
+    color: var(--text-gray);
+}
+.sidebar-bottom .back-link {
+    padding: 0.375rem 0.75rem;
+    border-radius: 8px;
+    font-size: 0.875rem;
+    color: var(--text-gray);
+    text-decoration: none;
+    transition: background 0.2s;
+    display: block;
+}
+.sidebar-bottom .back-link:hover {
+    background: rgba(255, 255, 255, 0.06);
+    text-decoration: none;
+}
+body.light-mode .sidebar-bottom .back-link:hover {
+    background: rgba(0, 0, 0, 0.04);
 }
 
 * {
@@ -134,21 +177,21 @@ body {
     height: 100vh;
 }
 
-/* Sidebar */
+/* Sidebar — compact, matches Next.js panel sidebar */
 .sidebar {
-    width: 280px;
+    width: 208px;
     background-color: var(--sidebar-bg);
-    padding: 2.5rem;
+    padding: 1rem;
     display: flex;
     flex-direction: column;
     border-right: 1px solid var(--glass-border);
-    box-shadow: 10px 0 30px rgba(0, 0, 0, 0.3);
+    flex-shrink: 0;
 }
 
 .logo {
-    font-size: 1.5rem;
-    font-weight: 800;
-    letter-spacing: -0.025em;
+    font-size: 1rem;
+    font-weight: 700;
+    letter-spacing: -0.015em;
 }
 
 .logo span {
@@ -156,26 +199,28 @@ body {
 }
 
 .nav-item {
-    padding: 1rem 1.25rem;
-    margin-bottom: 0.75rem;
-    border-radius: 12px;
+    padding: 0.375rem 0.75rem;
+    margin-bottom: 0;
+    border-radius: 8px;
     color: var(--text-gray);
     cursor: pointer;
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    transition: background 0.2s, color 0.2s;
     font-weight: 500;
+    font-size: 0.875rem;
     display: flex;
     align-items: center;
     text-decoration: none;
 }
 
 .nav-item:hover {
-    background: rgba(255, 255, 255, 0.03);
+    background: rgba(255, 255, 255, 0.06);
     color: var(--text-white);
+    text-decoration: none;
 }
 
 .nav-item.active {
-    background: rgba(16, 185, 129, 0.1);
-    color: var(--primary);
+    background: var(--primary);
+    color: #fff;
 }
 
 /* ── Holded subnav tabs (horizontal, compact) ── */

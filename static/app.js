@@ -1729,7 +1729,7 @@ document.addEventListener('DOMContentLoaded', function() {
     if (savedTheme === 'light') {
         document.body.classList.add('light-mode');
         const btn = document.getElementById('themeToggle');
-        if (btn) btn.textContent = '☀️';
+        if (btn) btn.textContent = '☀️ Light';
     }
 });
 
@@ -1737,7 +1737,7 @@ document.addEventListener('DOMContentLoaded', function() {
 function toggleTheme() {
     const isLight = document.body.classList.toggle('light-mode');
     const btn = document.getElementById('themeToggle');
-    btn.textContent = isLight ? '☀️' : '🌙';
+    btn.textContent = isLight ? '☀️ Light' : '🌙 Dark';
     localStorage.setItem('theme', isLight ? 'light' : 'dark');
 }
 

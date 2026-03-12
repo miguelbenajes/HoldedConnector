@@ -28,12 +28,15 @@
         <aside class="sidebar" id="panelSidebar">
             <div class="sidebar-top">
                 <div class="logo">Control Panel</div>
-                <button id="themeToggle" class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">🌙</button>
             </div>
             <nav id="panelMenuNav">
                 <!-- Populated by fetchPanelMenu() on load -->
             </nav>
-            <div id="panelUserInfo" style="margin-top:auto;padding:0.75rem;border-top:1px solid var(--glass-border);font-size:0.8rem;color:var(--text-gray)"></div>
+            <div class="sidebar-bottom">
+                <button id="themeToggle" class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">🌙 Dark</button>
+                <div id="panelUserInfo" class="user-info"></div>
+                <a href="/" class="back-link">Back to Coyote</a>
+            </div>
         </aside>
 
         <!-- Right side: subnav + content stacked vertically -->
@@ -773,7 +776,7 @@
                     if (section.title) {
                         const header = document.createElement('div');
                         header.textContent = section.title;
-                        header.style.cssText = 'margin-top:0.75rem;margin-bottom:0.25rem;font-size:0.7rem;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-gray);padding:0 0.5rem';
+                        header.className = 'sidebar-section-header';
                         nav.appendChild(header);
                     }
                     for (const item of section.items) {
