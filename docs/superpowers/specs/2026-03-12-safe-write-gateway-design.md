@@ -1,7 +1,7 @@
 # Safe Write Gateway — Design Specification
 
 > **Date:** 2026-03-12
-> **Status:** Approved
+> **Status:** Reviewed — Pending user approval
 > **Scope:** holded-connector service
 > **Goal:** 100% safe write operations for invoices, estimates, products, and contacts via a centralized gateway with validation, preview, confirmation, audit, and post-write sync.
 
@@ -140,6 +140,20 @@ Each operation has a validation function that checks preconditions against the l
 - Entity must exist in local DB
 - Orphan check: can't delete contact with open (non-cancelled) invoices
 - Can't delete product referenced in non-cancelled invoices
+
+**update_contact:**
+- Contact must exist in local DB
+- `name` must remain non-empty (if provided)
+- `email` format validation (if provided)
+- `type` must be valid enum (if provided)
+- Duplicate check: no other contact with same `name` + `code` (if changing either)
+
+**update_product:**
+- Product must exist in local DB
+- `name` must remain non-empty (if provided)
+- `sku` uniqueness check (if changing)
+- `price >= 0` (if provided)
+- `kind` cannot change from `pack` to `simple` if pack_components exist
 
 **pay_document:**
 - Document must exist
@@ -302,6 +316,7 @@ def _sync_back(self, operation, entity_id, entity_type):
     sync_map = {
         "invoice":  ("/invoicing/v1/documents/invoice/{id}", "invoices", "invoice_items", "invoice_id"),
         "estimate": ("/invoicing/v1/documents/estimate/{id}", "estimates", "estimate_items", "estimate_id"),
+        "purchase": ("/invoicing/v1/documents/purchase/{id}", "purchase_invoices", "purchase_items", "purchase_id"),
         "contact":  ("/invoicing/v1/contacts/{id}", "contacts", None, None),
         "product":  ("/invoicing/v1/products/{id}", "products", None, None),
     }
@@ -638,7 +653,7 @@ New settings (can be stored in `settings` table or `.env`):
 2. Refactor `post_data()` / `put_data()` to return structured error objects instead of `None`
 3. Add `delete_data(endpoint)` helper with SAFE_MODE intercept
 4. Extract single-entity upsert logic from bulk sync functions into reusable helpers:
-   - `_upsert_document(data, table, items_table, fk_col)` — from `sync_documents()`
+   - `_upsert_document(data, table, items_table, fk_col)` — from `sync_documents()`, handles all doc types (invoice, estimate, purchase)
    - `_upsert_contact(data)` — from `sync_contacts()`
    - `_upsert_product(data)` — from `sync_products()`
 
