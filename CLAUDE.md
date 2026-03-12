@@ -54,6 +54,7 @@ _fetch_one_val(c,k) # Fetches single scalar from either cursor type
 - `datetime('now')` → `NOW()`
 - `AUTOINCREMENT` → `SERIAL`
 - `REAL` → `NUMERIC`
+- PG NUMERIC returns `decimal.Decimal` in Python — cast to `float()` before arithmetic with floats
 
 ---
 
@@ -66,11 +67,14 @@ _fetch_one_val(c,k) # Fetches single scalar from either cursor type
 - `purchase_invoices` — Expenses/purchases (same status codes)
 - `estimates` — Presupuestos (status: 0=draft, 1=pending, 2=accepted, 3=rejected, 4=invoiced)
 - `contacts` — Clients & suppliers
-- `products` — Inventory (price, stock, sku)
+- `products` — Inventory (price, stock, sku, kind: 'simple'|'pack', web_include: 0|1 default 1)
+- `pack_components` — Pack composition (pack_id, component_id, quantity) — refreshed on sync
 - `payments` — Payment records
 - `projects` — Project tracking
 - `ledger_accounts` — Chart of accounts
-- `invoice_items` / `purchase_items` / `estimate_items` — Line items (SERIAL PK)
+- `invoice_items` / `purchase_items` / `estimate_items` — Line items (SERIAL PK, include `project_id` + `kind`)
+- `invoices` / `purchase_invoices` / `estimates` — include `tags` (JSON array as TEXT) + `notes`
+- `projects` — Synced from Holded; line items reference projects via `project_id`
 
 ### AI-Related Tables
 - `ai_history` — Conversation messages (id, role, content, timestamp, conversation_id, tool_calls)
@@ -147,8 +151,13 @@ _fetch_one_val(c,k) # Fetches single scalar from either cursor type
 - `POST /api/files/upload` — Upload CSV/Excel file
 - `GET /api/files/list` — List files in directory
 
+### Website Integration Endpoints
+- `GET /api/products/web` — Products with `web_include=1` (id, name, sku, price, stock, kind) — consumed by `apps/web` catalog
+- `PATCH /api/entities/products/{id}/web-include` — Toggle `web_include` flag (`{"web_include": true|false}`)
+
 ### Amortizations Endpoints
-- `GET /api/amortizations` — List all with calculated revenue/profit/ROI
+- `GET /api/products/{id}/pack-info` — Pack composition or pack membership
+- `GET /api/amortizations` — List all with calculated revenue/profit/ROI (includes pack-attributed revenue)
 - `GET /api/amortizations/summary` — Global totals (invested, recovered, profit, ROI%)
 - `POST /api/amortizations` — Add product to tracking
 - `PUT /api/amortizations/{id}` — Update price/date/notes
@@ -205,6 +214,10 @@ DATABASE_URL=postgresql://postgres.[ref]:[pass]@aws-0-eu-west-1.pooler.supabase.
 ALLOWED_ORIGINS=https://yourdomain.com  # CORS restriction (default: *)
 UPLOADS_DIR=/var/data/uploads           # Custom upload path (default: ./uploads)
 REPORTS_DIR=/var/data/reports            # Custom reports path (default: ./reports)
+
+# Supabase Knowledge DB — for linking products to knowledge.product_models
+SUPABASE_URL=https://mpgfivufawurjnpyvacf.supabase.co
+SUPABASE_SERVICE_KEY=sb_secret_...      # Service role key
 ```
 
 ### Settings Table (runtime config)
@@ -238,6 +251,30 @@ Frontend consumes via `ReadableStream` + SSE parsing.
 - Uses dialect tokens: `_serial` (SERIAL vs AUTOINCREMENT), `_real` (NUMERIC vs REAL), `_now` (NOW() vs datetime('now'))
 - All tables use `CREATE TABLE IF NOT EXISTS`
 - **Never** add a table without adding it to `init_db()` in connector.py
+
+### Holded API Field Reference (discovered from live responses)
+- Invoice/estimate/purchase top-level: `tags` (array), `notes`, `customFields` (array), `docNumber`
+- Line item fields: `projectid` (lowercase — not camelCase `projectId`), `kind`, `costPrice`, `desc`
+- Store tags as: `json.dumps(item.get('tags') or [])` — requires `import json` in connector.py
+- Holded purchases API times out on page 2 consistently — not a code bug, all records are on page 1
+- To inspect all available API fields: fetch a tiny time window → `params={'starttmp': X, 'endtmp': X+100000}`
+
+### Project Tracking (added 2026-03-03)
+- **Tags** on documents (`invoices.tags`, etc.) — easiest: tag whole document in Holded with job code
+- **`project_id`** on line items — finer control, assign per line in Holded
+- Query by tag: `WHERE tags LIKE '%"CODE"%'` or parse JSON in Python
+- Query by project: `JOIN projects p ON ii.project_id = p.id`
+- Workflow: create project in Holded → assign to line items or tag document → sync → query
+
+### Project Code System (added 2026-03-12)
+- **Product "Proyect REF:"** (ID: `69b2b35f75ae381d8f05c133`) — a €0 product in Holded
+- Add it as a line item on any quote/invoice; the **description field** carries the project code
+- **Format convention:** `CLIENT-YYMMDD` (e.g. `MEDIASET-260315`)
+- During sync, `_extract_project_code()` detects the item by productId or name (case-insensitive fallback)
+- Extracted code stored in `project_code` column on `invoices`, `estimates`, `purchase_invoices`
+- Line item descriptions (`desc`) are synced on all 3 items tables
+- Query: `SELECT * FROM invoices WHERE project_code = 'NETFLIX-260315'`
+- If the "Proyect REF:" item is removed, `project_code` is cleared to NULL on next sync
 
 ### Sync Functions Pattern
 ```python
@@ -278,6 +315,51 @@ Items tables (invoice_items, etc.) use DELETE + INSERT pattern.
 - Safe: Handles duplicates gracefully (ON CONFLICT DO NOTHING)
 - **Usage:** `/usr/bin/python3 migrate_amortizations.py` (ran once on 2026-03-02)
 
+### 4-7. Product Management Suite (`product-management/` folder)
+Self-contained toolset for classification, linking, and import workflows:
+
+**4. `classify_products.py` — Classify Unmatched Products (Phase 2)**
+- Reads 307 NOT_MATCHED products from `products_to_import.xlsx`
+- Categorizes into 4 types: Real Products (177), Services (46), Expenses (64), Administrative (20)
+- Uses keyword-based classification with configurable thresholds
+- Outputs `products_classified.xlsx` with separate sheets per category
+- **Usage:** `cd product-management && python3 classify_products.py`
+
+**5. `generate_products_for_import.py` — Master Import File Generator (Phase 3)**
+- Reads classified products and generates comprehensive Excel for data entry
+- Creates 5 sheets: Real Products, Expenses (with project_id), Services-Fees, Administrative, Reference
+- Includes OT (overtime) detection for service entries (pattern: "OT xx hours on xx day")
+- Outputs `products_for_import.xlsx` ready for user review and manual data entry
+- **Usage:** `cd product-management && python3 generate_products_for_import.py`
+
+**6. `apply_product_corrections.py` — Apply User Decisions & Link to Inventory (Phase 4)**
+- Reads user corrections from `products_for_import.xlsx`
+- Applies reclassifications (e.g., Real Product ↔ Service ↔ Expense)
+- Links products to existing inventory when appropriate
+- Creates amortizations for linked products (e.g., ALQ MACBOOK → Macbook Pro Max M3)
+- Regenerates `products_for_import.xlsx` with corrected classifications
+- **Usage:** `cd product-management && python3 apply_product_corrections.py`
+
+**7. `product_mappings.yaml` — Learning File for Classification Patterns**
+- Documents classification rules, keywords, and patterns learned from user decisions
+- Stores product linking rules (e.g., ALQ prefix → equipment rental)
+- Records all reclassifications and rationale for future automation
+- Enables scripts to apply learned patterns to new unmatched products
+- **Purpose:** Improve automation accuracy over time; reference for similar classification tasks
+- **Format:** YAML with sections for rules, examples, automations, reference data
+
+**See `product-management/README.md` for full workflow documentation.**
+
+### 8. `link_holded_to_knowledge.py` — Map Holded Products → Knowledge DB
+- Interactive CLI tool to create 1:1 mappings between Holded products and `knowledge.product_models`
+- Fuzzy matches product names, shows top 8 candidates with similarity scores
+- Stores mappings in `knowledge.holded_product_links` table (Supabase)
+- Supports auto-link mode (`a`) for ≥80% matches, skip (`s`), quit (`q`)
+- Re-runnable: skips already-linked products on each run
+- **Requires:** `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` in `.env`, `pip install supabase`
+- **Usage:** `/usr/bin/python3 link_holded_to_knowledge.py`
+- **Impact:** 71 products linked (2026-03-09), enables merged catalog in `apps/web`
+
 ---
 
 ## File Structure
@@ -288,14 +370,26 @@ holded-connector/
 ├── connector.py        # DB abstraction, Holded API sync, all data access
 ├── ai_agent.py         # Claude tool_use agent, 19 tools, streaming
 ├── reports.py          # PDF/Excel report generation
-├── migrate_amortizations.py    # SQLite→Supabase migration for amortizations (40 items)
-├── inventory_matcher.py         # Generate Excel with fuzzy-matched products (204 matched, 307 new)
+├── inventory_matcher.py         # Generate Excel with fuzzy-matched products (phase 1)
 ├── link_matched_products.py     # Bulk link invoice_items to products + create amortizations
+├── migrate_amortizations.py     # SQLite→Supabase migration for amortizations (40 items)
+├── backfill_packs.py            # One-time: populate pack_components + migrate pack amortizations
+├── link_holded_to_knowledge.py  # Interactive: map Holded products → knowledge.product_models
 ├── requirements.txt    # Python dependencies
 ├── .env                # Local config (not in git)
 ├── .env.example        # Config template
 ├── CLAUDE.md           # This file
 ├── README.md           # Project readme
+├── product-management/ # Product classification & import suite
+│   ├── README.md       # Product management workflow documentation
+│   ├── classify_products.py         # Phase 2: Classify 307 NOT_MATCHED products
+│   ├── match_expenses_to_inventory.py # Phase 2: Fuzzy match expenses to inventory
+│   ├── generate_products_for_import.py # Phase 3: Generate master import file
+│   ├── apply_product_corrections.py    # Phase 4: Apply user corrections & link to inventory
+│   ├── product_mappings.yaml           # Learned classification rules & patterns
+│   ├── products_classified.xlsx        # Output: Classification by category
+│   ├── products_final_review.xlsx      # Output: Expenses matched to inventory
+│   └── products_for_import.xlsx        # Output: Master file ready for import
 ├── docs/plans/         # Migration/design documents
 ├── skills/             # AI skill templates
 └── static/
@@ -353,9 +447,16 @@ conn.close()
 - [x] Amortizations migration — 40 items SQLite → Supabase (`migrate_amortizations.py`)
 - [x] Invoice linking — 207 items linked (`inventory_matcher.py` + `link_matched_products.py`)
 - [x] Data cleaning — Revenue impact: €16k → €114k (7x increase from proper product linking)
+- [x] Project tracking — `tags` + `project_id` + `notes` added to all doc/item tables (2026-03-03)
+- [x] 307 NOT_MATCHED products classified + reviewed (`product-management/` suite complete)
+- [x] `process_reviewed_items.py` — reads user-reviewed CSV, creates amortizations with revenue data
+- [x] Website integration — `web_include` field on products + `/api/products/web` endpoint (2026-03-09)
+- [x] Knowledge DB linking — 71 products mapped via `link_holded_to_knowledge.py` → `knowledge.holded_product_links` (2026-03-09)
+- [x] Merged catalog endpoint in `apps/web` — `GET /api/products/catalog` joins knowledge specs + Holded pricing (2026-03-09)
 
 ### Pending (Tasks 8+)
-- [ ] Filter & create 307 NOT_MATCHED products in Holded
+- [ ] Create 34 new real products + fill cost prices (`products_processed.xlsx` Sheets 1 & 2)
+- [ ] Create 40 services (fee type) + 61 expenses in Holded (`products_processed.xlsx` Sheets 3 & 4)
 - [ ] `api.py` — Still has ~3 raw `sqlite3.connect()` calls (lines ~211, ~622, ~1120, ~1191)
 - [ ] `ai_agent.py` — Still has ~22 raw `sqlite3.connect()` calls (all exec_* functions)
 - [ ] Docker deployment (Dockerfile, docker-compose.yml)
@@ -409,8 +510,17 @@ python3 api.py
 | Invoice items not linking in bulk UPDATE | String trimming: `'text '` with trailing space ≠ `'text'` — use TRIM() or .strip() in code |
 | ON CONFLICT silently skips duplicates | Not an error — check rowcount to verify inserts. Use rowcount=0 to detect skips |
 | Fuzzy matching missing valid matches | Threshold ≥60% is configurable — adjust `difflib.get_close_matches(cutoff=...)` if needed |
+| Holded purchases page 2 timeout | Expected API flakiness — page 1 captures all records, safe to ignore |
+| `NameError: json not defined` in connector.py | Add `import json` at top — needed for `json.dumps(tags)` |
+| `projectid` not found on line items | Holded uses lowercase `projectid` not camelCase `projectId` |
 
 ---
 
-**Last Updated:** 2026-03-02
-**Latest Milestone:** Data cleaning suite complete (207 items linked, 307 new products pending creation, revenue visibility 7x increase)
+## Obsidian Vault Sync (MANDATORY)
+
+See global `~/.claude/CLAUDE.md` for full rules. Document Holded connector changes (API, sync, tools, schema) in `Coyote AI/` via `mcp__obsidian__*` tools.
+
+---
+
+**Last Updated:** 2026-03-09
+**Latest Milestone:** Website integration — `web_include` flag + `/api/products/web` price feed; 71 products linked to knowledge DB via `holded_product_links`; merged catalog endpoint live in `apps/web`

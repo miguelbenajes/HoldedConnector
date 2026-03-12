@@ -12,6 +12,13 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 API_KEY = os.getenv("HOLDED_API_KEY")
 SAFE_MODE = os.getenv("HOLDED_SAFE_MODE", "true").lower() == "true"
+
+# ── Project code detection ────────────────────────────────────────────────────
+# Product "Proyect REF:" in Holded — its description field carries the project code
+# Format convention: CLIENT-YYMMDD (e.g. MEDIASET-260315)
+PROYECTO_PRODUCT_ID = "69b2b35f75ae381d8f05c133"
+PROYECTO_PRODUCT_NAME = "proyect ref:"  # lowercase for case-insensitive comparison
+
 BASE_URL = "https://api.holded.com/api"
 HEADERS = {
     "key": API_KEY,
@@ -203,7 +210,8 @@ def _init_db_inner(conn):
             due_date INTEGER,
             doc_number TEXT,
             tags TEXT,
-            notes TEXT
+            notes TEXT,
+            project_code TEXT
         )
     ''')
 
@@ -218,7 +226,8 @@ def _init_db_inner(conn):
             status INTEGER,
             doc_number TEXT,
             tags TEXT,
-            notes TEXT
+            notes TEXT,
+            project_code TEXT
         )
     ''')
 
@@ -233,7 +242,8 @@ def _init_db_inner(conn):
             status INTEGER,
             doc_number TEXT,
             tags TEXT,
-            notes TEXT
+            notes TEXT,
+            project_code TEXT
         )
     ''')
 
@@ -274,7 +284,8 @@ def _init_db_inner(conn):
             retention {_real},
             account TEXT,
             project_id TEXT,
-            kind TEXT
+            kind TEXT,
+            "desc" TEXT
         )
     ''')
 
@@ -293,7 +304,8 @@ def _init_db_inner(conn):
             retention {_real},
             account TEXT,
             project_id TEXT,
-            kind TEXT
+            kind TEXT,
+            "desc" TEXT
         )
     ''')
 
@@ -312,7 +324,8 @@ def _init_db_inner(conn):
             retention {_real},
             account TEXT,
             project_id TEXT,
-            kind TEXT
+            kind TEXT,
+            "desc" TEXT
         )
     ''')
 
@@ -537,6 +550,14 @@ def _init_db_inner(conn):
             ("purchase_items",    "kind",       "TEXT"),
             ("estimate_items",    "project_id", "TEXT"),
             ("estimate_items",    "kind",       "TEXT"),
+            # line item description (carries project code for "Proyect REF:" items)
+            ("invoice_items",     '"desc"',     "TEXT"),
+            ("purchase_items",    '"desc"',     "TEXT"),
+            ("estimate_items",    '"desc"',     "TEXT"),
+            # project code extracted from "Proyect REF:" line item
+            ("invoices",          "project_code", "TEXT"),
+            ("purchase_invoices", "project_code", "TEXT"),
+            ("estimates",         "project_code", "TEXT"),
         ]:
             try:
                 cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {defn}")
@@ -580,6 +601,14 @@ def _init_db_inner(conn):
             "ALTER TABLE estimate_items ADD COLUMN IF NOT EXISTS project_id TEXT",
             "ALTER TABLE estimate_items ADD COLUMN IF NOT EXISTS kind TEXT",
             "ALTER TABLE products ADD COLUMN IF NOT EXISTS web_include INTEGER NOT NULL DEFAULT 1",
+            # line item description (carries project code for "Proyect REF:" items)
+            'ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS "desc" TEXT',
+            'ALTER TABLE purchase_items ADD COLUMN IF NOT EXISTS "desc" TEXT',
+            'ALTER TABLE estimate_items ADD COLUMN IF NOT EXISTS "desc" TEXT',
+            # project code extracted from "Proyect REF:" line item
+            "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS project_code TEXT",
+            "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS project_code TEXT",
+            "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS project_code TEXT",
         ]:
             try:
                 cursor.execute(stmt)
@@ -701,6 +730,18 @@ def fetch_data(endpoint, params=None):
 
     return all_data
 
+def _extract_project_code(products):
+    """Scan line items for the 'Proyect REF:' product and return its desc as project code.
+    Returns the project code string, or None if not found.
+    Detection: by productId (reliable) or by name (fallback, case-insensitive)."""
+    for prod in (products or []):
+        pid = prod.get('productId')
+        name = (prod.get('name') or '').strip().lower()
+        if pid == PROYECTO_PRODUCT_ID or name == PROYECTO_PRODUCT_NAME:
+            return (prod.get('desc') or '').strip() or None
+    return None
+
+
 def _row_val(row, key, idx):
     """Retrieve a value from a DB row that may be a dict (PG) or tuple (SQLite)."""
     if isinstance(row, dict):
@@ -794,12 +835,17 @@ def sync_documents(doc_type, table, items_table, fk_column):
                 cursor.execute(_q(f'''
                     INSERT INTO {items_table}
                         ({fk_column}, product_id, name, sku, units, price, subtotal,
-                         discount, tax, retention, account, project_id, kind)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                         discount, tax, retention, account, project_id, kind, "desc")
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 '''), (doc_id, prod.get('productId'), prod.get('name'), prod.get('sku'),
                        _num(prod.get('units')), _num(prod.get('price')), _num(prod.get('subtotal')),
                        _num(prod.get('discount')), _num(prod.get('tax')), _num(retention), account,
-                       prod.get('projectid'), prod.get('kind')))
+                       prod.get('projectid'), prod.get('kind'), prod.get('desc')))
+
+            # Extract and store project code from "Proyect REF:" line item (or clear it)
+            project_code = _extract_project_code(item.get('products'))
+            cursor.execute(_q(f'UPDATE {table} SET project_code = ? WHERE id = ?'),
+                           (project_code, doc_id))
 
         conn.commit()
     finally:
@@ -1082,12 +1128,17 @@ def _upsert_single_document(cursor, doc, table, items_table, fk_column):
         cursor.execute(_q(f'''
             INSERT INTO {items_table}
                 ({fk_column}, product_id, name, sku, units, price, subtotal,
-                 discount, tax, retention, account, project_id, kind)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 discount, tax, retention, account, project_id, kind, "desc")
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         '''), (doc_id, prod.get('productId'), prod.get('name'), prod.get('sku'),
                _num(prod.get('units')), _num(prod.get('price')), _num(prod.get('subtotal')),
                _num(prod.get('discount')), _num(prod.get('tax')), _num(retention), account,
-               prod.get('projectid'), prod.get('kind')))
+               prod.get('projectid'), prod.get('kind'), prod.get('desc')))
+
+    # Extract and store project code from "Proyect REF:" line item (or clear it)
+    project_code = _extract_project_code(doc.get('products'))
+    cursor.execute(_q(f'UPDATE {table} SET project_code = ? WHERE id = ?'),
+                   (project_code, doc_id))
 
 
 def _upsert_single_contact(cursor, contact):
