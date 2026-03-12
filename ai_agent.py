@@ -615,11 +615,12 @@ def exec_create_estimate(params):
 
     payload = {"contact": contact_id, "desc": params.get("desc", ""), "products": products}
     result = connector.post_data("/invoicing/v1/documents/estimate", payload)
-    if result:
+    if result and not result.get("error"):
         is_safe = connector.SAFE_MODE
         return {"success": True, "id": result.get("id", "SAFE_MODE"), "safe_mode": is_safe,
                 "message": "Estimate created (dry run)" if is_safe else "Estimate created successfully"}
-    return {"success": False, "error": "Failed to create estimate"}
+    else:
+        return {"success": False, "error": result.get("detail", "Unknown error") if result else "No response"}
 
 
 def exec_create_invoice(params):
@@ -634,11 +635,12 @@ def exec_create_invoice(params):
 
     payload = {"contact": contact_id, "desc": params.get("desc", ""), "products": products}
     result = connector.create_invoice(payload)
-    if result:
+    if result and not (isinstance(result, dict) and result.get("error")):
         is_safe = connector.SAFE_MODE
         return {"success": True, "id": result, "safe_mode": is_safe,
                 "message": "Invoice created (dry run)" if is_safe else "Invoice created successfully"}
-    return {"success": False, "error": "Failed to create invoice"}
+    else:
+        return {"success": False, "error": result.get("detail", "Unknown error") if isinstance(result, dict) else "No response"}
 
 
 def exec_send_document(params):
@@ -660,11 +662,12 @@ def exec_send_document(params):
         payload["body"] = params["body"]
 
     result = connector.post_data(f"/invoicing/v1/documents/{doc_type}/{doc_id}/send", payload)
-    if result:
+    if result and not result.get("error"):
         is_safe = connector.SAFE_MODE
         return {"success": True, "safe_mode": is_safe,
                 "message": "Document sent (dry run)" if is_safe else "Document sent successfully"}
-    return {"success": False, "error": "Failed to send document"}
+    else:
+        return {"success": False, "error": result.get("detail", "Unknown error") if result else "No response"}
 
 
 def exec_generate_report(params):
@@ -683,11 +686,12 @@ def exec_create_contact(params):
             payload[key] = params[key]
 
     result = connector.create_contact(payload)
-    if result:
+    if result and not (isinstance(result, dict) and result.get("error")):
         is_safe = connector.SAFE_MODE
         return {"success": True, "id": result, "safe_mode": is_safe,
                 "message": "Contact created (dry run)" if is_safe else "Contact created successfully"}
-    return {"success": False, "error": "Failed to create contact"}
+    else:
+        return {"success": False, "error": result.get("detail", "Unknown error") if isinstance(result, dict) else "No response"}
 
 
 def exec_get_overdue_invoices(params):

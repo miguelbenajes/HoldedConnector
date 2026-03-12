@@ -934,18 +934,26 @@ def sync_payments():
     logger.info(f"Synced {len(data)} payments.")
 
 def post_data(endpoint, payload):
+    """POST to Holded API. Returns dict with 'error' key on failure."""
     if SAFE_MODE:
         logger.info(f"[SAFE MODE] Intercepted POST to {endpoint}")
         logger.debug(f"[SAFE MODE] Payload: {payload}")
-        return {"status": 1, "id": "SAFE_MODE_ID_TEST", "info": "Dry run successful"}
+        return {"status": 1, "id": "SAFE_MODE_ID_TEST", "info": "Dry run successful", "dry_run": True}
 
     url = f"{BASE_URL}{endpoint}"
-    response = requests.post(url, headers=HEADERS, json=payload, timeout=30)
-    if response.status_code == 200:
-        return response.json()
-    else:
-        logger.error(f"Error posting to {endpoint}: {response.status_code} - {response.text}")
-        return None
+    try:
+        response = requests.post(url, headers=HEADERS, json=payload, timeout=30)
+        if response.status_code in (200, 201):
+            return response.json()
+        else:
+            logger.error(f"Error posting to {endpoint}: {response.status_code} - {response.text}")
+            return {"error": True, "status_code": response.status_code, "detail": response.text}
+    except requests.exceptions.Timeout:
+        logger.error(f"Timeout posting to {endpoint}")
+        return {"error": True, "status_code": 0, "detail": "Request timed out"}
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Network error posting to {endpoint}: {e}")
+        return {"error": True, "status_code": 0, "detail": str(e)}
 
 def put_data(endpoint, payload):
     if SAFE_MODE:
@@ -964,9 +972,11 @@ def put_data(endpoint, payload):
 def create_invoice(invoice_data):
     logger.info(f"Creating invoice for contact {invoice_data.get('contact')}...")
     result = post_data("/invoicing/v1/documents/invoice", invoice_data)
-    if result and result.get('status') == 1:
+    if result and not result.get("error") and result.get('status') == 1:
         logger.info(f"Invoice created successfully: {result.get('id')}")
         return result.get('id')
+    if result and result.get("error"):
+        return result
     return None
 
 def update_estimate(estimate_id, estimate_data):
@@ -980,9 +990,11 @@ def update_estimate(estimate_id, estimate_data):
 def create_contact(contact_data):
     logger.info(f"Creating contact {contact_data.get('name')}...")
     result = post_data("/invoicing/v1/contacts", contact_data)
-    if result and result.get('status') == 1:
+    if result and not result.get("error") and result.get('status') == 1:
         logger.info(f"Contact created successfully: {result.get('id')}")
         return result.get('id')
+    if result and result.get("error"):
+        return result
     return None
 
 def create_estimate(estimate_data):
