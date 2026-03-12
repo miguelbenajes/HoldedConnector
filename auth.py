@@ -167,17 +167,37 @@ def extract_jwt_from_cookies(cookie_header: str) -> Optional[str]:
         return None
 
     # Decode to get access_token from session JSON
+    #
+    # @supabase/ssr cookie format (v0.5+):
+    #   - Plain JSON: '{"access_token":"eyJ...",...}'
+    #   - Base64-URL prefixed: 'base64-eyJhY2Nlc3NfdG9rZW4iOi...'
+    #     (base64url-encoded JSON, no padding, with 'base64-' prefix)
+    #   - Chunked: value split across .0, .1, .2 cookies (reassembled above)
     try:
         decoded = unquote(token_data)
-        logger.info("Cookie raw (first 200 chars): %s", decoded[:200])
-        # @supabase/ssr stores session as JSON (possibly base64-encoded)
-        try:
+
+        # Try plain JSON first (older @supabase/ssr or small sessions)
+        if decoded.startswith("{"):
             session = json.loads(decoded)
-        except json.JSONDecodeError:
-            # Try base64 decoding (some versions encode it)
-            padded = decoded + "=" * (-len(decoded) % 4)
-            session = json.loads(base64.b64decode(padded))
+            return session.get("access_token")
+
+        # Handle 'base64-' prefixed format (current @supabase/ssr)
+        if decoded.startswith("base64-"):
+            b64_data = decoded[7:]  # Strip 'base64-' prefix
+            # base64url decode: replace URL-safe chars, add padding
+            b64_standard = b64_data.replace("-", "+").replace("_", "/")
+            b64_padded = b64_standard + "=" * (-len(b64_standard) % 4)
+            session_json = base64.b64decode(b64_padded).decode("utf-8")
+            session = json.loads(session_json)
+            return session.get("access_token")
+
+        # Fallback: try raw base64url without prefix
+        b64_standard = decoded.replace("-", "+").replace("_", "/")
+        b64_padded = b64_standard + "=" * (-len(b64_standard) % 4)
+        session_json = base64.b64decode(b64_padded).decode("utf-8")
+        session = json.loads(session_json)
         return session.get("access_token")
+
     except Exception as e:
         logger.warning("Failed to parse Supabase cookie: %s", e)
         return None
