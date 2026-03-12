@@ -1,4 +1,4 @@
-const CACHE_NAME = 'holded-dashboard-v1';
+const CACHE_NAME = 'holded-dashboard-v2';
 
 // Assets to pre-cache for offline shell
 const PRECACHE_URLS = [
