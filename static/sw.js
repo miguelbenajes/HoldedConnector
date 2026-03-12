@@ -5,7 +5,7 @@
  * Static assets are updated in the background and served fresh on next load.
  * API calls bypass the SW entirely (handled by fetch interceptor in app.js).
  */
-const CACHE_NAME = 'holded-dashboard-v3';
+const CACHE_NAME = 'holded-dashboard-v4';
 
 const PRECACHE_URLS = [
   '/',

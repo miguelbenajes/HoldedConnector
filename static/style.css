@@ -1,3 +1,10 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    -webkit-font-smoothing: antialiased;
+}
+
 :root {
     --bg-dark: #020617;
     --sidebar-bg: #0f172a;
@@ -19,6 +26,7 @@
     --bg-card-hover: rgba(30, 41, 59, 0.65);
     --border-color: rgba(255, 255, 255, 0.08);
     --accent-green: #10b981;
+    --hover-bg: rgba(255, 255, 255, 0.06);
 }
 
 /* ── Light mode overrides ── */
@@ -36,6 +44,7 @@ body.light-mode {
     --bg-card: rgba(255, 255, 255, 0.9);
     --bg-card-hover: rgba(240, 244, 248, 0.95);
     --border-color: rgba(0, 0, 0, 0.08);
+    --hover-bg: rgba(0, 0, 0, 0.04);
     background-image:
         radial-gradient(circle at 0% 0%, rgba(16, 185, 129, 0.06) 0%, transparent 40%),
         radial-gradient(circle at 100% 100%, rgba(59, 130, 246, 0.06) 0%, transparent 40%);
@@ -59,12 +68,11 @@ body.light-mode .nav-item,
 body.light-mode a.nav-item,
 body.light-mode a.nav-item:link,
 body.light-mode a.nav-item:visited {
-    color: #64748b;
+    color: var(--text-gray);
 }
 body.light-mode .nav-item:hover,
 body.light-mode a.nav-item:hover {
-    background: rgba(0, 0, 0, 0.04);
-    color: #1e293b;
+    color: var(--text-white);
 }
 body.light-mode .nav-item.active,
 body.light-mode a.nav-item.active,
@@ -77,7 +85,7 @@ body.light-mode input,
 body.light-mode select {
     background: #ffffff;
     border-color: rgba(0, 0, 0, 0.15);
-    color: #1e293b;
+    color: var(--text-white);
 }
 body.light-mode .safe-mode-badge {
     background: rgba(244, 63, 94, 0.12);
@@ -121,10 +129,7 @@ body, .sidebar, .card, .stat-card, table th, table td, .nav-item, input, select 
     width: 100%;
 }
 .theme-toggle:hover {
-    background: rgba(255, 255, 255, 0.06);
-}
-body.light-mode .theme-toggle:hover {
-    background: rgba(0, 0, 0, 0.04);
+    background: var(--hover-bg);
 }
 
 /* ── Sidebar section headers ── */
@@ -185,18 +190,8 @@ body.light-mode .user-role-badge {
     display: block;
 }
 .sidebar-bottom .back-link:hover {
-    background: rgba(255, 255, 255, 0.06);
+    background: var(--hover-bg);
     text-decoration: none;
-}
-body.light-mode .sidebar-bottom .back-link:hover {
-    background: rgba(0, 0, 0, 0.04);
-}
-
-* {
-    margin: 0;
-    padding: 0;
-    box-sizing: border-box;
-    -webkit-font-smoothing: antialiased;
 }
 
 body {
@@ -266,7 +261,7 @@ a.nav-item:visited {
 
 .nav-item:hover,
 a.nav-item:hover {
-    background: rgba(255, 255, 255, 0.06);
+    background: var(--hover-bg);
     color: var(--text-white);
     text-decoration: none !important;
 }
@@ -498,7 +493,9 @@ input[type="date"] {
     font-size: 0.875rem;
     outline: none;
     color-scheme: dark;
-    /* Makes the calendar icon white */
+}
+body.light-mode input[type="date"] {
+    color-scheme: light;
 }
 
 .sync-btn {

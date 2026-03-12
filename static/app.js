@@ -117,26 +117,26 @@ function getStatusBadge(entity, status) {
         className = m.class;
     }
 
-    return `<span class="badge ${className}">${label}</span>`;
+    const span = document.createElement('span');
+    span.className = 'badge ' + className;
+    span.textContent = label;
+    return span;
 }
 
 async function fetchStats(start = null, end = null) {
     try {
         let url = '/api/summary';
         if (start && end) {
-            url = `/api/stats/range?start=${start}&end=${end}`;
+            url = `/api/stats/range?start=${parseInt(start)}&end=${parseInt(end)}`;
         }
 
-        console.log(`Fetching stats from: ${url}`);
         const response = await safeFetch(url);
         const data = await response.json();
-        console.log('Stats data received:', data);
 
         const income = data.totals ? data.totals.income : (data.income || 0);
         const expenses = data.totals ? data.totals.expenses : (data.expenses || 0);
         const balance = data.totals ? data.totals.balance : (income - expenses);
 
-        console.log(`Updating UI with: Income=${income}, Expenses=${expenses}, Balance=${balance}`);
         animateValue('totalIncome', income);
         animateValue('totalExpenses', expenses);
         animateValue('netBalance', balance);
@@ -148,7 +148,6 @@ async function fetchStats(start = null, end = null) {
 function animateValue(id, value) {
     const obj = document.getElementById(id);
     if (obj) {
-        console.log(`Setting ${id} to ${value}`);
         obj.textContent = formatter.format(value);
     } else {
         console.error(`Element with id "${id}" not found.`);
@@ -159,10 +158,9 @@ let performanceChartInstance = null; // Renamed to avoid confusion with the ID
 
 async function renderCharts(start = null, end = null) {
     try {
-        console.log(`Rendering charts with range: ${start} to ${end}`);
         let url = '/api/stats/monthly';
         if (start && end) {
-            url = `/api/stats/monthly?start=${start}&end=${end}`;
+            url = `/api/stats/monthly?start=${parseInt(start)}&end=${parseInt(end)}`;
         }
 
         const response = await safeFetch(url);
@@ -174,7 +172,6 @@ async function renderCharts(start = null, end = null) {
 
         // Destroy existing chart if it exists
         if (performanceChartInstance) {
-            console.log('Destroying existing chart instance');
             performanceChartInstance.destroy();
         }
 
@@ -245,13 +242,11 @@ async function fetchRecentActivity(start = null, end = null) {
     try {
         let url = '/api/recent';
         if (start && end) {
-            url = `/api/recent?start=${start}&end=${end}`;
+            url = `/api/recent?start=${parseInt(start)}&end=${parseInt(end)}`;
         }
         const response = await safeFetch(url);
         const data = await response.json();
         const body = document.getElementById('recentBody');
-        body.innerHTML = '';
-
         body.innerHTML = data.map(item => {
             const date = new Date(item.date * 1000).toLocaleDateString();
             const typeBadge = item.type === 'income' ? 'badge-income' : 'badge-expense';
@@ -261,7 +256,7 @@ async function fetchRecentActivity(start = null, end = null) {
                     <td style="font-weight: 600">${escapeHtml(item.contact_name)}</td>
                     <td style="color: var(--text-gray)">${escapeHtml(date)}</td>
                     <td style="font-weight: 800">${formatter.format(item.amount)}</td>
-                    <td>${getStatusBadge(item.type === 'income' ? 'invoices' : 'purchases', item.status)}</td>
+                    <td>${getStatusBadge(item.type === 'income' ? 'invoices' : 'purchases', item.status).outerHTML}</td>
                 </tr>
             `;
         }).join('');
@@ -327,7 +322,6 @@ document.getElementById('syncBtn').addEventListener('click', async () => {
 
 // View Management
 function showView(viewName) {
-    console.log(`Showing view: ${viewName}`);
     document.querySelectorAll('.view-container').forEach(v => {
         v.classList.remove('active');
         v.style.display = 'none'; // Backup for CSS
@@ -372,7 +366,10 @@ function showView(viewName) {
 let currentEntityData = [];
 let currentSort = { column: null, direction: 'asc' };
 
+const VALID_ENTITIES = ['contacts', 'products', 'invoices', 'purchases', 'estimates'];
+
 async function loadEntityData(entity) {
+    if (!VALID_ENTITIES.includes(entity)) return;
     const titleMap = {
         'contacts': 'Contacts (Clients & Suppliers)',
         'products': 'Inventory (Products & Services)',
@@ -393,7 +390,6 @@ async function loadEntityData(entity) {
     tbody.innerHTML = '<tr><td colspan="100" style="text-align:center">Loading data...</td></tr>';
 
     try {
-        console.log(`Fetching entity: ${entity}`);
         const response = await fetch(`/api/entities/${entity}`);
         if (!response.ok) throw new Error(`Server returned ${response.status}`);
 
@@ -472,7 +468,7 @@ function renderEntityTable(entity) {
     };
 
     // ── Header render with right-click column configurator + drag to reorder ──
-    while (thead.firstChild) thead.removeChild(thead.firstChild);
+    thead.textContent = '';
     const headerRow = document.createElement('tr');
     let dragSrcKey = null;
 
@@ -668,7 +664,7 @@ function renderEntityTable(entity) {
                 toggle.addEventListener('click', (e) => e.stopPropagation());
                 td.appendChild(toggle);
             } else if (key.toLowerCase() === 'status' && (entity === 'invoices' || entity === 'estimates' || entity === 'purchases')) {
-                td.innerHTML = getStatusBadge(entity, val);
+                td.appendChild(getStatusBadge(entity, val));
             } else if (moneyKeys.includes(key.toLowerCase()) && val !== null) {
                 const num = parseFloat(val);
                 td.textContent = isNaN(num) ? val : formatter.format(num);
@@ -702,7 +698,7 @@ function renderEntityTable(entity) {
                 editLink.className = 'action-btn';
                 editLink.href = hUrl;
                 editLink.target = '_blank';
-                editLink.rel = 'noopener';
+                editLink.rel = 'noopener noreferrer';
                 editLink.title = 'Editar en Holded';
                 editLink.style.cssText = 'text-decoration:none;display:inline-flex;align-items:center;gap:3px';
                 editLink.textContent = '✏️ Holded';
@@ -750,7 +746,8 @@ var entityDatePicker = null;
 })();
 
 async function openDocumentDetails(type, id) {
-    console.log(`Opening details for ${type} ID: ${id}`);
+    if (!VALID_ENTITIES.includes(type)) return;
+    if (!/^[a-zA-Z0-9_-]+$/.test(id)) return;
     const modal = document.getElementById('detailsModal');
     const thead = document.getElementById('modalThead');
     const tbody = document.getElementById('modalTbody');
@@ -768,13 +765,11 @@ async function openDocumentDetails(type, id) {
     try {
         // Correct endpoint for purchases if needed
         const url = `/api/entities/${type}/${id}/items`;
-        console.log(`Fetching: ${url}`);
 
         const response = await fetch(url);
         if (!response.ok) throw new Error(`Status ${response.status}`);
 
         const data = await response.json();
-        console.log('Line items data:', data);
 
         title.textContent = `Details for ${type.slice(0, -1).toUpperCase()} #${id}`;
 
@@ -786,20 +781,19 @@ async function openDocumentDetails(type, id) {
         const keys = Object.keys(data[0]);
         const displayKeys = keys.filter(k => !k.includes('_id') && k !== 'id');
 
-        thead.innerHTML = `<tr>${displayKeys.map(k => {
-            const labels = {
-                'name': 'CONCEPTO',
-                'sku': 'SKU',
-                'units': 'UDS',
-                'price': 'PRECIO',
-                'subtotal': 'SUBTOTAL',
-                'discount': 'DTO %',
-                'tax': 'IVA %',
-                'retention': 'IRPF %',
-                'account': 'CUENTA'
-            };
-            return `<th>${labels[k.toLowerCase()] || k.toUpperCase()}</th>`;
-        }).join('')}</tr>`;
+        const DETAIL_LABELS = {
+            'name': 'CONCEPTO', 'sku': 'SKU', 'units': 'UDS',
+            'price': 'PRECIO', 'subtotal': 'SUBTOTAL', 'discount': 'DTO %',
+            'tax': 'IVA %', 'retention': 'IRPF %', 'account': 'CUENTA'
+        };
+        thead.textContent = '';
+        const headRow = document.createElement('tr');
+        displayKeys.forEach(k => {
+            const th = document.createElement('th');
+            th.textContent = DETAIL_LABELS[k.toLowerCase()] || k.toUpperCase();
+            headRow.appendChild(th);
+        });
+        thead.appendChild(headRow);
 
         tbody.innerHTML = '';
         data.forEach(item => {
@@ -833,7 +827,7 @@ async function openDocumentDetails(type, id) {
 }
 
 async function openProductDetails(id, name) {
-    console.log(`Opening details for product: ${name} (${id})`);
+    if (!/^[a-zA-Z0-9_-]+$/.test(id)) return;
     const modal = document.getElementById('detailsModal');
     const thead = document.getElementById('modalThead');
     const tbody = document.getElementById('modalTbody');
@@ -899,7 +893,7 @@ async function openProductDetails(id, name) {
 }
 
 async function openContactDetails(id, name) {
-    console.log(`Opening details for contact: ${name} (${id})`);
+    if (!/^[a-zA-Z0-9_-]+$/.test(id)) return;
     const modal = document.getElementById('detailsModal');
     const thead = document.getElementById('modalThead');
     const tbody = document.getElementById('modalTbody');
@@ -943,7 +937,7 @@ async function openContactDetails(id, name) {
                 <td>${escapeHtml(item.id)}</td>
                 <td>${escapeHtml(date)}</td>
                 <td style="font-weight:700">${formatter.format(item.amount)}</td>
-                <td>${getStatusBadge(docType, item.status)}</td>
+                <td>${getStatusBadge(docType, item.status).outerHTML}</td>
                 <td>
                     <div style="display:flex; gap:5px">
                         <button class="action-btn" title="View Details" onclick="openDocumentDetails('${escapeHtml(docType)}', '${escapeHtml(item.id)}')">
@@ -972,6 +966,7 @@ function closeModal() {
 let currentPdfData = null;
 
 function openPdfModal(type, id) {
+    if (!VALID_ENTITIES.includes(type) || !/^[a-zA-Z0-9_-]+$/.test(id)) return;
     const modal = document.getElementById('pdfModal');
     const frame = document.getElementById('pdfFrame');
     const title = document.getElementById('pdfModalTitle');
@@ -1010,7 +1005,6 @@ async function shareDocument(type, id) {
                 text: text,
                 url: url
             });
-            console.log('Document shared successfully');
         } catch (err) {
             console.error('Error sharing:', err);
         }
