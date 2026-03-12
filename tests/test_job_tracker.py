@@ -103,7 +103,63 @@ class TestSanitizeForMarkdown:
         assert "\\|" in result
 
 
-from skills.job_tracker import render_job_note
+from skills.job_tracker import render_job_note, ensure_job
+import connector
+
+
+class TestEnsureJob:
+    """Test job upsert logic. Requires DB connection."""
+
+    def setup_method(self):
+        connector.init_db()
+        self.conn = connector.get_db()
+        self.cur = connector._cursor(self.conn)
+
+    def teardown_method(self):
+        self.cur.execute(connector._q("DELETE FROM jobs WHERE project_code LIKE 'TEST-%'"))
+        self.cur.execute(connector._q("DELETE FROM job_note_queue WHERE project_code LIKE 'TEST-%'"))
+        self.conn.commit()
+        connector.release_db(self.conn)
+
+    def test_create_new_job(self):
+        doc_data = {
+            "client_id": "contact123",
+            "client_name": "Test Client",
+            "shooting_dates_raw": "17/3-21/3",
+            "estimate_id": "est123",
+            "estimate_number": "QUOTE-26/TEST",
+            "invoice_id": None,
+            "invoice_number": None,
+            "doc_date": 1742169600,
+        }
+        result = ensure_job("TEST-260317", doc_data, self.cur)
+        self.conn.commit()
+        assert result["project_code"] == "TEST-260317"
+        assert result["status"] == "open"
+        assert result["estimate_id"] == "est123"
+
+    def test_update_existing_job_with_invoice(self):
+        doc_data = {
+            "client_id": "c1", "client_name": "Client",
+            "shooting_dates_raw": "1/4", "estimate_id": "est1",
+            "estimate_number": "Q-1", "invoice_id": None,
+            "invoice_number": None, "doc_date": 1742169600,
+        }
+        ensure_job("TEST-UPDATE", doc_data, self.cur)
+        self.conn.commit()
+
+        doc_data2 = {
+            "client_id": "c1", "client_name": "Client",
+            "shooting_dates_raw": "1/4", "estimate_id": None,
+            "estimate_number": None, "invoice_id": "inv1",
+            "invoice_number": "INV-1", "doc_date": 1742169600,
+        }
+        result = ensure_job("TEST-UPDATE", doc_data2, self.cur)
+        self.conn.commit()
+
+        assert result["estimate_id"] == "est1"  # preserved
+        assert result["invoice_id"] == "inv1"    # added
+        assert result["status"] == "invoiced"    # auto-transition
 
 
 class TestRenderJobNote:

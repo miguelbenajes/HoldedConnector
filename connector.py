@@ -912,6 +912,21 @@ def sync_documents(doc_type, table, items_table, fk_column):
             cursor.execute(_q(f'UPDATE {table} SET project_code = ?, shooting_dates_raw = ? WHERE id = ?'),
                            (project_code, shooting_raw, doc_id))
 
+            # If this doc has a project code, ensure job exists
+            if project_code:
+                from skills.job_tracker import ensure_job
+                doc_data = {
+                    "client_id": item.get('contact'),
+                    "client_name": item.get('contactName'),
+                    "shooting_dates_raw": shooting_raw,
+                    "estimate_id": doc_id if table == 'estimates' else None,
+                    "estimate_number": item.get('docNumber') if table == 'estimates' else None,
+                    "invoice_id": doc_id if table == 'invoices' else None,
+                    "invoice_number": item.get('docNumber') if table == 'invoices' else None,
+                    "doc_date": item.get('date'),
+                }
+                ensure_job(project_code, doc_data, cursor)
+
         conn.commit()
     finally:
         release_db(conn)
@@ -1205,6 +1220,21 @@ def _upsert_single_document(cursor, doc, table, items_table, fk_column):
     shooting_raw = _extract_shooting_dates(doc.get('products'))
     cursor.execute(_q(f'UPDATE {table} SET project_code = ?, shooting_dates_raw = ? WHERE id = ?'),
                    (project_code, shooting_raw, doc_id))
+
+    # If this doc has a project code, ensure job exists
+    if project_code:
+        from skills.job_tracker import ensure_job
+        doc_data = {
+            "client_id": doc.get('contact'),
+            "client_name": doc.get('contactName'),
+            "shooting_dates_raw": shooting_raw,
+            "estimate_id": doc_id if table == 'estimates' else None,
+            "estimate_number": doc.get('docNumber') if table == 'estimates' else None,
+            "invoice_id": doc_id if table == 'invoices' else None,
+            "invoice_number": doc.get('docNumber') if table == 'invoices' else None,
+            "doc_date": doc.get('date'),
+        }
+        ensure_job(project_code, doc_data, cursor)
 
 
 def _upsert_single_contact(cursor, contact):

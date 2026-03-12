@@ -269,3 +269,143 @@ tags: [coyote, job, seguimiento]
 - [ ] Equipment returned / damages checked
 - [ ] Final invoice created
 """
+
+
+# ── Job Management ─────────────────────────────────────────────────────────────
+
+def _get_connector():
+    """Lazy import of connector module to avoid circular imports."""
+    import connector
+    return connector
+
+
+def ensure_job(project_code, doc_data, cursor):
+    """Upsert a job in the jobs table. Creates or updates based on project_code.
+
+    Merge strategy:
+      - estimate_id/invoice_id: update only if new value is non-None
+      - shooting_dates: always update to latest
+      - status: auto-transition to 'invoiced' when invoice_id set; otherwise no change
+
+    Args:
+        project_code: job identifier (e.g. 'NETFLIX-260315')
+        doc_data: dict with client_id, client_name, shooting_dates_raw,
+                  estimate_id, estimate_number, invoice_id, invoice_number, doc_date
+        cursor: DB cursor (from connector.get_db())
+
+    Returns:
+        Dict with the job row data.
+    """
+    conn_mod = _get_connector()
+
+    # Parse shooting dates
+    ref_year = datetime.now().year
+    if doc_data.get("doc_date"):
+        try:
+            ref_year = datetime.fromtimestamp(doc_data["doc_date"]).year
+        except (OSError, ValueError):
+            pass
+
+    shooting_raw = doc_data.get("shooting_dates_raw") or ""
+    parsed_dates = parse_shooting_dates(shooting_raw, ref_year)
+    parsed_json = json.dumps(parsed_dates)
+
+    # Derive quarter from first shooting date, fallback to doc date, then current
+    quarter = None
+    if parsed_dates:
+        quarter = get_quarter(parsed_dates[0])
+    elif doc_data.get("doc_date"):
+        try:
+            dt = datetime.fromtimestamp(doc_data["doc_date"])
+            quarter = get_quarter(dt.strftime("%Y-%m-%d"))
+        except (OSError, ValueError):
+            pass
+    if not quarter:
+        quarter = get_quarter(date.today().isoformat())
+
+    # Look up client email from contacts table
+    client_email = ""
+    client_id = doc_data.get("client_id")
+    if client_id:
+        try:
+            cursor.execute(conn_mod._q(
+                "SELECT email FROM contacts WHERE id = ?"
+            ), (client_id,))
+            row = cursor.fetchone()
+            if row:
+                client_email = (row["email"] if isinstance(row, dict) else row[0]) or ""
+        except Exception:
+            pass
+
+    # Check if job exists
+    cursor.execute(conn_mod._q(
+        "SELECT * FROM jobs WHERE project_code = ?"
+    ), (project_code,))
+    existing = cursor.fetchone()
+
+    if existing:
+        if not isinstance(existing, dict):
+            cols = [d[0] for d in cursor.description]
+            existing = dict(zip(cols, existing))
+
+        est_id = doc_data.get("estimate_id") or existing.get("estimate_id")
+        est_num = doc_data.get("estimate_number") or existing.get("estimate_number")
+        inv_id = doc_data.get("invoice_id") or existing.get("invoice_id")
+        inv_num = doc_data.get("invoice_number") or existing.get("invoice_number")
+
+        status = existing.get("status", "open")
+        if inv_id and status in ("open", "shooting"):
+            status = "invoiced"
+
+        now_str = datetime.now().isoformat()
+        cursor.execute(conn_mod._q("""
+            UPDATE jobs SET
+                client_id = ?, client_name = ?, client_email = ?,
+                shooting_dates_raw = ?, shooting_dates = ?, quarter = ?,
+                estimate_id = ?, estimate_number = ?,
+                invoice_id = ?, invoice_number = ?,
+                status = ?, updated_at = ?
+            WHERE project_code = ?
+        """), (
+            client_id or existing.get("client_id"),
+            doc_data.get("client_name") or existing.get("client_name"),
+            client_email or existing.get("client_email"),
+            shooting_raw or existing.get("shooting_dates_raw"),
+            parsed_json, quarter,
+            est_id, est_num, inv_id, inv_num,
+            status, now_str, project_code,
+        ))
+        action = "update"
+    else:
+        now_str = datetime.now().isoformat()
+        cursor.execute(conn_mod._q("""
+            INSERT INTO jobs (
+                project_code, client_id, client_name, client_email,
+                status, shooting_dates_raw, shooting_dates, quarter,
+                estimate_id, estimate_number, invoice_id, invoice_number,
+                created_at, updated_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """), (
+            project_code, client_id,
+            doc_data.get("client_name"), client_email,
+            "open", shooting_raw, parsed_json, quarter,
+            doc_data.get("estimate_id"), doc_data.get("estimate_number"),
+            doc_data.get("invoice_id"), doc_data.get("invoice_number"),
+            now_str, now_str,
+        ))
+        action = "create"
+
+    # Queue note sync
+    cursor.execute(conn_mod._q("""
+        INSERT INTO job_note_queue (project_code, action) VALUES (?, ?)
+    """), (project_code, action))
+
+    # Fetch and return the row
+    cursor.execute(conn_mod._q(
+        "SELECT * FROM jobs WHERE project_code = ?"
+    ), (project_code,))
+    row = cursor.fetchone()
+    if not isinstance(row, dict):
+        cols = [d[0] for d in cursor.description]
+        row = dict(zip(cols, row))
+    return row
