@@ -777,14 +777,22 @@
                         nav.appendChild(header);
                     }
                     for (const item of section.items) {
-                        const isActive = (item.href === '/panel/holded/' || item.href === '/panel/holded') ? ' active' : '';
                         const el = document.createElement('a');
                         el.href = item.href;
+                        // Highlight current page (holded) in sidebar
+                        const itemPath = item.href.replace(/\/$/, '');
+                        const isActive = (itemPath === '/panel/holded') ? ' active' : '';
                         el.className = 'nav-item' + isActive;
                         el.textContent = item.label;
                         nav.appendChild(el);
                     }
                 }
+                // Ensure Holded is highlighted as active (post-render for reliability)
+                nav.querySelectorAll('a.nav-item').forEach(function(a) {
+                    if (a.pathname.replace(/\/$/, '') === '/panel/holded') {
+                        a.classList.add('active');
+                    }
+                });
 
                 // User info + logout
                 if (data.user) {
