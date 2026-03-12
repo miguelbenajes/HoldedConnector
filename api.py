@@ -1521,7 +1521,7 @@ def agent_send_document(doc_type: str, doc_id: str, body: SendDocumentBody):
 
 
 class ConvertEstimateBody(BaseModel):
-    estimate_id: str = Field(..., min_length=24, max_length=24)
+    estimate_id: str = Field(..., min_length=24, max_length=24, pattern=r'^[a-f0-9]{24}$')
 
 
 @app.post("/api/agent/convert-estimate")
@@ -1558,6 +1558,8 @@ def get_treasury_accounts():
         response = requests.get(url, headers=connector.HEADERS, timeout=15)
         if response.status_code == 200:
             accounts = response.json()
+            if not isinstance(accounts, list):
+                return JSONResponse(status_code=502, content={"error": "Unexpected response format from Holded"})
             # Return only safe fields
             return [
                 {
@@ -1580,9 +1582,9 @@ def get_treasury_accounts():
 
 class PayDocumentBody(BaseModel):
     date: int = Field(..., description="Payment date as Unix timestamp")
-    amount: float = Field(..., description="Payment amount in EUR")
-    treasury: str = Field(..., description="Treasury/bank account ID from Holded")
-    desc: str = Field("", description="Payment description")
+    amount: float = Field(..., gt=0, le=999999.99, description="Payment amount in EUR")
+    treasury: str = Field(..., min_length=1, max_length=64, description="Treasury/bank account ID from Holded")
+    desc: str = Field("", max_length=500, description="Payment description")
 
 
 @app.post("/api/documents/{doc_type}/{doc_id}/pay")
@@ -1593,8 +1595,11 @@ def pay_document(doc_type: str, doc_id: str, body: PayDocumentBody):
         return JSONResponse(status_code=400, content={"error": "doc_type must be 'invoice' or 'purchase'"})
     if not _re_mod.match(r'^[a-f0-9]{24}$', doc_id):
         return JSONResponse(status_code=400, content={"error": "Invalid document ID format"})
-    if body.amount <= 0:
-        return JSONResponse(status_code=400, content={"error": "Amount must be positive"})
+
+    # Validate date is reasonable (2020–01–01 to ~2 years ahead)
+    max_ts = int(time.time()) + (2 * 365 * 86400)
+    if body.date < 1577836800 or body.date > max_ts:
+        return JSONResponse(status_code=400, content={"error": "Payment date out of valid range"})
 
     payload = {
         "date": body.date,

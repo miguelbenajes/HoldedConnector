@@ -385,32 +385,25 @@ async function loadEntityData(entity) {
 
     document.getElementById('entityViewTitle').textContent = titleMap[entity] || 'Entity Details';
 
-    // Dynamic "New" header buttons per entity type
+    // Dynamic "New" header button — links to Holded web
     var existingNewBtn = document.getElementById('entityNewBtn');
     if (existingNewBtn) existingNewBtn.remove();
-    const holdedNewUrls = {
-        'invoices':  'https://app.holded.com/sales#open:invoice-new',
-        'estimates': 'https://app.holded.com/sales#open:estimate-new',
-        'purchases': 'https://app.holded.com/purchases#open:purchase-new',
-        'contacts':  'https://app.holded.com/contacts/new',
-        'products':  'https://app.holded.com/inventory/products/new',
+    const NEW_BUTTON_CONFIG = {
+        'invoices':  { url: 'https://app.holded.com/sales#open:invoice-new',    label: '+ Nueva Factura' },
+        'estimates': { url: 'https://app.holded.com/sales#open:estimate-new',   label: '+ Nuevo Presupuesto' },
+        'purchases': { url: 'https://app.holded.com/purchases#open:purchase-new', label: '+ Nueva Compra' },
+        'contacts':  { url: 'https://app.holded.com/contacts/new',              label: '+ Nuevo Contacto' },
+        'products':  { url: 'https://app.holded.com/inventory/products/new',    label: '+ Nuevo Producto' },
     };
-    var newUrl = holdedNewUrls[entity];
-    if (newUrl) {
-        var newBtnLabels = {
-            'invoices': '+ Nueva Factura',
-            'estimates': '+ Nuevo Presupuesto',
-            'purchases': '+ Nueva Compra',
-            'contacts': '+ Nuevo Contacto',
-            'products': '+ Nuevo Producto',
-        };
+    var newCfg = NEW_BUTTON_CONFIG[entity];
+    if (newCfg) {
         var newBtn = document.createElement('a');
         newBtn.id = 'entityNewBtn';
         newBtn.className = 'sync-btn';
-        newBtn.href = newUrl;
+        newBtn.href = newCfg.url;
         newBtn.target = '_blank';
         newBtn.rel = 'noopener noreferrer';
-        newBtn.textContent = newBtnLabels[entity] || '+ Nuevo';
+        newBtn.textContent = newCfg.label;
         newBtn.style.cssText = 'text-decoration:none;display:inline-flex;align-items:center';
         var filterControls = document.querySelector('#view-entity .filter-controls');
         if (filterControls) filterControls.insertBefore(newBtn, filterControls.firstChild);
@@ -742,10 +735,12 @@ function renderEntityTable(entity) {
                 payBtn.className = 'action-btn btn-pay';
                 payBtn.title = 'Registrar pago';
                 payBtn.textContent = '💰 Pagar';
+                // Prefer payments_pending (outstanding balance) over total amount
+                var pendingAmt = parseFloat(row.payments_pending) || parseFloat(row.amount) || 0;
                 payBtn.addEventListener('click', (function(rid, amt) { return function(e) {
                     e.stopPropagation();
                     openPayModal(rid, amt);
-                }; })(row.id, row.amount || 0));
+                }; })(row.id, pendingAmt));
                 wrap.appendChild(payBtn);
             }
 
@@ -3476,7 +3471,8 @@ async function submitPayment() {
 
     if (!treasury) { errEl.textContent = 'Selecciona una cuenta bancaria'; return; }
     if (!dateStr) { errEl.textContent = 'La fecha es obligatoria'; return; }
-    if (!amount || amount <= 0) { errEl.textContent = 'El importe debe ser mayor que 0'; return; }
+    if (isNaN(amount) || amount <= 0) { errEl.textContent = 'El importe debe ser mayor que 0'; return; }
+    if (amount > 999999.99) { errEl.textContent = 'Importe demasiado alto'; return; }
 
     // Convert date to Unix timestamp (start of day UTC)
     var dateTs = Math.floor(new Date(dateStr + 'T00:00:00').getTime() / 1000);
