@@ -401,7 +401,14 @@ async function loadEntityData(entity) {
         renderEntityTable(entity);
     } catch (e) {
         console.error(`Error in loadEntityData(${entity}):`, e);
-        tbody.innerHTML = `<tr><td colspan="100" style="text-align:center; color: var(--danger)">Error: ${e.message}</td></tr>`;
+        tbody.textContent = '';
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 100;
+        td.style.cssText = 'text-align:center; color:var(--danger)';
+        td.textContent = 'Error: ' + (e.message || 'Unknown error');
+        tr.appendChild(td);
+        tbody.appendChild(tr);
     }
 }
 
@@ -1737,7 +1744,7 @@ document.addEventListener('DOMContentLoaded', function() {
 function toggleTheme() {
     const isLight = document.body.classList.toggle('light-mode');
     const btn = document.getElementById('themeToggle');
-    btn.textContent = isLight ? '☀️ Light' : '🌙 Dark';
+    if (btn) btn.textContent = isLight ? '☀️ Light' : '🌙 Dark';
     localStorage.setItem('theme', isLight ? 'light' : 'dark');
 }
 

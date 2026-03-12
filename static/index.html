@@ -19,7 +19,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js" integrity="sha384-jb8JQMbMoBUzgWatfe6COACi2ljcDdZQ2OxczGA3bGNeWe+6DChMTBJemed7ZnvJ" crossorigin="anonymous"></script>
 </head>
 
 <body>
@@ -40,9 +40,9 @@
         </aside>
 
         <!-- Right side: subnav + content stacked vertically -->
-        <div class="holded-main" style="display:flex;flex-direction:column;flex-grow:1;min-width:0;overflow:hidden">
+        <div class="holded-main">
             <!-- Holded internal nav (horizontal tab bar) -->
-            <div class="holded-subnav" id="holdedSubnav" style="display:flex;gap:0.25rem;padding:0.5rem 1rem;background:var(--card-bg);border-bottom:1px solid var(--glass-border);overflow-x:auto;flex-shrink:0">
+            <div class="holded-subnav" id="holdedSubnav">
                 <div class="nav-item active" data-view="overview">Overview</div>
                 <div class="nav-item" data-view="contacts">Contacts</div>
                 <div class="nav-item" data-view="products">Inventory</div>
@@ -768,6 +768,7 @@
                 const res = await _originalFetch('/api/panel/menu');
                 if (!res.ok) return;
                 const data = await res.json();
+                if (!Array.isArray(data.sections)) return;
                 const nav = document.getElementById('panelMenuNav');
                 const userInfo = document.getElementById('panelUserInfo');
 
@@ -790,39 +791,27 @@
                         nav.appendChild(el);
                     }
                 }
-                // Mark Holded as active in sidebar — delayed to survive showView race
-                function markHoldedActive() {
-                    nav.querySelectorAll('a.nav-item').forEach(function(a) {
-                        if (a.pathname.replace(/\/$/, '') === '/panel/holded') {
-                            a.classList.add('active');
-                        }
-                    });
-                }
-                markHoldedActive();
-                // Re-apply after showView settles (config load is async, races with menu)
-                setTimeout(markHoldedActive, 500);
-                setTimeout(markHoldedActive, 1500);
-
                 // User info + logout
                 if (data.user) {
                     const nameEl = document.createElement('div');
                     nameEl.textContent = data.user.name;
-                    nameEl.style.fontWeight = '600';
-                    nameEl.style.marginBottom = '0.25rem';
+                    nameEl.className = 'user-name';
                     userInfo.appendChild(nameEl);
 
                     const roleEl = document.createElement('span');
                     roleEl.textContent = data.user.role;
-                    roleEl.style.cssText = 'font-size:0.7rem;padding:0.15rem 0.4rem;border-radius:9999px;background:rgba(255,255,255,0.1)';
+                    roleEl.className = 'user-role-badge';
                     userInfo.appendChild(roleEl);
 
                     const logoutBtn = document.createElement('a');
-                    logoutBtn.href = data.logout_href;
+                    logoutBtn.href = '/api/panel/auth';
                     logoutBtn.textContent = 'Sign out';
-                    logoutBtn.style.cssText = 'display:block;margin-top:0.5rem;color:var(--text-gray);font-size:0.8rem;text-decoration:none';
+                    logoutBtn.className = 'user-logout';
                     logoutBtn.onclick = async function(e) {
                         e.preventDefault();
-                        await _originalFetch(data.logout_href, { method: 'DELETE' });
+                        try {
+                            await _originalFetch('/api/panel/auth', { method: 'DELETE' });
+                        } catch { /* logout best-effort */ }
                         window.location.href = '/panel';
                     };
                     userInfo.appendChild(logoutBtn);
