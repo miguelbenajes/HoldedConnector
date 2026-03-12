@@ -1717,21 +1717,27 @@ def backup_status():
 @app.get("/api/jobs")
 def list_jobs(status: str = None, quarter: str = None, limit: int = 50):
     """List jobs, optionally filtered by status and/or quarter."""
+    VALID_STATUSES = {"open", "shooting", "invoiced", "closed"}
+    limit = min(max(1, limit), 200)
     conn = connector.get_db()
     try:
         cur = connector._cursor(conn)
         conditions = []
         params = []
         if status:
-            conditions.append(connector._q("status = ?"))
+            if status not in VALID_STATUSES:
+                return JSONResponse({"error": f"Invalid status. Must be one of: {', '.join(sorted(VALID_STATUSES))}"}, status_code=400)
+            conditions.append("status = ?")
             params.append(status)
         if quarter:
-            conditions.append(connector._q("quarter = ?"))
+            if not _re_mod.match(r'^[1-4]T_\d{4}$', quarter):
+                return JSONResponse({"error": "Invalid quarter format. Expected: 1T_2026"}, status_code=400)
+            conditions.append("quarter = ?")
             params.append(quarter)
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        cur.execute(connector._q(f"SELECT * FROM jobs {where} ORDER BY updated_at DESC LIMIT ?"),
-                    (*params, limit))
+        sql = f"SELECT * FROM jobs {where} ORDER BY updated_at DESC LIMIT ?"
+        cur.execute(connector._q(sql), (*params, limit))
         rows = cur.fetchall()
         result = []
         for r in rows:
@@ -1748,9 +1754,11 @@ def list_jobs(status: str = None, quarter: str = None, limit: int = 50):
 def create_job(request: dict):
     """Create a new job (Brain's entry point)."""
     from skills.job_tracker import ensure_job
-    project_code = request.get("project_code")
+    project_code = (request.get("project_code") or "").strip()
     if not project_code:
         return JSONResponse({"error": "project_code required"}, status_code=400)
+    if len(project_code) > 50 or not _re_mod.match(r'^[A-Za-z0-9_\- ]+$', project_code):
+        return JSONResponse({"error": "Invalid project_code (max 50 chars, alphanumeric/dash/underscore)"}, status_code=400)
 
     conn = connector.get_db()
     try:
@@ -1814,6 +1822,13 @@ def get_job(code: str):
 @app.patch("/api/jobs/{code}")
 def update_job(code: str, request: dict):
     """Update job fields (status, shooting_dates, invoice_id, etc.)."""
+    VALID_STATUSES = {"open", "shooting", "invoiced", "closed"}
+    ALLOWED_FIELDS = {"status", "shooting_dates_raw", "invoice_id", "invoice_number", "note_path"}
+
+    # Validate status if provided
+    if "status" in request and request["status"] not in VALID_STATUSES:
+        return JSONResponse({"error": f"Invalid status. Must be one of: {', '.join(sorted(VALID_STATUSES))}"}, status_code=400)
+
     conn = connector.get_db()
     try:
         cur = connector._cursor(conn)
@@ -1822,16 +1837,13 @@ def update_job(code: str, request: dict):
         if not cur.fetchone():
             return JSONResponse({"error": "Job not found"}, status_code=404)
 
-        allowed = {"status", "shooting_dates_raw", "invoice_id", "invoice_number", "note_path"}
-        updates = {k: v for k, v in request.items() if k in allowed}
+        updates = {k: v for k, v in request.items() if k in ALLOWED_FIELDS}
         if not updates:
             return JSONResponse({"error": "No valid fields to update"}, status_code=400)
 
-        set_parts = []
-        values = []
-        for k, v in updates.items():
-            set_parts.append(f"{k} = {connector._q('?')}")
-            values.append(v)
+        # Build SET clause with ? placeholders, then convert once via _q()
+        set_parts = [f"{k} = ?" for k in updates]
+        values = list(updates.values())
 
         set_clause = ", ".join(set_parts)
         values.append(datetime.now().isoformat())
@@ -1853,6 +1865,8 @@ def update_job(code: str, request: dict):
 @app.post("/api/jobs/{code}/sync-note")
 def sync_job_note(code: str):
     """Force re-render and push job note to Obsidian."""
+    if not code or len(code) > 50:
+        return JSONResponse({"error": "Invalid code"}, status_code=400)
     from skills.job_tracker import sync_job_to_obsidian
     success = sync_job_to_obsidian(code)
     if success:

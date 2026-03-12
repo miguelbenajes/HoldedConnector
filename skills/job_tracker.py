@@ -14,9 +14,12 @@ Path convention:
 import os
 import re
 import json
+import base64
 import logging
 import hashlib
 from datetime import date, datetime, timedelta
+
+import requests as http_requests
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +85,9 @@ def parse_shooting_dates(raw, reference_year):
                     # Cross-year: if end < start, bump end year
                     if end_date < start_date:
                         end_date = end_date.replace(year=end_date.year + 1)
+                    # Safety: cap at 60 days to prevent runaway ranges
+                    if (end_date - start_date).days > 60:
+                        continue
                     current = start_date
                     while current <= end_date:
                         dates.add(current)
@@ -413,8 +419,6 @@ def ensure_job(project_code, doc_data, cursor):
 
 # ── Obsidian Sync ──────────────────────────────────────────────────────────────
 
-import requests as http_requests  # avoid shadowing
-
 MAX_PDF_SIZE = 5 * 1024 * 1024  # 5MB
 
 
@@ -443,7 +447,7 @@ def _brain_write(path, content, append=False, binary=False):
         )
         if resp.status_code == 200:
             return True
-        logger.error(f"[JOB_TRACKER] Brain write failed: {resp.status_code} {resp.text}")
+        logger.error(f"[JOB_TRACKER] Brain write failed: {resp.status_code} (path={path})")
         return False
     except Exception as e:
         logger.error(f"[JOB_TRACKER] Brain unreachable: {e}")
@@ -521,7 +525,6 @@ def sync_job_to_obsidian(project_code):
                     try:
                         json_data = pdf_resp.json()
                         if "data" in json_data:
-                            import base64
                             pdf_data = base64.b64decode(json_data["data"])
                     except Exception:
                         pdf_data = pdf_resp.content
@@ -530,7 +533,6 @@ def sync_job_to_obsidian(project_code):
                         new_hash = hashlib.md5(pdf_data).hexdigest()
                         if new_hash != job.get("pdf_hash"):
                             if len(pdf_data) <= MAX_PDF_SIZE:
-                                import base64
                                 pdf_b64 = base64.b64encode(pdf_data).decode()
                                 pdf_filename = f"{safe_code}_{doc_num}.pdf"
                                 _brain_write(f"{attach_dir}/{pdf_filename}", pdf_b64, binary=True)
