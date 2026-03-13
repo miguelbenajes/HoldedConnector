@@ -844,29 +844,33 @@ def sync_documents(doc_type, table, items_table, fk_column):
             tags   = json.dumps(item.get('tags') or [])
             notes  = item.get('notes') or ''
 
-            # --- Holded API status derivation ----------------------------------
-            # Holded API status field is unreliable:
+            # --- Holded API status derivation (invoices only) --------------------
+            # Holded API status field is unreliable for invoices:
             #   API 0 = draft (but also returned for approved invoices — buggy)
             #   API 1 = approved (but doesn't distinguish paid/unpaid/overdue)
             #   API 3 = cancelled (Anulado)
             # We derive the real status from multiple fields:
             #   0 = draft, 1 = pending, 3 = paid, 4 = overdue, 5 = cancelled
+            # Estimates/purchases use different status codes — pass through as-is.
             api_status = item.get('status')
-            pending = float(_num(item.get('paymentsPending', 0)) or 0)
-            due_ts  = item.get('dueDate')
+            if table == 'invoices':
+                pending = float(_num(item.get('paymentsPending', 0)) or 0)
+                due_ts  = item.get('dueDate')
 
-            if api_status == 3:
-                raw_status = 5  # cancelled (Anulado)
-            elif api_status == 0 and not item.get('approvedAt'):
-                raw_status = 0  # truly draft
-            else:
-                # Approved invoice — derive payment status
-                if abs(pending) < 0.01:
-                    raw_status = 3  # paid (Pagado)
-                elif due_ts and due_ts < time.time():
-                    raw_status = 4  # overdue (Vencido)
+                if api_status == 3:
+                    raw_status = 5  # cancelled (Anulado)
+                elif api_status == 0 and not item.get('approvedAt'):
+                    raw_status = 0  # truly draft
                 else:
-                    raw_status = 1  # pending (Pendiente)
+                    # Approved invoice — derive payment status
+                    if abs(pending) < 0.01:
+                        raw_status = 3  # paid (Pagado)
+                    elif due_ts and isinstance(due_ts, (int, float)) and due_ts < time.time():
+                        raw_status = 4  # overdue (Vencido)
+                    else:
+                        raw_status = 1  # pending (Pendiente)
+            else:
+                raw_status = api_status
             # -------------------------------------------------------------------
 
             if table == 'invoices':
