@@ -1790,6 +1790,8 @@ def create_job(request: dict):
 @app.get("/api/jobs/{code}")
 def get_job(code: str):
     """Get job detail with expenses."""
+    if not code or len(code) > 50 or not _re_mod.match(r'^[A-Za-z0-9_\- ]+$', code):
+        return JSONResponse({"error": "Invalid project code"}, status_code=400)
     conn = connector.get_db()
     try:
         cur = connector._cursor(conn)
@@ -1822,6 +1824,8 @@ def get_job(code: str):
 @app.patch("/api/jobs/{code}")
 def update_job(code: str, request: dict):
     """Update job fields (status, shooting_dates, invoice_id, etc.)."""
+    if not code or len(code) > 50 or not _re_mod.match(r'^[A-Za-z0-9_\- ]+$', code):
+        return JSONResponse({"error": "Invalid project code"}, status_code=400)
     VALID_STATUSES = {"open", "shooting", "invoiced", "closed"}
     ALLOWED_FIELDS = {"status", "shooting_dates_raw", "invoice_id", "invoice_number", "note_path"}
 
@@ -1842,7 +1846,7 @@ def update_job(code: str, request: dict):
             return JSONResponse({"error": "No valid fields to update"}, status_code=400)
 
         # Build SET clause with ? placeholders, then convert once via _q()
-        set_parts = [f"{k} = ?" for k in updates]
+        set_parts = [f'"{k}" = ?' for k in updates]
         values = list(updates.values())
 
         set_clause = ", ".join(set_parts)

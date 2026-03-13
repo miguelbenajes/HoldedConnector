@@ -181,7 +181,7 @@ class TestRenderJobNote:
         assert "NETFLIX-260315" in result
         assert "Netflix Spain" in result
         assert "prod@netflix.com" in result
-        assert "project_code: NETFLIX-260315" in result
+        assert "project_code:" in result and "NETFLIX-260315" in result
         assert "## Quote" in result
         assert "## Expenses" in result
         assert "## Invoicing Checklist" in result

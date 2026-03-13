@@ -231,17 +231,25 @@ def render_job_note(job, expenses=None):
     if not expense_rows:
         expense_rows = "| — | *No expenses yet* | — | — |\n"
 
+    # Quote YAML values to prevent injection via colons/newlines in user data
+    def _yq(v):
+        """Quote a YAML value if it contains special characters."""
+        s = str(v).replace('\n', ' ').replace('\r', '')
+        if any(c in s for c in [':', '#', '{', '}', '[', ']', ',', '&', '*', '?', '|', '-', '<', '>', '=', '!', '%', '@', '`', '"']):
+            return f'"{s.replace(chr(34), chr(39))}"'
+        return s
+
     return f"""---
-project_code: {code}
-client: {job.get("client_name") or ""}
-client_email: {email}
+project_code: {_yq(code)}
+client: {_yq(job.get("client_name") or "")}
+client_email: {_yq(email)}
 status: {status}
 shooting_dates: {parsed_dates}
-created: {created}
-quote_id: {estimate_id}
-quote_number: {estimate_num}
-invoice_id: {invoice_id}
-invoice_number: {invoice_num}
+created: {_yq(created)}
+quote_id: {_yq(estimate_id)}
+quote_number: {_yq(estimate_num)}
+invoice_id: {_yq(invoice_id)}
+invoice_number: {_yq(invoice_num)}
 tags: [coyote, job, seguimiento]
 ---
 
@@ -285,6 +293,14 @@ def _get_connector():
     return connector
 
 
+def _row_to_dict(row, cursor):
+    """Convert a DB row to dict if it isn't already (SQLite returns tuples)."""
+    if isinstance(row, dict):
+        return row
+    cols = [d[0] for d in cursor.description]
+    return dict(zip(cols, row))
+
+
 def ensure_job(project_code, doc_data, cursor):
     """Upsert a job in the jobs table. Creates or updates based on project_code.
 
@@ -303,6 +319,10 @@ def ensure_job(project_code, doc_data, cursor):
         Dict with the job row data.
     """
     conn_mod = _get_connector()
+
+    # Validate project_code
+    if not project_code or len(project_code) > 50:
+        raise ValueError(f"Invalid project_code: {project_code!r}")
 
     # Parse shooting dates
     ref_year = datetime.now().year
@@ -350,9 +370,7 @@ def ensure_job(project_code, doc_data, cursor):
     existing = cursor.fetchone()
 
     if existing:
-        if not isinstance(existing, dict):
-            cols = [d[0] for d in cursor.description]
-            existing = dict(zip(cols, existing))
+        existing = _row_to_dict(existing, cursor)
 
         est_id = doc_data.get("estimate_id") or existing.get("estimate_id")
         est_num = doc_data.get("estimate_number") or existing.get("estimate_number")
@@ -410,11 +428,7 @@ def ensure_job(project_code, doc_data, cursor):
     cursor.execute(conn_mod._q(
         "SELECT * FROM jobs WHERE project_code = ?"
     ), (project_code,))
-    row = cursor.fetchone()
-    if not isinstance(row, dict):
-        cols = [d[0] for d in cursor.description]
-        row = dict(zip(cols, row))
-    return row
+    return _row_to_dict(cursor.fetchone(), cursor)
 
 
 # ── Obsidian Sync ──────────────────────────────────────────────────────────────
@@ -447,7 +461,8 @@ def _brain_write(path, content, append=False, binary=False):
         )
         if resp.status_code == 200:
             return True
-        logger.error(f"[JOB_TRACKER] Brain write failed: {resp.status_code} (path={path})")
+        # Log status only, not response body (may contain internal details)
+        logger.error(f"[JOB_TRACKER] Brain write failed: HTTP {resp.status_code}")
         return False
     except Exception as e:
         logger.error(f"[JOB_TRACKER] Brain unreachable: {e}")
@@ -458,17 +473,18 @@ def sync_job_to_obsidian(project_code):
     """Render and push a job note + PDF to Obsidian vault via Brain API.
 
     Flow:
-      1. Load job row from DB
-      2. Load associated expenses (purchases with matching project_code)
-      3. Render markdown note via render_job_note()
-      4. Fetch PDF from Holded API (if estimate/invoice exists), push as binary
-      5. Push note via _brain_write()
-      6. Update job.note_path on success
+      1. Load job row + expenses from DB (release connection quickly)
+      2. Render markdown note via render_job_note()
+      3. Fetch PDF from Holded API (if estimate/invoice exists), push as binary
+      4. Push note via _brain_write()
+      5. Update job.note_path on success (short DB operation)
 
     Returns:
         True on success, False on failure.
     """
     conn_mod = _get_connector()
+
+    # ── Phase 1: Load data from DB (fast, release connection immediately) ──
     conn = conn_mod.get_db()
     try:
         cur = conn_mod._cursor(conn)
@@ -478,84 +494,80 @@ def sync_job_to_obsidian(project_code):
         if not row:
             logger.warning(f"[JOB_TRACKER] Job not found: {project_code}")
             return False
-        if not isinstance(row, dict):
-            cols = [d[0] for d in cur.description]
-            row = dict(zip(cols, row))
+        job = _row_to_dict(row, cur)
 
-        job = row
-        quarter = job.get("quarter") or get_quarter(date.today().isoformat())
-        year = quarter.split("_")[1] if "_" in quarter else str(date.today().year)
-
-        # Load expenses (purchases with matching project_code)
         cur.execute(conn_mod._q("""
             SELECT pi.date, pi."desc" as name, pi.amount, pi.doc_number
             FROM purchase_invoices pi
             WHERE pi.project_code = ?
             ORDER BY pi.date
         """), (project_code,))
-        expenses = []
-        for r in cur.fetchall():
-            if not isinstance(r, dict):
-                cols = [d[0] for d in cur.description]
-                r = dict(zip(cols, r))
-            expenses.append(r)
-
-        note_content = render_job_note(job, expenses)
-
-        safe_code = sanitize_for_path(project_code)
-        base_path = f"ACCOUNTS/SEGUIMIENTO_TRABAJOS/{year}/{quarter}"
-        note_path = f"{base_path}/{safe_code}"
-        attach_dir = f"{base_path}/attachments"
-
-        # Fetch PDF if we have an estimate or invoice
-        doc_id = job.get("estimate_id") or job.get("invoice_id")
-        doc_type = "estimate" if job.get("estimate_id") else "invoice"
-        doc_num = sanitize_for_path(job.get("estimate_number") or job.get("invoice_number") or "")
-
-        if doc_id:
-            try:
-                api_key = conn_mod.API_KEY
-                pdf_resp = http_requests.get(
-                    f"https://api.holded.com/api/invoicing/v1/documents/{doc_type}/{doc_id}/pdf",
-                    headers={"key": api_key},
-                    timeout=30,
-                )
-                if pdf_resp.status_code == 200:
-                    pdf_data = None
-                    try:
-                        json_data = pdf_resp.json()
-                        if "data" in json_data:
-                            pdf_data = base64.b64decode(json_data["data"])
-                    except Exception:
-                        pdf_data = pdf_resp.content
-
-                    if pdf_data:
-                        new_hash = hashlib.md5(pdf_data).hexdigest()
-                        if new_hash != job.get("pdf_hash"):
-                            if len(pdf_data) <= MAX_PDF_SIZE:
-                                pdf_b64 = base64.b64encode(pdf_data).decode()
-                                pdf_filename = f"{safe_code}_{doc_num}.pdf"
-                                _brain_write(f"{attach_dir}/{pdf_filename}", pdf_b64, binary=True)
-
-                            cur.execute(conn_mod._q(
-                                "UPDATE jobs SET pdf_hash = ? WHERE project_code = ?"
-                            ), (new_hash, project_code))
-                            conn.commit()
-            except Exception as e:
-                logger.warning(f"[JOB_TRACKER] PDF fetch failed for {project_code}: {e}")
-
-        success = _brain_write(note_path, note_content)
-
-        if success:
-            cur.execute(conn_mod._q(
-                "UPDATE jobs SET note_path = ? WHERE project_code = ?"
-            ), (f"{note_path}.md", project_code))
-            conn.commit()
-
-        return success
-
+        expenses = [_row_to_dict(r, cur) for r in cur.fetchall()]
     finally:
         conn_mod.release_db(conn)
+
+    # ── Phase 2: Render + push (no DB connection held during I/O) ──
+    quarter = job.get("quarter") or get_quarter(date.today().isoformat())
+    year = quarter.split("_")[1] if "_" in quarter else str(date.today().year)
+    note_content = render_job_note(job, expenses)
+
+    safe_code = sanitize_for_path(project_code)
+    base_path = f"ACCOUNTS/SEGUIMIENTO_TRABAJOS/{year}/{quarter}"
+    note_path = f"{base_path}/{safe_code}"
+    attach_dir = f"{base_path}/attachments"
+
+    # Fetch PDF if we have an estimate or invoice
+    doc_id = job.get("estimate_id") or job.get("invoice_id")
+    doc_type = "estimate" if job.get("estimate_id") else "invoice"
+    doc_num = sanitize_for_path(job.get("estimate_number") or job.get("invoice_number") or "")
+    new_pdf_hash = None
+
+    if doc_id:
+        try:
+            api_key = conn_mod.API_KEY
+            pdf_resp = http_requests.get(
+                f"https://api.holded.com/api/invoicing/v1/documents/{doc_type}/{doc_id}/pdf",
+                headers={"key": api_key},
+                timeout=30,
+            )
+            if pdf_resp.status_code == 200:
+                pdf_data = None
+                try:
+                    json_data = pdf_resp.json()
+                    if "data" in json_data:
+                        pdf_data = base64.b64decode(json_data["data"])
+                except Exception:
+                    pdf_data = pdf_resp.content
+
+                if pdf_data:
+                    new_pdf_hash = hashlib.sha256(pdf_data).hexdigest()
+                    if new_pdf_hash != job.get("pdf_hash") and len(pdf_data) <= MAX_PDF_SIZE:
+                        pdf_b64 = base64.b64encode(pdf_data).decode()
+                        pdf_filename = f"{safe_code}_{doc_num}.pdf"
+                        _brain_write(f"{attach_dir}/{pdf_filename}", pdf_b64, binary=True)
+        except Exception as e:
+            logger.warning(f"[JOB_TRACKER] PDF fetch failed for {project_code}: {e}")
+
+    success = _brain_write(note_path, note_content)
+
+    # ── Phase 3: Quick DB update on success ──
+    if success or new_pdf_hash:
+        conn = conn_mod.get_db()
+        try:
+            cur = conn_mod._cursor(conn)
+            if success:
+                cur.execute(conn_mod._q(
+                    "UPDATE jobs SET note_path = ? WHERE project_code = ?"
+                ), (f"{note_path}.md", project_code))
+            if new_pdf_hash and new_pdf_hash != job.get("pdf_hash"):
+                cur.execute(conn_mod._q(
+                    "UPDATE jobs SET pdf_hash = ? WHERE project_code = ?"
+                ), (new_pdf_hash, project_code))
+            conn.commit()
+        finally:
+            conn_mod.release_db(conn)
+
+    return success
 
 
 def flush_note_queue():
@@ -583,9 +595,7 @@ def flush_note_queue():
         pending = cur.fetchall()
 
         for item in pending:
-            if not isinstance(item, dict):
-                cols = [d[0] for d in cur.description]
-                item = dict(zip(cols, item))
+            item = _row_to_dict(item, cur)
 
             item_id = item["id"]
             code = item["project_code"]
@@ -609,7 +619,7 @@ def flush_note_queue():
             except Exception as e:
                 cur.execute(conn_mod._q(
                     "UPDATE job_note_queue SET retry_count = retry_count + 1, last_error = ? WHERE id = ?"
-                ), (str(e)[:500], item_id))
+                ), (re.sub(r'https?://[^\s]+', '[redacted]', str(e)[:500]), item_id))
 
         # Purge old processed items (30+ days)
         try:
