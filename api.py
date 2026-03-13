@@ -1451,8 +1451,10 @@ def agent_create_invoice(body: CreateDocumentBody):
     payload = {"contact": body.contact_id, "desc": body.desc, "products": products}
     result = connector.create_invoice(payload)
     safe = connector.SAFE_MODE
-    if result:
+    if result and not isinstance(result, dict):
         return {"success": True, "id": result, "safe_mode": safe}
+    if isinstance(result, dict) and result.get("error"):
+        return {"success": False, "error": f"Failed to create invoice: {result.get('detail', 'Unknown error')}", "safe_mode": safe}
     return {"success": False, "error": "Failed to create invoice", "safe_mode": safe}
 
 @app.post("/api/agent/estimate")
@@ -1466,8 +1468,10 @@ def agent_create_estimate(body: CreateDocumentBody):
     payload = {"contact": body.contact_id, "desc": body.desc, "products": products}
     result = connector.create_estimate(payload)
     safe = connector.SAFE_MODE
-    if result:
+    if result and not isinstance(result, dict):
         return {"success": True, "id": result, "safe_mode": safe}
+    if isinstance(result, dict) and result.get("error"):
+        return {"success": False, "error": f"Failed to create estimate: {result.get('detail', 'Unknown error')}", "safe_mode": safe}
     return {"success": False, "error": "Failed to create estimate", "safe_mode": safe}
 
 @app.post("/api/agent/contact")
@@ -1479,8 +1483,10 @@ def agent_create_contact(body: CreateContactBody):
             payload[key] = val
     result = connector.create_contact(payload)
     safe = connector.SAFE_MODE
-    if result:
+    if result and not isinstance(result, dict):
         return {"success": True, "id": result, "safe_mode": safe}
+    if isinstance(result, dict) and result.get("error"):
+        return {"success": False, "error": f"Failed to create contact: {result.get('detail', 'Unknown error')}", "safe_mode": safe}
     return {"success": False, "error": "Failed to create contact", "safe_mode": safe}
 
 @app.put("/api/agent/invoice/{invoice_id}/status")
@@ -1492,9 +1498,11 @@ def agent_update_invoice_status(invoice_id: str, body: UpdateStatusBody):
         {"status": body.status}
     )
     safe = connector.SAFE_MODE
-    if result:
+    logger.info(f"[agent] Invoice {invoice_id} status→{body.status} result: {result}")
+    if result and not result.get("error"):
         return {"success": True, "safe_mode": safe}
-    return {"success": False, "error": "Failed to update status", "safe_mode": safe}
+    detail = result.get("detail", "Unknown error") if result else "No response"
+    return {"success": False, "error": f"Failed to update status: {detail}", "safe_mode": safe}
 
 @app.post("/api/agent/send/{doc_type}/{doc_id}")
 def agent_send_document(doc_type: str, doc_id: str, body: SendDocumentBody):
@@ -1515,9 +1523,10 @@ def agent_send_document(doc_type: str, doc_id: str, body: SendDocumentBody):
         payload
     )
     safe = connector.SAFE_MODE
-    if result:
+    if result and not result.get("error"):
         return {"success": True, "safe_mode": safe}
-    return {"success": False, "error": "Failed to send document", "safe_mode": safe}
+    detail = result.get("detail", "Unknown error") if result else "No response"
+    return {"success": False, "error": f"Failed to send document: {detail}", "safe_mode": safe}
 
 
 class ConvertEstimateBody(BaseModel):
