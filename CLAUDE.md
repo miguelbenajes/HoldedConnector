@@ -63,7 +63,7 @@ _fetch_one_val(c,k) # Fetches single scalar from either cursor type
 **Backend:** Dual-mode — PostgreSQL (Supabase) when `DATABASE_URL` is set, SQLite otherwise.
 
 ### Core Tables
-- `invoices` — Sales invoices (status: 0=draft, 1=issued, 2=partial, 3=paid, 4=overdue, 5=cancelled)
+- `invoices` — Sales invoices (status: 0=draft, 1=pending, 3=paid, 4=overdue, 5=cancelled — derived from Holded API fields, not raw status)
 - `purchase_invoices` — Expenses/purchases (same status codes)
 - `estimates` — Presupuestos (status: 0=draft, 1=pending, 2=accepted, 3=rejected, 4=invoiced)
 - `contacts` — Clients & suppliers
@@ -289,7 +289,7 @@ Frontend consumes via `ReadableStream` + SSE parsing.
 - Store tags as: `json.dumps(item.get('tags') or [])` — requires `import json` in connector.py
 - Holded purchases API times out on page 2 consistently — not a code bug, all records are on page 1
 - To inspect all available API fields: fetch a tiny time window → `params={'starttmp': X, 'endtmp': X+100000}`
-- **Holded API status bug (discovered 2026-03-13):** The API returns `status: 0` (draft) for invoices that are actually approved. The `approvedAt` timestamp is the real source of truth. `sync_documents()` now derives correct status: if `status == 0` and `approvedAt` exists → override to `1` (issued). Affected ~95% of invoices before fix.
+- **Holded API status bug (discovered 2026-03-13):** The API `status` field is unreliable — it returns `0` for approved invoices and doesn't distinguish paid/unpaid/overdue. `sync_documents()` now derives the real status from multiple fields: `approvedAt` (approval), `paymentsPending` (paid vs unpaid), `dueDate` (overdue), API `status==3` (cancelled). Maps to: 0=draft, 1=pending, 3=paid, 4=overdue, 5=cancelled.
 
 ### Project Tracking (added 2026-03-03)
 - **Tags** on documents (`invoices.tags`, etc.) — easiest: tag whole document in Holded with job code

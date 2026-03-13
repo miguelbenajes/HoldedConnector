@@ -844,12 +844,29 @@ def sync_documents(doc_type, table, items_table, fk_column):
             tags   = json.dumps(item.get('tags') or [])
             notes  = item.get('notes') or ''
 
-            # --- Holded API status fix ----------------------------------------
-            # Holded API returns status=0 (draft) for invoices that are actually
-            # approved. Detect this via the approvedAt timestamp and correct it.
-            raw_status = item.get('status')
-            if raw_status == 0 and item.get('approvedAt'):
-                raw_status = 1  # issued/approved
+            # --- Holded API status derivation ----------------------------------
+            # Holded API status field is unreliable:
+            #   API 0 = draft (but also returned for approved invoices — buggy)
+            #   API 1 = approved (but doesn't distinguish paid/unpaid/overdue)
+            #   API 3 = cancelled (Anulado)
+            # We derive the real status from multiple fields:
+            #   0 = draft, 1 = pending, 3 = paid, 4 = overdue, 5 = cancelled
+            api_status = item.get('status')
+            pending = float(_num(item.get('paymentsPending', 0)) or 0)
+            due_ts  = item.get('dueDate')
+
+            if api_status == 3:
+                raw_status = 5  # cancelled (Anulado)
+            elif api_status == 0 and not item.get('approvedAt'):
+                raw_status = 0  # truly draft
+            else:
+                # Approved invoice — derive payment status
+                if abs(pending) < 0.01:
+                    raw_status = 3  # paid (Pagado)
+                elif due_ts and due_ts < time.time():
+                    raw_status = 4  # overdue (Vencido)
+                else:
+                    raw_status = 1  # pending (Pendiente)
             # -------------------------------------------------------------------
 
             if table == 'invoices':
