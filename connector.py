@@ -843,9 +843,18 @@ def sync_documents(doc_type, table, items_table, fk_column):
             doc_id = item.get('id')
             tags   = json.dumps(item.get('tags') or [])
             notes  = item.get('notes') or ''
+
+            # --- Holded API status fix ----------------------------------------
+            # Holded API returns status=0 (draft) for invoices that are actually
+            # approved. Detect this via the approvedAt timestamp and correct it.
+            raw_status = item.get('status')
+            if raw_status == 0 and item.get('approvedAt'):
+                raw_status = 1  # issued/approved
+            # -------------------------------------------------------------------
+
             if table == 'invoices':
                 vals = (doc_id, item.get('contact'), item.get('contactName'), item.get('desc'),
-                        item.get('date'), _num(item.get('total')), item.get('status'),
+                        item.get('date'), _num(item.get('total')), raw_status,
                         _num(item.get('paymentsPending', 0)), _num(item.get('paymentsTotal', 0)),
                         item.get('dueDate'), item.get('docNumber'), tags, notes)
                 if _USE_SQLITE:
@@ -870,7 +879,7 @@ def sync_documents(doc_type, table, items_table, fk_column):
                     ''', vals)
             else:
                 vals = (doc_id, item.get('contact'), item.get('contactName'), item.get('desc'),
-                        item.get('date'), _num(item.get('total')), item.get('status'),
+                        item.get('date'), _num(item.get('total')), raw_status,
                         item.get('docNumber'), tags, notes)
                 if _USE_SQLITE:
                     cursor.execute(f'''

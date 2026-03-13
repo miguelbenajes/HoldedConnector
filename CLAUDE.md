@@ -289,6 +289,7 @@ Frontend consumes via `ReadableStream` + SSE parsing.
 - Store tags as: `json.dumps(item.get('tags') or [])` — requires `import json` in connector.py
 - Holded purchases API times out on page 2 consistently — not a code bug, all records are on page 1
 - To inspect all available API fields: fetch a tiny time window → `params={'starttmp': X, 'endtmp': X+100000}`
+- **Holded API status bug (discovered 2026-03-13):** The API returns `status: 0` (draft) for invoices that are actually approved. The `approvedAt` timestamp is the real source of truth. `sync_documents()` now derives correct status: if `status == 0` and `approvedAt` exists → override to `1` (issued). Affected ~95% of invoices before fix.
 
 ### Project Tracking (added 2026-03-03)
 - **Tags** on documents (`invoices.tags`, etc.) — easiest: tag whole document in Holded with job code
@@ -556,6 +557,7 @@ python3 api.py
 | Holded purchases page 2 timeout | Expected API flakiness — page 1 captures all records, safe to ignore |
 | `NameError: json not defined` in connector.py | Add `import json` at top — needed for `json.dumps(tags)` |
 | `projectid` not found on line items | Holded uses lowercase `projectid` not camelCase `projectId` |
+| Invoice shows as draft but is approved | Holded API `status` field is unreliable — check `approvedAt` timestamp. Fixed in `sync_documents()` (2026-03-13) |
 
 ---
 
