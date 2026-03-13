@@ -758,10 +758,16 @@ def get_estimate_items(estimate_id: str):
 
 @app.get("/api/entities/{doc_type}/{doc_id}/pdf")
 def get_document_pdf(doc_type: str, doc_id: str):
+    # Accept both singular (Brain sends these) and plural forms
     type_map = {
+        "invoice": "invoice",
         "invoices": "invoice",
+        "purchase": "purchase",
         "purchases": "purchase",
-        "estimates": "estimate"
+        "estimate": "estimate",
+        "estimates": "estimate",
+        "creditnote": "creditnote",
+        "proforma": "proform",
     }
     holded_type = type_map.get(doc_type)
     if not holded_type:
@@ -773,7 +779,11 @@ def get_document_pdf(doc_type: str, doc_id: str):
     def _make_pdf_filename(doc_type: str, doc_id: str) -> str:
         try:
             import re
-            db_table = {"invoices": "invoices", "purchases": "purchase_invoices", "estimates": "estimates"}.get(doc_type)
+            db_table = {
+                "invoice": "invoices", "invoices": "invoices",
+                "purchase": "purchase_invoices", "purchases": "purchase_invoices",
+                "estimate": "estimates", "estimates": "estimates",
+            }.get(doc_type)
             if not db_table:
                 return f"document_{doc_id}.pdf"
             conn = connector.get_db()
@@ -795,7 +805,12 @@ def get_document_pdf(doc_type: str, doc_id: str):
                 s = re.sub(r'[^\w\s/-]', '', s, flags=re.UNICODE)
                 s = re.sub(r'[\s/]+', '_', s)
                 return s[:40]  # cap length
-            prefix = {"invoices": "Factura", "purchases": "Compra", "estimates": "Presupuesto"}.get(doc_type, "Doc")
+            prefix = {
+                "invoice": "Factura", "invoices": "Factura",
+                "purchase": "Compra", "purchases": "Compra",
+                "estimate": "Presupuesto", "estimates": "Presupuesto",
+                "creditnote": "Abono", "proforma": "Proforma",
+            }.get(doc_type, "Doc")
             parts = [slug(contact_name)]
             if doc_number:
                 parts.append(slug(doc_number))
