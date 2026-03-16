@@ -15,6 +15,14 @@ import re as _re_mod
 import threading
 from datetime import datetime, timedelta
 import connector
+
+# ── Table name validation (SQL injection prevention) ─────────────────────
+_VALID_TABLE_RE = _re_mod.compile(r'^[a-z_][a-z0-9_]*$')
+
+def _assert_valid_table(name: str) -> None:
+    """Raise ValueError if table name contains unexpected characters."""
+    if not _VALID_TABLE_RE.match(name):
+        raise ValueError(f"Invalid table name: {name!r}")
 import reports
 import ai_agent
 from write_gateway import gateway
@@ -60,8 +68,8 @@ async def auth_middleware(request: Request, call_next):
                     return JSONResponse(status_code=403, content={"error": "Insufficient permissions"})
                 request.state.user = user
                 return await call_next(request)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Auth validation failed: %s", type(e).__name__)
 
     # Path 2: Supabase cookie (panel users via nginx proxy)
     cookie_header = request.headers.get("cookie", "")
@@ -447,6 +455,7 @@ def get_summary():
 
         counts = {}
         for table in ["invoices", "purchase_invoices", "estimates", "products", "contacts"]:
+            _assert_valid_table(table)
             cursor.execute(f"SELECT COUNT(*) as count FROM {table}")
             counts[table] = cursor.fetchone()["count"]
 
@@ -1385,8 +1394,6 @@ def get_analyzed_invoices(limit: int = Query(50, ge=1, le=500), offset: int = Qu
 @app.get("/api/schema")
 def get_holded_schema():
     """Return table names, columns, types, and row counts for the Holded DB."""
-    import re
-    _valid_table = re.compile(r'^[a-zA-Z_][a-zA-Z0-9_]*$')
     tables = []
     conn = connector.get_db()
     cur = connector._cursor(conn)
@@ -1395,7 +1402,8 @@ def get_holded_schema():
             cur.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
             table_names = [r["name"] if isinstance(r, dict) else r[0] for r in cur.fetchall()]
             for tname in table_names:
-                if tname.startswith("sqlite_") or not _valid_table.match(tname): continue
+                if tname.startswith("sqlite_") or not _VALID_TABLE_RE.match(tname): continue
+                _assert_valid_table(tname)
                 cur.execute(f"PRAGMA table_info({tname})")
                 cols = [{"name": r["name"] if isinstance(r, dict) else r[1],
                          "type": r["type"] if isinstance(r, dict) else r[2]}
@@ -1412,7 +1420,8 @@ def get_holded_schema():
             """)
             table_names = [r["table_name"] if isinstance(r, dict) else r[0] for r in cur.fetchall()]
             for tname in table_names:
-                if not _valid_table.match(tname): continue
+                if not _VALID_TABLE_RE.match(tname): continue
+                _assert_valid_table(tname)
                 cur.execute("""
                     SELECT column_name, data_type, is_nullable
                     FROM information_schema.columns
@@ -1705,6 +1714,7 @@ def backup_status():
         for tbl in ["invoices", "purchase_invoices", "contacts", "products",
                     "amortizations", "purchase_analysis", "inventory_matches"]:
             try:
+                _assert_valid_table(tbl)
                 cur.execute(f"SELECT COUNT(*) AS cnt FROM {tbl}")
                 row = cur.fetchone()
                 counts[tbl] = row["cnt"] if isinstance(row, dict) else row[0]

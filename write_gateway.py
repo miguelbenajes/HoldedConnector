@@ -231,8 +231,8 @@ def _sync_back_async(operation, entity_id, params, audit_id):
             try:
                 from skills.job_tracker import flush_note_queue
                 flush_note_queue()
-            except Exception:
-                pass  # queue will be flushed on next full sync
+            except Exception as e:
+                logger.warning("Sync-back flush_note_queue failed: %s", e)
         except Exception as e:
             logger.error(f"[GATEWAY] Sync-back failed for {operation}/{entity_id}: {e}")
             if audit_id:

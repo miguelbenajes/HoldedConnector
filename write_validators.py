@@ -151,12 +151,14 @@ def _fetch_products_batch(product_ids):
         connector.release_db(conn)
 
 
+_VALID_DOC_TABLES = frozenset({"invoices", "estimates", "purchase_invoices"})
+
 def _fetch_document(doc_type, doc_id):
     """Fetch document from local DB. Returns dict or None."""
     table_map = {"invoice": "invoices", "estimate": "estimates",
                  "purchase": "purchase_invoices"}
     table = table_map.get(doc_type)
-    if not table:
+    if not table or table not in _VALID_DOC_TABLES:
         return None
     conn = connector.get_db()
     try:

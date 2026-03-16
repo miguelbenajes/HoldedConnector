@@ -49,7 +49,7 @@ _pool = None
 def _get_pool():
     global _pool
     if _pool is None:
-        _pool = _pg_pool.ThreadedConnectionPool(minconn=2, maxconn=10, dsn=DATABASE_URL)
+        _pool = _pg_pool.ThreadedConnectionPool(minconn=2, maxconn=10, dsn=DATABASE_URL, connect_timeout=10)
     return _pool
 
 
