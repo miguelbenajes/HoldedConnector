@@ -301,11 +301,11 @@ Frontend consumes via `ReadableStream` + SSE parsing.
 ### Project Code System (added 2026-03-12)
 - **Product "Proyect REF:"** (ID: `69b2b35f75ae381d8f05c133`) — a €0 product in Holded
 - Add it as a line item on any quote/invoice; the **description field** carries the project code
-- **Format convention:** `CLIENT-YYMMDD` (e.g. `MEDIASET-260315`)
+- **Format convention:** `CLIENT-DDMMYYYY` (e.g. `MEDIASET-15032026`)
 - During sync, `_extract_project_code()` detects the item by productId or name (case-insensitive fallback)
 - Extracted code stored in `project_code` column on `invoices`, `estimates`, `purchase_invoices`
 - Line item descriptions (`desc`) are synced on all 3 items tables
-- Query: `SELECT * FROM invoices WHERE project_code = 'NETFLIX-260315'`
+- Query: `SELECT * FROM invoices WHERE project_code = 'NETFLIX-15032026'`
 - If the "Proyect REF:" item is removed, `project_code` is cleared to NULL on next sync
 
 ### Sync Functions Pattern

@@ -783,8 +783,8 @@ def get_document_pdf(doc_type: str, doc_id: str):
     holded_type = type_map.get(doc_type)
     if not holded_type:
         return Response(status_code=400, content="Invalid document type")
-    if not _re_mod.match(r'^[a-zA-Z0-9]+$', doc_id):
-        return Response(status_code=400, content="Invalid document ID")
+    if not _re_mod.match(r'^[a-f0-9]{24}$', doc_id):
+        return Response(status_code=400, content="Invalid document ID — must be 24-char hex")
 
     # Build a meaningful filename from local DB data
     def _make_pdf_filename(doc_type: str, doc_id: str) -> str:
@@ -843,18 +843,38 @@ def get_document_pdf(doc_type: str, doc_id: str):
     url = f"https://api.holded.com/api/invoicing/v1/documents/{holded_type}/{doc_id}/pdf"
     headers = {"key": connector.API_KEY}
 
-    response = requests.get(url, headers=headers, timeout=30)
+    try:
+        response = requests.get(url, headers=headers, timeout=30, stream=False)
+    except requests.exceptions.Timeout:
+        logger.warning(f"PDF fetch timed out for {doc_type}/{doc_id}")
+        return Response(content="PDF download timed out", status_code=504)
+    except requests.exceptions.RequestException as e:
+        logger.warning(f"PDF fetch network error for {doc_type}/{doc_id}: {e}")
+        return Response(content="PDF download failed", status_code=502)
 
     if response.status_code == 200:
+        # Cap PDF size at 20MB to prevent memory abuse
+        max_pdf_size = 20 * 1024 * 1024
         resp_headers = {"Content-Disposition": content_disposition}
-        try:
-            json_data = response.json()
-            if isinstance(json_data, dict) and "data" in json_data:
-                import base64
-                pdf_bytes = base64.b64decode(json_data["data"])
-                return Response(content=pdf_bytes, media_type="application/pdf", headers=resp_headers)
-        except Exception:
-            pass
+        # Holded API may return base64-encoded PDF in JSON wrapper or raw PDF bytes.
+        # Detect JSON response and extract base64 data if present.
+        content_type = response.headers.get("content-type", "")
+        if "application/json" in content_type:
+            try:
+                json_data = response.json()
+                if isinstance(json_data, dict) and "data" in json_data:
+                    import base64
+                    pdf_bytes = base64.b64decode(json_data["data"])
+                    if len(pdf_bytes) > max_pdf_size:
+                        return Response(content="PDF exceeds size limit", status_code=413)
+                    return Response(content=pdf_bytes, media_type="application/pdf", headers=resp_headers)
+            except Exception:
+                logger.warning(f"Failed to decode base64 PDF for {doc_type}/{doc_id}")
+            # JSON response without valid base64 data — not a valid PDF
+            return Response(content="Holded returned non-PDF response", status_code=502)
+        # Raw PDF bytes (non-JSON response)
+        if len(response.content) > max_pdf_size:
+            return Response(content="PDF exceeds size limit", status_code=413)
         return Response(content=response.content, media_type="application/pdf", headers=resp_headers)
     else:
         logger.warning(f"PDF fetch failed for {doc_type}/{doc_id}: HTTP {response.status_code}")

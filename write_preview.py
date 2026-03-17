@@ -21,10 +21,14 @@ def _calculate_items(items, products_map=None):
     """Calculate line-by-line totals for invoice/estimate items."""
     calculated = []
     for item in items:
-        units = float(item.get("units", 1))
-        price = float(item.get("price", 0))
-        tax_pct = float(item.get("tax", DEFAULT_TAX_PCT))
-        discount_pct = float(item.get("discount", 0))
+        raw_units = item.get("units")
+        raw_price = item.get("price")
+        raw_tax = item.get("tax")
+        raw_discount = item.get("discount")
+        units = float(raw_units) if raw_units is not None else 1.0
+        price = float(raw_price) if raw_price is not None else 0.0
+        tax_pct = float(raw_tax) if raw_tax is not None else float(DEFAULT_TAX_PCT)
+        discount_pct = float(raw_discount) if raw_discount is not None else 0.0
 
         line_subtotal = units * price
         line_discount = line_subtotal * (discount_pct / 100)

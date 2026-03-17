@@ -1104,10 +1104,6 @@ RULES:
 
 # ─── Conversation History ────────────────────────────────────────────
 
-def _ensure_ai_history_schema():
-    """No-op: tables managed by connector.init_db() on server startup."""
-
-
 def load_history(conversation_id, limit=20):
     conn = connector.get_db()
     try:
@@ -1504,9 +1500,6 @@ def chat_stream(user_message, conversation_id=None, user_role="admin"):
 
 # ─── Favorites ──────────────────────────────────────────────────────
 
-def _ensure_favorites_schema():
-    """No-op: tables managed by connector.init_db() on server startup."""
-
 def get_favorites():
     conn = connector.get_db()
     try:
@@ -1638,7 +1631,7 @@ def _describe_write_action(tool_name, tool_input):
         return f"Create an invoice with {len(items)} items (subtotal: {total:,.2f} EUR)"
     elif tool_name == "send_document":
         emails = tool_input.get("emails", ["contact's email on file"])
-        return f"Send {tool_input['doc_type']} {tool_input['doc_id']} to {', '.join(emails)}"
+        return f"Send {tool_input.get('doc_type', 'document')} {tool_input.get('doc_id', '?')} to {', '.join(emails)}"
     elif tool_name == "create_contact":
         return f"Create contact: {tool_input.get('name', 'Unknown')}"
     elif tool_name == "update_invoice_status":

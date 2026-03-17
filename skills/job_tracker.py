@@ -166,7 +166,7 @@ def sanitize_for_markdown(text):
 
 STATUS_EMOJI = {"open": "🟢", "shooting": "🎬", "invoiced": "📄", "closed": "✅"}
 
-HOLDED_PDF_BASE = os.getenv("HOLDED_CONNECTOR_URL", "https://holded.coyoterent.com")
+HOLDED_PDF_BASE = os.getenv("HOLDED_CONNECTOR_URL", "http://localhost:8000")
 
 
 def render_job_note(job, expenses=None):

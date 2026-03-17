@@ -62,4 +62,4 @@ def get_financial_summary_data():
         logger.error(f"Excel data gather error: {e}")
         return {}
     finally:
-        conn.close()
+        connector.release_db(conn)
