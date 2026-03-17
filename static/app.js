@@ -1183,6 +1183,11 @@ async function init() {
             renderDistributionChart();
             fetchRecentActivity();
             loadAgingWidget();
+            // Check safe mode status from AI config
+            safeFetch('/api/ai/config').then(r => r.json()).then(cfg => {
+                var badge = document.getElementById('safeModeBadge');
+                if (badge) badge.style.display = cfg.safeMode ? '' : 'none';
+            }).catch(function() {});
         } else {
             showView('setup');
         }
