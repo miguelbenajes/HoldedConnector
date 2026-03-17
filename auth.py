@@ -218,12 +218,18 @@ def extract_jwt_from_cookies(cookie_header: str) -> Optional[str]:
 # ── Legacy Token ──────────────────────────────────────────────────────────
 
 
+BRAIN_INTERNAL_KEY = os.getenv("BRAIN_INTERNAL_KEY", "")
+
+
 def is_legacy_token(token: str) -> bool:
-    """Check if the token matches the legacy HOLDED_CONNECTOR_TOKEN.
+    """Check if the token matches a known inter-service key.
+    Accepts HOLDED_CONNECTOR_TOKEN (Brain) or BRAIN_INTERNAL_KEY (Gaffer).
     Uses HMAC comparison to prevent timing attacks."""
-    if not HOLDED_CONNECTOR_TOKEN:
-        return False
-    return hmac.compare_digest(token, HOLDED_CONNECTOR_TOKEN)
+    if HOLDED_CONNECTOR_TOKEN and hmac.compare_digest(token, HOLDED_CONNECTOR_TOKEN):
+        return True
+    if BRAIN_INTERNAL_KEY and hmac.compare_digest(token, BRAIN_INTERNAL_KEY):
+        return True
+    return False
 
 
 # ── User Lookup ───────────────────────────────────────────────────────────
@@ -295,7 +301,7 @@ def lookup_user(auth_id: str, get_connection=None) -> Optional[PanelUser]:
 # ── Public Paths ──────────────────────────────────────────────────────────
 
 # Paths that don't require authentication
-PUBLIC_PATHS = {"/health", "/", "/favicon.ico"}
+PUBLIC_PATHS = {"/health", "/", "/favicon.ico", "/api/config"}
 PUBLIC_PREFIXES = ("/static/",)
 
 

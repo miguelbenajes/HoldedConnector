@@ -2,7 +2,7 @@ from fastapi import FastAPI, BackgroundTasks, Response, UploadFile, File, Reques
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
-from typing import Optional
+from typing import Optional, List
 from contextlib import contextmanager
 import os
 import time
@@ -100,7 +100,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DB_NAME = "holded.db"
 REPORTS_DIR = os.path.abspath("reports")
 UPLOADS_DIR = os.path.abspath("uploads")
 
@@ -371,7 +370,10 @@ class ConfigUpdate(BaseModel):
     apiKey: Optional[str] = None
 
 @app.post("/api/config")
-async def update_config(body: ConfigUpdate):
+async def update_config(body: ConfigUpdate, request: Request):
+    # POST /api/config requires auth (GET is public for SPA init check)
+    if not getattr(request.state, "user", None):
+        return JSONResponse(status_code=401, content={"error": "Authentication required"})
     if body.apiKey:
         url = "https://api.holded.com/api/invoicing/v1/contacts"
         headers = {"key": body.apiKey}
@@ -990,7 +992,7 @@ async def upload_file(file: UploadFile = File(...)):
 
         # Validate file type
         allowed_exts = {".csv", ".xlsx", ".xls"}
-        file_ext = os.path.splitext(file.filename)[1].lower()
+        file_ext = os.path.splitext(file.filename or "")[1].lower()
 
         if file_ext not in allowed_exts:
             raise HTTPException(status_code=400, detail=f"File type not allowed: {file_ext}. Only CSV/Excel allowed.")
@@ -1006,9 +1008,11 @@ async def upload_file(file: UploadFile = File(...)):
             logger.error(f"File read error: {str(e)}")
             raise HTTPException(status_code=400, detail="File read error")
 
-        # Save file with timestamp prefix (unique names)
-        safe_name = f"{int(time.time())}_{os.path.basename(file.filename)}"
+        # Save file with timestamp prefix (unique names) + path traversal guard
+        safe_name = f"{int(time.time())}_{os.path.basename(file.filename or 'upload')}"
         filepath = os.path.join(uploads_dir, safe_name)
+        if not os.path.abspath(filepath).startswith(os.path.abspath(uploads_dir)):
+            raise HTTPException(status_code=400, detail="Invalid filename")
         logger.info(f"Saving file to: {filepath}")
 
         with open(filepath, "wb") as f:
@@ -1110,7 +1114,7 @@ def create_amortization(body: AmortizationCreate):
         operation="create_amortization",
         entity_type="amortization",
         entity_id=str(new_id),
-        payload_sent=body.dict(),
+        payload_sent=body.model_dump(),
         status="success",
     )
     return {"status": "success", "id": new_id}
@@ -1140,7 +1144,7 @@ def update_amortization(amort_id: int, body: AmortizationUpdate):
         operation="update_amortization",
         entity_type="amortization",
         entity_id=str(amort_id),
-        payload_sent=body.dict(),
+        payload_sent=body.model_dump(),
         status="success",
     )
     return {"status": "success"}
@@ -1581,6 +1585,74 @@ def agent_convert_estimate(body: ConvertEstimateBody):
     )
 
 
+# ── Gateway Estimate endpoint (Gaffer SP3 Quote Engine) ──────────────────────
+
+class GatewayEstimateItem(BaseModel):
+    name: str
+    units: float = 1
+    subtotal: float = 0
+    tax: float = 21
+    desc: Optional[str] = None
+
+class GatewayEstimateBody(BaseModel):
+    contact_id: str = Field(..., description="Holded contact ID")
+    items: List[GatewayEstimateItem] = Field(..., min_length=1)
+    desc: Optional[str] = None
+    date: Optional[str] = None
+    notes: Optional[str] = None
+
+@app.post("/api/gateway/estimate")
+def gateway_create_estimate(request: Request, body: GatewayEstimateBody):
+    """
+    REST wrapper around Write Gateway's create_estimate operation.
+    For service-to-service calls (Gaffer → Holded).
+    Auth: BRAIN_INTERNAL_KEY Bearer token.
+    """
+    from fastapi import HTTPException
+
+    # Auth check
+    auth_header = request.headers.get("authorization", "")
+    expected_key = os.environ.get("BRAIN_INTERNAL_KEY", "")
+    if not expected_key or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    import hmac as _hmac
+    if not _hmac.compare_digest(auth_header[7:], expected_key):
+        raise HTTPException(status_code=401, detail="Invalid key")
+
+    # Remap 'subtotal' → 'price' so _build_holded_payload picks it up correctly
+    gateway_items = []
+    for item in body.items:
+        d = item.model_dump(exclude_none=True)
+        if "subtotal" in d:
+            d["price"] = d.pop("subtotal")
+        gateway_items.append(d)
+
+    params = {
+        "contact_id": body.contact_id,
+        "items": gateway_items,
+    }
+    if body.desc:
+        params["desc"] = body.desc
+    # Holded requires Unix timestamp; default to now if not provided
+    params["date"] = body.date if body.date else str(int(time.time()))
+    if body.notes:
+        params["notes"] = body.notes
+
+    result = gateway.execute("create_estimate", params, source="gaffer", skip_confirm=True)
+
+    if result.get("success"):
+        return {
+            "success": True,
+            "entity_id": result.get("entity_id", ""),
+            "doc_number": result.get("doc_number", ""),
+        }
+    else:
+        raise HTTPException(
+            status_code=500,
+            detail=result.get("error") or result.get("errors", "Unknown error"),
+        )
+
+
 # ── Treasury & Payment endpoints ─────────────────────────────────────────────
 
 @app.get("/api/treasury")
@@ -1647,103 +1719,8 @@ def pay_document(doc_type: str, doc_id: str, body: PayDocumentBody):
     return JSONResponse(status_code=502, content={"success": False, "error": detail})
 
 
-# ── Backup endpoints (REMOVED — security risk: exposed full DB without auth) ──
-# Backups should be done via direct DB access (pg_dump) or Supabase dashboard.
-
-@app.get("/api/backup/code")
-def backup_code_zip():
-    """Export the current codebase as a zip archive via git archive."""
-    import subprocess, os
-    project_dir = os.path.dirname(os.path.abspath(__file__))
-    filename = f"holded_code_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
-    try:
-        result = subprocess.run(
-            ["git", "archive", "--format=zip", "HEAD"],
-            capture_output=True,
-            cwd=project_dir,
-        )
-        if result.returncode != 0:
-            # fallback: zip the directory manually (exclude .db, .env, __pycache__)
-            import zipfile, io
-            buf = io.BytesIO()
-            skip_exts = {".db", ".pyc", ".pyo", ".log"}
-            skip_files = {".env", ".env.example", "holded.db"}
-            skip_dirs = {"__pycache__", ".git", "uploads", "reports"}
-            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                for root, dirs, files in os.walk(project_dir):
-                    dirs[:] = [d for d in dirs if d not in skip_dirs]
-                    for fname in files:
-                        fpath = os.path.join(root, fname)
-                        if any(fname.endswith(ext) for ext in skip_exts):
-                            continue
-                        if fname in skip_files:
-                            continue
-                        arcname = os.path.relpath(fpath, project_dir)
-                        zf.write(fpath, arcname)
-            buf.seek(0)
-            return Response(
-                content=buf.read(),
-                media_type="application/zip",
-                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-            )
-        return Response(
-            content=result.stdout,
-            media_type="application/zip",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-        )
-    except Exception as exc:
-        logger.error(f"Backup code zip error: {exc}")
-        from fastapi import HTTPException
-        raise HTTPException(status_code=500, detail="Failed to create backup archive")
-
-@app.get("/api/backup/status")
-def backup_status():
-    """Return metadata about what will be backed up (sizes, record counts, last commit)."""
-    import os, subprocess
-    if connector._USE_SQLITE:
-        db_path = os.path.abspath(connector.DB_NAME)
-        db_size = os.path.getsize(db_path) if os.path.exists(db_path) else 0
-    else:
-        db_size = 0  # PostgreSQL — no local file
-
-    # record counts
-    counts: dict = {}
-    conn = connector.get_db()
-    cur = connector._cursor(conn)
-    try:
-        for tbl in ["invoices", "purchase_invoices", "contacts", "products",
-                    "amortizations", "purchase_analysis", "inventory_matches"]:
-            try:
-                _assert_valid_table(tbl)
-                cur.execute(f"SELECT COUNT(*) AS cnt FROM {tbl}")
-                row = cur.fetchone()
-                counts[tbl] = row["cnt"] if isinstance(row, dict) else row[0]
-            except Exception:
-                if not connector._USE_SQLITE:
-                    conn.rollback()
-                cur = connector._cursor(conn)
-                counts[tbl] = 0
-    finally:
-        connector.release_db(conn)
-
-    # last git commit
-    try:
-        project_dir = os.path.dirname(os.path.abspath(__file__))
-        git_log = subprocess.run(
-            ["git", "log", "-1", "--pretty=format:%h|%s|%ai"],
-            capture_output=True, text=True, cwd=project_dir,
-        )
-        parts = git_log.stdout.strip().split("|") if git_log.returncode == 0 else []
-        last_commit = {"hash": parts[0], "message": parts[1], "date": parts[2]} if len(parts) == 3 else None
-    except Exception:
-        last_commit = None
-
-    return {
-        "db_size_bytes": db_size,
-        "db_size_mb": round(db_size / 1_048_576, 2),
-        "record_counts": counts,
-        "last_commit": last_commit,
-    }
+# Backup endpoints removed — security risk: exposed full DB and codebase.
+# Use direct DB access (pg_dump) or Supabase dashboard for backups.
 
 
 # ── Job Tracker Endpoints ──────────────────────────────────────────────────────
