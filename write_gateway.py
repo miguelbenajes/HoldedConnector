@@ -439,7 +439,7 @@ class WriteGateway:
             products.append(p)
 
         invoice_payload = {
-            "contact": estimate.get("contact_id"),
+            "contactId": estimate.get("contact_id"),
             "products": products,
         }
         if estimate.get("desc"):

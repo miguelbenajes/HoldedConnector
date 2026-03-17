@@ -1476,7 +1476,7 @@ def agent_create_invoice(body: CreateDocumentBody):
         if "tax" in item:
             p["tax"] = item["tax"]
         products.append(p)
-    payload = {"contact": body.contact_id, "desc": body.desc, "products": products}
+    payload = {"contactId": body.contact_id, "desc": body.desc, "products": products}
     result = connector.create_invoice(payload)
     safe = connector.SAFE_MODE
     if result and not isinstance(result, dict):
@@ -1493,7 +1493,7 @@ def agent_create_estimate(body: CreateDocumentBody):
         if "tax" in item:
             p["tax"] = item["tax"]
         products.append(p)
-    payload = {"contact": body.contact_id, "desc": body.desc, "products": products}
+    payload = {"contactId": body.contact_id, "desc": body.desc, "products": products}
     result = connector.create_estimate(payload)
     safe = connector.SAFE_MODE
     if result and not isinstance(result, dict):

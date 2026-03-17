@@ -1473,7 +1473,7 @@ def delete_data(endpoint):
         return {"error": True, "status_code": 0, "detail": str(e)}
 
 def create_invoice(invoice_data):
-    logger.info(f"Creating invoice for contact {invoice_data.get('contact')}...")
+    logger.info(f"Creating invoice for contact {invoice_data.get('contactId')}...")
     result = post_data("/invoicing/v1/documents/invoice", invoice_data)
     if result and not result.get("error") and result.get('status') == 1:
         logger.info(f"Invoice created successfully: {result.get('id')}")
@@ -1501,7 +1501,7 @@ def create_contact(contact_data):
     return None
 
 def create_estimate(estimate_data):
-    logger.info(f"Creating estimate for contact {estimate_data.get('contact')}...")
+    logger.info(f"Creating estimate for contact {estimate_data.get('contactId')}...")
     result = post_data("/invoicing/v1/documents/estimate", estimate_data)
     if result and result.get('status') == 1:
         logger.info(f"Estimate created successfully: {result.get('id')}")
