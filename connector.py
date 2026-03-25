@@ -538,6 +538,17 @@ def _init_db_inner(conn):
         )
     ''')
 
+    # Job tracker automation columns
+    for col, col_type in [
+        ("notes_hash", "TEXT"),
+        ("invoice_draft_created_at", "TEXT"),
+        ("last_alerts", "TEXT"),
+    ]:
+        try:
+            cursor.execute(_q(f'ALTER TABLE jobs ADD COLUMN {col} {col_type}'))
+        except Exception:
+            pass  # Column already exists
+
     cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS job_note_queue (
             id {_serial},
@@ -549,6 +560,16 @@ def _init_db_inner(conn):
             processed_at TEXT
         )
     ''')
+
+    cursor.execute(f'''CREATE TABLE IF NOT EXISTS job_note_actions (
+        id {_serial} PRIMARY KEY,
+        project_code TEXT NOT NULL,
+        action_type TEXT NOT NULL,
+        details TEXT,
+        confirmed_by TEXT,
+        result TEXT,
+        created_at TEXT DEFAULT {_now}
+    )''')
 
     # Audit log indexes
     if not _USE_SQLITE:
