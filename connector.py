@@ -562,7 +562,7 @@ def _init_db_inner(conn):
     ''')
 
     cursor.execute(f'''CREATE TABLE IF NOT EXISTS job_note_actions (
-        id {_serial} PRIMARY KEY,
+        id {_serial},
         project_code TEXT NOT NULL,
         action_type TEXT NOT NULL,
         details TEXT,
