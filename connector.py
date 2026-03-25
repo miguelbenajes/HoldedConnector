@@ -545,8 +545,16 @@ def _init_db_inner(conn):
         ("last_alerts", "TEXT"),
     ]:
         try:
-            cursor.execute(_q(f'ALTER TABLE jobs ADD COLUMN {col} {col_type}'))
+            if _USE_SQLITE:
+                cursor.execute(f'ALTER TABLE jobs ADD COLUMN {col} {col_type}')
+            else:
+                # PostgreSQL: use savepoint to avoid aborting the whole transaction
+                cursor.execute("SAVEPOINT sp_add_col")
+                cursor.execute(f'ALTER TABLE jobs ADD COLUMN {col} {col_type}')
+                cursor.execute("RELEASE SAVEPOINT sp_add_col")
         except Exception:
+            if not _USE_SQLITE:
+                cursor.execute("ROLLBACK TO SAVEPOINT sp_add_col")
             pass  # Column already exists
 
     cursor.execute(f'''
@@ -850,6 +858,7 @@ def sync_documents(doc_type, table, items_table, fk_column):
     params = {"starttmp": 1262304000, "endtmp": int(time.time())}
     data = fetch_data(f"/invoicing/v1/documents/{doc_type}", params=params)
 
+    _changed_project_codes = set()
     conn = get_db()
     try:
         cursor = _cursor(conn)
@@ -977,10 +986,26 @@ def sync_documents(doc_type, table, items_table, fk_column):
                     "doc_date": item.get('date'),
                 }
                 ensure_job(project_code, doc_data, cursor)
+                _changed_project_codes.add(project_code)
 
         conn.commit()
     finally:
         release_db(conn)
+
+    # Notify Brain for each changed job — non-blocking, after DB transaction is closed
+    if _changed_project_codes:
+        from skills.job_tracker import BRAIN_API_URL, BRAIN_INTERNAL_KEY
+        for _pc in _changed_project_codes:
+            try:
+                requests.post(
+                    f"{BRAIN_API_URL}/internal/job-review",
+                    json={"project_code": _pc, "trigger": "holded_sync"},
+                    headers={"x-api-key": BRAIN_INTERNAL_KEY},
+                    timeout=5,
+                )
+            except Exception:
+                pass  # Non-critical — cron will pick it up
+
     logger.info(f"Synced {len(data)} {doc_type}s and their line items.")
 
 
@@ -1374,17 +1399,37 @@ def sync_single_document(doc_type, doc_id):
         return []
 
     conn = get_db()
+    _notify_project_code = None
+    _success = False
     try:
         cursor = _cursor(conn)
         _upsert_single_document(cursor, data, table, items_table, fk_col)
         conn.commit()
-        return [table, items_table]
+        _notify_project_code = _extract_project_code(data.get('products'))
+        _success = True
     except Exception as e:
         logger.error(f"Sync-back failed for {doc_type}/{doc_id}: {e}")
         conn.rollback()
-        return []
     finally:
         release_db(conn)
+
+    if not _success:
+        return []
+
+    # Notify Brain — non-blocking, after DB transaction is closed
+    if _notify_project_code:
+        from skills.job_tracker import BRAIN_API_URL, BRAIN_INTERNAL_KEY
+        try:
+            requests.post(
+                f"{BRAIN_API_URL}/internal/job-review",
+                json={"project_code": _notify_project_code, "trigger": "holded_sync"},
+                headers={"x-api-key": BRAIN_INTERNAL_KEY},
+                timeout=5,
+            )
+        except Exception:
+            pass  # Non-critical — cron will pick it up
+
+    return [table, items_table]
 
 
 def sync_single_contact(contact_id):

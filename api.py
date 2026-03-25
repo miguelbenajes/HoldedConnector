@@ -1840,6 +1840,18 @@ def create_job(request: dict):
         result = ensure_job(project_code, doc_data, cur)
         conn.commit()
 
+        # Notify Brain to review this job (non-blocking, after commit)
+        try:
+            from skills.job_tracker import BRAIN_API_URL, BRAIN_INTERNAL_KEY
+            requests.post(
+                f"{BRAIN_API_URL}/internal/job-review",
+                json={"project_code": project_code, "trigger": "holded_sync"},
+                headers={"x-api-key": BRAIN_INTERNAL_KEY},
+                timeout=5,
+            )
+        except Exception:
+            pass  # Non-critical — cron will pick it up
+
         try:
             from skills.job_tracker import flush_note_queue
             flush_note_queue()
