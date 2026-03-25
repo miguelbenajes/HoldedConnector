@@ -72,6 +72,13 @@ OPERATIONS = {
         "sync_type": "document",
         "sync_doc_type": "invoice",
     },
+    "update_estimate_items": {
+        "method": "PUT",
+        "endpoint": "/invoicing/v1/documents/estimate/{doc_id}",
+        "entity_type": "estimate",
+        "sync_type": "document",
+        "sync_doc_type": "estimate",
+    },
 }
 
 
@@ -269,7 +276,7 @@ class WriteGateway:
 
         # ── Rate Limiting ────────────────────────────────────
         # All sources get basic rate limiting; AI agent has tighter limits + daily budget
-        rate_limits = {"ai_agent": (5, 60), "rest_api": (30, 60), "cli_script": (60, 60)}
+        rate_limits = {"ai_agent": (5, 60), "rest_api": (30, 60), "cli_script": (60, 60), "brain_confirmed": (10, 60)}
         limit, window = rate_limits.get(source, (10, 60))
         if not _rate_limiter.check(source, limit, window):
             return {"success": False, "errors": [{"field": "rate_limit", "msg": f"Rate limit exceeded: max {limit} writes per minute for {source}"}]}
