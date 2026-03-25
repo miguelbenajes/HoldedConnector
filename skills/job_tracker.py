@@ -276,12 +276,13 @@ tags: [coyote, job, seguimiento]
 
 ## Notes
 
+%%--- MANUAL CONTENT BELOW - preserved on sync ---%%
+
 
 ## Invoicing Checklist
-- [ ] All shooting dates completed
-- [ ] Expenses reviewed
-- [ ] Equipment returned / damages checked
-- [ ] Final invoice created
+- [ ] Facturar al cliente
+- [ ] Gastos revisados
+- [ ] Equipo devuelto / daños comprobados
 """
 
 
@@ -381,25 +382,43 @@ def ensure_job(project_code, doc_data, cursor):
         if inv_id and status in ("open", "shooting"):
             status = "invoiced"
 
-        now_str = datetime.now().isoformat()
-        cursor.execute(conn_mod._q("""
-            UPDATE jobs SET
-                client_id = ?, client_name = ?, client_email = ?,
-                shooting_dates_raw = ?, shooting_dates = ?, quarter = ?,
-                estimate_id = ?, estimate_number = ?,
-                invoice_id = ?, invoice_number = ?,
-                status = ?, updated_at = ?
-            WHERE project_code = ?
-        """), (
-            client_id or existing.get("client_id"),
-            doc_data.get("client_name") or existing.get("client_name"),
-            client_email or existing.get("client_email"),
-            shooting_raw or existing.get("shooting_dates_raw"),
-            parsed_json, quarter,
-            est_id, est_num, inv_id, inv_num,
-            status, now_str, project_code,
-        ))
-        action = "update"
+        # Detect if anything actually changed before updating
+        new_client_id = client_id or existing.get("client_id")
+        new_client_name = doc_data.get("client_name") or existing.get("client_name")
+        new_client_email = client_email or existing.get("client_email")
+        new_shooting_raw = shooting_raw or existing.get("shooting_dates_raw")
+
+        changed = (
+            new_client_id != existing.get("client_id")
+            or new_client_name != existing.get("client_name")
+            or new_client_email != existing.get("client_email")
+            or new_shooting_raw != existing.get("shooting_dates_raw")
+            or parsed_json != existing.get("shooting_dates")
+            or quarter != existing.get("quarter")
+            or est_id != existing.get("estimate_id")
+            or est_num != existing.get("estimate_number")
+            or inv_id != existing.get("invoice_id")
+            or inv_num != existing.get("invoice_number")
+            or status != existing.get("status")
+        )
+
+        if changed:
+            now_str = datetime.now().isoformat()
+            cursor.execute(conn_mod._q("""
+                UPDATE jobs SET
+                    client_id = ?, client_name = ?, client_email = ?,
+                    shooting_dates_raw = ?, shooting_dates = ?, quarter = ?,
+                    estimate_id = ?, estimate_number = ?,
+                    invoice_id = ?, invoice_number = ?,
+                    status = ?, updated_at = ?
+                WHERE project_code = ?
+            """), (
+                new_client_id, new_client_name, new_client_email,
+                new_shooting_raw, parsed_json, quarter,
+                est_id, est_num, inv_id, inv_num,
+                status, now_str, project_code,
+            ))
+        action = "update" if changed else None
     else:
         now_str = datetime.now().isoformat()
         cursor.execute(conn_mod._q("""
@@ -419,10 +438,11 @@ def ensure_job(project_code, doc_data, cursor):
         ))
         action = "create"
 
-    # Queue note sync
-    cursor.execute(conn_mod._q("""
-        INSERT INTO job_note_queue (project_code, action) VALUES (?, ?)
-    """), (project_code, action))
+    # Queue note sync only on create or actual changes
+    if action:
+        cursor.execute(conn_mod._q("""
+            INSERT INTO job_note_queue (project_code, action) VALUES (?, ?)
+        """), (project_code, action))
 
     # Fetch and return the row
     cursor.execute(conn_mod._q(
@@ -434,6 +454,70 @@ def ensure_job(project_code, doc_data, cursor):
 # ── Obsidian Sync ──────────────────────────────────────────────────────────────
 
 MAX_PDF_SIZE = 5 * 1024 * 1024  # 5MB
+
+
+MANUAL_MARKER = "%%--- MANUAL CONTENT BELOW - preserved on sync ---%%"
+
+
+def compute_notes_hash(note_content):
+    """Compute SHA256 of the ## Notes section between MANUAL_MARKER and ## Invoicing Checklist.
+    Returns None if no notes section or empty."""
+    if not note_content or MANUAL_MARKER not in note_content:
+        return None
+    parts = note_content.split(MANUAL_MARKER, 1)
+    if len(parts) < 2:
+        return None
+    notes_section = parts[1].split("## Invoicing Checklist", 1)[0].strip()
+    if not notes_section:
+        return None
+    return hashlib.sha256(notes_section.encode()).hexdigest()
+
+
+def _brain_read(path):
+    """Read a note from Obsidian vault via Brain's /internal/obsidian-read endpoint.
+
+    Args:
+        path: vault-relative path (without .md extension)
+
+    Returns:
+        Note content string, or None if not found or error.
+    """
+    if not BRAIN_INTERNAL_KEY:
+        return None
+
+    try:
+        resp = http_requests.post(
+            f"{BRAIN_API_URL}/internal/obsidian-read",
+            json={"path": path},
+            headers={"x-api-key": BRAIN_INTERNAL_KEY},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get("found"):
+                return data.get("content", "")
+        return None
+    except Exception:
+        return None
+
+
+def _preserve_manual_content(new_content, existing_content):
+    """Merge new generated content with manually-written content from existing note.
+
+    Preserves everything after the MANUAL_MARKER in the existing note.
+    """
+    if not existing_content or MANUAL_MARKER not in existing_content:
+        return new_content
+
+    # Extract manual content from existing note (after the marker)
+    manual_part = existing_content.split(MANUAL_MARKER, 1)[1]
+
+    # Replace the marker + empty section in new content with marker + preserved content
+    if MANUAL_MARKER in new_content:
+        generated_part = new_content.split(MANUAL_MARKER, 1)[0]
+        return generated_part + MANUAL_MARKER + manual_part
+
+    return new_content
 
 
 def _brain_write(path, content, append=False, binary=False):
@@ -509,11 +593,29 @@ def sync_job_to_obsidian(project_code):
     # ── Phase 2: Render + push (no DB connection held during I/O) ──
     quarter = job.get("quarter") or get_quarter(date.today().isoformat())
     year = quarter.split("_")[1] if "_" in quarter else str(date.today().year)
-    note_content = render_job_note(job, expenses)
-
     safe_code = sanitize_for_path(project_code)
     base_path = f"ACCOUNTS/SEGUIMIENTO_TRABAJOS/{year}/{quarter}"
     note_path = f"{base_path}/{safe_code}"
+
+    # Read existing note to preserve manual content
+    existing_content = _brain_read(note_path)
+
+    # Compute and store notes_hash from existing note
+    if existing_content:
+        new_hash = compute_notes_hash(existing_content)
+        if new_hash:
+            conn2 = conn_mod.get_db()
+            try:
+                cur2 = conn_mod._cursor(conn2)
+                cur2.execute(conn_mod._q(
+                    "UPDATE jobs SET notes_hash = ? WHERE project_code = ?"
+                ), (new_hash, project_code))
+                conn2.commit()
+            finally:
+                conn_mod.release_db(conn2)
+
+    note_content = render_job_note(job, expenses)
+    note_content = _preserve_manual_content(note_content, existing_content)
     attach_dir = f"{base_path}/attachments"
 
     # Fetch PDF if we have an estimate or invoice
