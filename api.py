@@ -1971,7 +1971,7 @@ async def get_estimates_without_ref(request: Request):
     try:
         cur = connector._cursor(conn)
         cur.execute(connector._q("""
-            SELECT id, "docNumber", contact_id, date, subtotal, tags
+            SELECT id, doc_number, contact_id, contact_name, date, amount, tags
             FROM estimates
             WHERE project_code IS NULL
               AND date >= ?
@@ -1981,17 +1981,10 @@ async def get_estimates_without_ref(request: Request):
         rows = []
         for r in cur.fetchall():
             row = r if isinstance(r, dict) else dict(zip([d[0] for d in cur.description], r))
+            # Normalize: client_name from contact_name (already in table)
+            row["client_name"] = row.pop("contact_name", "") or ""
             rows.append(row)
 
-        # Enrich with contact names
-        for row in rows:
-            if row.get("contact_id"):
-                cur.execute(connector._q(
-                    "SELECT name FROM contacts WHERE id = ?"
-                ), (row["contact_id"],))
-                contact = cur.fetchone()
-                if contact:
-                    row["client_name"] = (contact["name"] if isinstance(contact, dict) else contact[0]) or ""
         return JSONResponse(rows)
     finally:
         connector.release_db(conn)
