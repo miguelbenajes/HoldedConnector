@@ -1963,7 +1963,7 @@ def flush_job_queue():
 
 
 @app.get("/api/estimates/without-ref")
-async def get_estimates_without_ref(request: Request):
+def get_estimates_without_ref(request: Request):
     """List estimates created after cutoff date that have no project_code."""
     cutoff = request.query_params.get("since", "2026-03-25")
     cutoff_ts = int(datetime.strptime(cutoff, "%Y-%m-%d").timestamp())

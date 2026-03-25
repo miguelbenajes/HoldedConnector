@@ -274,9 +274,19 @@ tags: [coyote, job, seguimiento]
 - **Job ref for emails:** Include `REF: {code}` in subject line
 - **Client contact:** {email}
 
-## Notes
+## Estimate Changes
 
 %%--- MANUAL CONTENT BELOW - preserved on sync ---%%
+
+### Items to Add
+<!-- + Product x2 @180€  or  + Transport 150€  or  free text -->
+
+
+### Items to Remove
+<!-- - Product name (reason)  -->
+
+
+### Other Notes
 
 
 ## Invoicing Checklist
@@ -501,23 +511,147 @@ def _brain_read(path):
         return None
 
 
+def _extract_section(content, heading, next_headings):
+    """Extract content of a markdown section between heading and next heading.
+
+    Args:
+        content: full markdown string
+        heading: section heading to find (e.g. "## Expenses & Tickets")
+        next_headings: list of possible next section headings
+
+    Returns:
+        Section content (without the heading line itself), or None if not found.
+    """
+    lines = content.split("\n")
+    start_idx = None
+    end_idx = len(lines)
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == heading:
+            start_idx = i + 1
+        elif start_idx is not None and stripped in next_headings:
+            end_idx = i
+            break
+
+    if start_idx is None:
+        return None
+
+    section = "\n".join(lines[start_idx:end_idx])
+    return section
+
+
+def _has_real_content(section_text, empty_markers):
+    """Check if a section has real user content beyond the default template.
+
+    Args:
+        section_text: the extracted section content
+        empty_markers: list of strings that indicate the section is still template-default
+
+    Returns:
+        True if the section contains real user-added content.
+    """
+    if not section_text:
+        return False
+    for marker in empty_markers:
+        if marker in section_text:
+            return False
+    return True
+
+
+def _replace_section(content, heading, next_headings, new_section_body):
+    """Replace the body of a markdown section, keeping heading and next section intact.
+
+    Args:
+        content: full markdown string
+        heading: section heading (e.g. "## Expenses & Tickets")
+        next_headings: possible next section headings
+        new_section_body: replacement content (without heading)
+
+    Returns:
+        Modified content string.
+    """
+    lines = content.split("\n")
+    start_idx = None
+    end_idx = len(lines)
+
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == heading:
+            start_idx = i + 1
+        elif start_idx is not None and stripped in next_headings:
+            end_idx = i
+            break
+
+    if start_idx is None:
+        return content
+
+    result = lines[:start_idx] + new_section_body.split("\n") + lines[end_idx:]
+    return "\n".join(result)
+
+
+# Sections that can be manually edited above the MANUAL_MARKER
+_EDITABLE_SECTIONS = [
+    {
+        "heading": "## Expenses & Tickets",
+        "next": ["## Email Thread", "## Estimate Changes", "## Notes"],
+        "empty_markers": ["*No expenses yet*"],
+    },
+    {
+        "heading": "## Email Thread",
+        "next": ["## Estimate Changes", "## Notes", MANUAL_MARKER],
+        "empty_markers": [],  # compare-based: keep existing if it differs from new
+        "preserve_if_different": True,
+    },
+]
+
+
 def _preserve_manual_content(new_content, existing_content):
     """Merge new generated content with manually-written content from existing note.
 
-    Preserves everything after the MANUAL_MARKER in the existing note.
+    Two-level preservation:
+      1. Sections above MANUAL_MARKER (Expenses, Email Thread): if the existing note
+         has user-edited content and the new render has only defaults, keep the existing.
+      2. Everything after MANUAL_MARKER: always preserved from existing note.
     """
-    if not existing_content or MANUAL_MARKER not in existing_content:
+    if not existing_content:
         return new_content
 
-    # Extract manual content from existing note (after the marker)
-    manual_part = existing_content.split(MANUAL_MARKER, 1)[1]
+    merged = new_content
 
-    # Replace the marker + empty section in new content with marker + preserved content
-    if MANUAL_MARKER in new_content:
-        generated_part = new_content.split(MANUAL_MARKER, 1)[0]
-        return generated_part + MANUAL_MARKER + manual_part
+    # ── Preserve editable sections above the marker ──
+    for sec in _EDITABLE_SECTIONS:
+        existing_section = _extract_section(existing_content, sec["heading"], sec["next"])
+        new_section = _extract_section(merged, sec["heading"], sec["next"])
 
-    return new_content
+        if existing_section is None:
+            continue
+
+        if sec.get("preserve_if_different"):
+            # For sections like Email Thread: preserve existing only if user ADDED content
+            # (more non-empty lines than the system render). If the system render has
+            # equal or more lines, it's a legitimate update — use the new version.
+            if existing_section and new_section:
+                existing_lines = [l for l in existing_section.strip().splitlines() if l.strip()]
+                new_lines = [l for l in new_section.strip().splitlines() if l.strip()]
+                if len(existing_lines) > len(new_lines):
+                    merged = _replace_section(merged, sec["heading"], sec["next"], existing_section)
+            continue
+
+        existing_has_content = _has_real_content(existing_section, sec["empty_markers"])
+        new_has_content = _has_real_content(new_section, sec["empty_markers"])
+
+        # Keep existing manual content when new render only has defaults
+        if existing_has_content and not new_has_content:
+            merged = _replace_section(merged, sec["heading"], sec["next"], existing_section)
+
+    # ── Preserve everything after MANUAL_MARKER ──
+    if MANUAL_MARKER in existing_content and MANUAL_MARKER in merged:
+        manual_part = existing_content.split(MANUAL_MARKER, 1)[1]
+        generated_part = merged.split(MANUAL_MARKER, 1)[0]
+        merged = generated_part + MANUAL_MARKER + manual_part
+
+    return merged
 
 
 def _brain_write(path, content, append=False, binary=False):
