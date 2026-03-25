@@ -341,6 +341,15 @@ def run_sync():
             except Exception as e:
                 logger.error(f"Sync step '{step_name}' failed: {e}", exc_info=True)
                 sync_status["errors"].append(f"{step_name} failed")
+
+        # Flush pending job notes to Obsidian
+        try:
+            from skills.job_tracker import flush_note_queue
+            count = flush_note_queue()
+            if count:
+                logger.info(f"[JOB_TRACKER] Flushed {count} job notes to Obsidian")
+        except Exception as e:
+            logger.error(f"[JOB_TRACKER] Queue flush failed: {e}")
     finally:
         sync_status["running"] = False
         sync_status["last_time"] = datetime.now().isoformat()
@@ -432,7 +441,7 @@ async def upload_ticket(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail=f"File type not allowed: {file_ext}")
 
     os.makedirs(UPLOADS_DIR, exist_ok=True)
-    safe_name = f"{int(time.time())}_{os.path.basename(file.filename)}"
+    safe_name = f"{int(time.time())}_{os.path.basename(file.filename or 'upload')}"
     file_path = os.path.join(UPLOADS_DIR, safe_name)
     if not os.path.abspath(file_path).startswith(UPLOADS_DIR):
         raise HTTPException(status_code=400, detail="Invalid filename")
@@ -1080,6 +1089,8 @@ async def list_files(directory: str = "uploads", limit: int = Query(20, ge=1, le
 
 # ────────────── Amortizations Endpoints ──────────────
 
+VALID_PRODUCT_TYPES = {"alquiler", "venta", "servicio", "gasto"}
+
 @app.get("/api/products/{product_id}/pack-info")
 def get_product_pack_info(product_id: str):
     """Return pack composition (if pack) or packs containing this product (if component)."""
@@ -1138,8 +1149,6 @@ def create_amortization(body: AmortizationCreate):
         status="success",
     )
     return {"status": "success", "id": new_id}
-
-VALID_PRODUCT_TYPES = {"alquiler", "venta", "servicio", "gasto"}
 
 class AmortizationUpdate(BaseModel):
     purchase_price: Optional[float] = None
@@ -1521,6 +1530,30 @@ def agent_create_estimate(body: CreateDocumentBody):
     if isinstance(result, dict) and result.get("error"):
         return {"success": False, "error": f"Failed to create estimate: {result.get('detail', 'Unknown error')}", "safe_mode": safe}
     return {"success": False, "error": "Failed to create estimate", "safe_mode": safe}
+
+@app.put("/api/agent/estimate/{estimate_id}")
+def agent_update_estimate(estimate_id: str, body: CreateDocumentBody):
+    """Update an estimate's products in Holded. Used by job-automation after YES confirmation."""
+    if not _re_mod.match(r'^[a-f0-9]{24}$', estimate_id):
+        return JSONResponse({"error": "Invalid estimate ID"}, status_code=400)
+    products = []
+    for item in body.items:
+        p = {"name": item["name"], "units": item.get("units", 1), "subtotal": item.get("price", 0)}
+        if "tax" in item:
+            p["tax"] = item["tax"]
+        if "desc" in item:
+            p["desc"] = item["desc"]
+        if "productId" in item:
+            p["productId"] = item["productId"]
+        products.append(p)
+    payload = {"products": products}
+    if body.contact_id:
+        payload["contactId"] = body.contact_id
+    result = connector.update_estimate(estimate_id, payload)
+    if result:
+        return {"success": True, "estimate_id": estimate_id}
+    return {"success": False, "error": "Failed to update estimate"}
+
 
 @app.post("/api/agent/contact")
 def agent_create_contact(body: CreateContactBody):
@@ -1915,6 +1948,41 @@ def flush_job_queue():
     from skills.job_tracker import flush_note_queue
     count = flush_note_queue()
     return {"success": True, "processed": count}
+
+
+@app.get("/api/estimates/without-ref")
+async def get_estimates_without_ref(request: Request):
+    """List estimates created after cutoff date that have no project_code."""
+    cutoff = request.query_params.get("since", "2026-03-25")
+    cutoff_ts = int(datetime.strptime(cutoff, "%Y-%m-%d").timestamp())
+    conn = connector.get_db()
+    try:
+        cur = connector._cursor(conn)
+        cur.execute(connector._q("""
+            SELECT id, "docNumber", contact_id, date, subtotal, tags
+            FROM estimates
+            WHERE project_code IS NULL
+              AND date >= ?
+            ORDER BY date DESC
+            LIMIT 50
+        """), (cutoff_ts,))
+        rows = []
+        for r in cur.fetchall():
+            row = r if isinstance(r, dict) else dict(zip([d[0] for d in cur.description], r))
+            rows.append(row)
+
+        # Enrich with contact names
+        for row in rows:
+            if row.get("contact_id"):
+                cur.execute(connector._q(
+                    "SELECT name FROM contacts WHERE id = ?"
+                ), (row["contact_id"],))
+                contact = cur.fetchone()
+                if contact:
+                    row["client_name"] = (contact["name"] if isinstance(contact, dict) else contact[0]) or ""
+        return JSONResponse(rows)
+    finally:
+        connector.release_db(conn)
 
 
 # Serve static files (mount at the end to avoid intercepting /api)
