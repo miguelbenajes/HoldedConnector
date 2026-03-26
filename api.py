@@ -1536,17 +1536,18 @@ def agent_update_estimate(estimate_id: str, body: CreateDocumentBody):
     """Update an estimate's products in Holded. Used by job-automation after YES confirmation."""
     if not _re_mod.match(r'^[a-f0-9]{24}$', estimate_id):
         return JSONResponse({"error": "Invalid estimate ID"}, status_code=400)
-    products = []
+    # Holded API expects "items" key with "price" field (not "products"/"subtotal")
+    items_list = []
     for item in body.items:
-        p = {"name": item["name"], "units": item.get("units", 1), "subtotal": item.get("price", 0)}
+        p = {"name": item["name"], "units": item.get("units", 1), "price": item.get("price", 0)}
         if "tax" in item:
             p["tax"] = item["tax"]
         if "desc" in item:
             p["desc"] = item["desc"]
         if "productId" in item:
             p["productId"] = item["productId"]
-        products.append(p)
-    payload = {"products": products}
+        items_list.append(p)
+    payload = {"items": items_list}
     if body.contact_id:
         payload["contactId"] = body.contact_id
     result = connector.update_estimate(estimate_id, payload)
