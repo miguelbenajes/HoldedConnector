@@ -1966,7 +1966,10 @@ def flush_job_queue():
 def get_estimates_without_ref(request: Request):
     """List estimates created after cutoff date that have no project_code."""
     cutoff = request.query_params.get("since", "2026-03-25")
-    cutoff_ts = int(datetime.strptime(cutoff, "%Y-%m-%d").timestamp())
+    try:
+        cutoff_ts = int(datetime.strptime(cutoff, "%Y-%m-%d").timestamp())
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "Invalid 'since' parameter. Expected YYYY-MM-DD."}, status_code=400)
     conn = connector.get_db()
     try:
         cur = connector._cursor(conn)
