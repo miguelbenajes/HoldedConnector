@@ -1916,7 +1916,7 @@ def update_job(code: str, request: dict):
     if not code or len(code) > 50 or not _re_mod.match(r'^[A-Za-z0-9_\- ]+$', code):
         return JSONResponse({"error": "Invalid project code"}, status_code=400)
     VALID_STATUSES = {"open", "shooting", "invoiced", "closed"}
-    ALLOWED_FIELDS = {"status", "shooting_dates_raw", "invoice_id", "invoice_number", "note_path"}
+    ALLOWED_FIELDS = {"status", "shooting_dates_raw", "invoice_id", "invoice_number", "note_path", "notes_hash"}
 
     # Validate status if provided
     if "status" in request and request["status"] not in VALID_STATUSES:
