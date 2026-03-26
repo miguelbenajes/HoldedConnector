@@ -776,6 +776,18 @@ def get_estimate_items(estimate_id: str):
         cursor.execute("SELECT * FROM estimate_items WHERE estimate_id = ?", (estimate_id,))
         return [dict(row) for row in cursor.fetchall()]
 
+@app.get("/api/entities/estimates/{estimate_id}/items/fresh")
+def get_estimate_items_fresh(estimate_id: str):
+    """Read estimate items directly from Holded API (not local DB cache)."""
+    if not _re_mod.match(r'^[a-f0-9]{24}$', estimate_id):
+        return JSONResponse({"error": "Invalid estimate ID"}, status_code=400)
+    try:
+        items = connector.fetch_estimate_fresh(estimate_id)
+        return items
+    except Exception as e:
+        logger.error(f"Fresh read failed for estimate {estimate_id}: {e}")
+        return JSONResponse({"error": f"Holded API error: {str(e)}"}, status_code=502)
+
 @app.get("/api/entities/{doc_type}/{doc_id}/pdf")
 def get_document_pdf(doc_type: str, doc_id: str):
     # Accept both singular (Brain sends these) and plural forms

@@ -1556,6 +1556,48 @@ def update_estimate(estimate_id, estimate_data):
         return True
     return False
 
+def fetch_estimate_fresh(estimate_id):
+    """Read estimate items directly from Holded API (not local DB).
+    Used by Brain executor and verifier to avoid stale cache."""
+    endpoint = f"/invoicing/v1/documents/estimate/{estimate_id}"
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            url = f"{BASE_URL}{endpoint}"
+            response = requests.get(url, headers=HEADERS, timeout=15)
+            if response.status_code == 200:
+                data = response.json()
+                raw_items = data.get("products") or []
+                items = []
+                for it in raw_items:
+                    items.append({
+                        "name": it.get("name", ""),
+                        "units": _num(it.get("units")) or 1,
+                        "subtotal": _num(it.get("subtotal")) or 0,
+                        "price": _num(it.get("subtotal")) or 0,
+                        "desc": it.get("desc", ""),
+                        "productId": it.get("productId", ""),
+                        "product_id": it.get("productId", ""),
+                    })
+                logger.info(f"Fresh read estimate {estimate_id}: {len(items)} items from Holded API")
+                return items
+            elif response.status_code == 429:
+                wait = 2 * (attempt + 1)
+                logger.warning(f"Rate limit (429) reading estimate {estimate_id}, waiting {wait}s (attempt {attempt+1})")
+                time.sleep(wait)
+                continue
+            else:
+                logger.error(f"Holded API error reading estimate {estimate_id}: {response.status_code} - {response.text[:200]}")
+                raise Exception(f"Holded API error: HTTP {response.status_code}")
+        except requests.exceptions.Timeout:
+            if attempt < max_retries - 1:
+                time.sleep(2)
+                continue
+            raise Exception(f"Holded API timeout reading estimate {estimate_id}")
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"Network error reading estimate {estimate_id}: {e}")
+    raise Exception(f"Failed to read estimate {estimate_id} after {max_retries} retries")
+
 def create_contact(contact_data):
     logger.info(f"Creating contact {contact_data.get('name')}...")
     result = post_data("/invoicing/v1/contacts", contact_data)
