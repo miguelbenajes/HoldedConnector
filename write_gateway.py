@@ -161,7 +161,7 @@ def _build_holded_payload(operation, params):
                 p["desc"] = _sanitize_text(item["desc"], 500)
             products.append(p)
 
-        payload = {"contactId": params.get("contact_id"), "products": products}
+        payload = {"contactId": params.get("contact_id"), "items": products}
         if params.get("desc"):
             payload["desc"] = _sanitize_text(params["desc"], 1000)
         import time as _time
