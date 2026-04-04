@@ -1534,9 +1534,6 @@ def agent_create_invoice(body: CreateDocumentBody):
         # Default: if no taxes specified at all, apply IVA 21%
         if "taxes" not in p and "tax" not in p:
             p["taxes"] = ["s_iva_21"]
-        # Default: if no taxes specified at all, apply IVA 21%
-        if "taxes" not in p and "tax" not in p:
-            p["taxes"] = ["s_iva_21"]
         items_out.append(p)
     payload = {"contactId": body.contact_id, "desc": body.desc, "items": items_out, "date": int(_time.time())}
     result = connector.create_invoice(payload)
@@ -1589,15 +1586,15 @@ def agent_update_estimate(estimate_id: str, body: CreateDocumentBody):
     items_list = []
     for item in body.items:
         p = {"name": item["name"], "units": item.get("units", 1), "subtotal": item.get("price", item.get("subtotal", 0))}
-        if "tax" in item:
+        if "taxes" in item:
+            p["taxes"] = item["taxes"]
+        elif "tax" in item:
             p["tax"] = item["tax"]
-        if "retention" in item and item["retention"]:
-            ret_key = f"s_ret_{int(item['retention'])}"
-            taxes = p.get("taxes", [f"s_iva_{item.get('tax', 21)}"])
-            if ret_key not in taxes:
-                taxes.append(ret_key)
-            p["taxes"] = taxes
-            p.pop("tax", None)
+            if "retention" in item and item["retention"]:
+                ret_key = f"s_ret_{int(item['retention'])}"
+                taxes = [f"s_iva_{item.get('tax', 21)}", ret_key]
+                p["taxes"] = taxes
+                p.pop("tax", None)
         if "desc" in item:
             p["desc"] = item["desc"]
         if "productId" in item:
@@ -1607,7 +1604,7 @@ def agent_update_estimate(estimate_id: str, body: CreateDocumentBody):
         if "taxes" not in p and "tax" not in p:
             p["taxes"] = ["s_iva_21"]
         items_list.append(p)
-    payload = {"products": items_list}
+    payload = {"items": items_list}
     if body.contact_id:
         payload["contactId"] = body.contact_id
     result = connector.update_estimate(estimate_id, payload)
