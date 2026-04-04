@@ -16,12 +16,12 @@ SAFE_MODE = os.getenv("HOLDED_SAFE_MODE", "true").lower() == "true"
 # ── Project code detection ────────────────────────────────────────────────────
 # Product "Proyect REF:" in Holded — its description field carries the project code
 # Format convention: CLIENT-YYMMDD (e.g. MEDIASET-260315)
-PROYECTO_PRODUCT_ID = "69b2b35f75ae381d8f05c133"
+PROYECTO_PRODUCT_ID = os.getenv("HOLDED_PROYECTO_PRODUCT_ID", "69b2b35f75ae381d8f05c133")
 PROYECTO_PRODUCT_NAME = "proyect ref:"  # lowercase for case-insensitive comparison
 
 # ── Shooting dates detection ─────────────────────────────────────────────────
 # Product "Shooting Dates:" in Holded — its description field carries the dates
-SHOOTING_DATES_PRODUCT_ID = "69b2cfcd0df77ff4010e4ac8"
+SHOOTING_DATES_PRODUCT_ID = os.getenv("HOLDED_SHOOTING_DATES_PRODUCT_ID", "69b2cfcd0df77ff4010e4ac8")
 SHOOTING_DATES_PRODUCT_NAME = "shooting dates:"  # lowercase for case-insensitive
 
 BASE_URL = "https://api.holded.com/api"
@@ -1606,8 +1606,8 @@ def fetch_estimate_fresh(estimate_id):
                     items.append({
                         "name": it.get("name", ""),
                         "units": _num(it.get("units")) or 1,
-                        "subtotal": _num(it.get("subtotal")) or 0,
-                        "price": _num(it.get("subtotal")) or 0,
+                        "subtotal": _num(it.get("price")) or _num(it.get("subtotal")) or 0,
+                        "price": _num(it.get("price")) or _num(it.get("subtotal")) or 0,
                         "desc": it.get("desc", ""),
                         "productId": it.get("productId", ""),
                         "product_id": it.get("productId", ""),
