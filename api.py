@@ -1498,7 +1498,7 @@ class CreateContactBody(BaseModel):
     name: str = Field(..., max_length=200)
     email: Optional[str] = Field(None, max_length=200)
     phone: Optional[str] = Field(None, max_length=50)
-    vatnumber: Optional[str] = Field(None, max_length=50)
+    vatnumber: Optional[str] = Field(None, max_length=50)  # mapped to "code" for Holded API
     type: Optional[str] = Field("client", max_length=20)
 
 class UpdateStatusBody(BaseModel):
@@ -1511,13 +1511,34 @@ class SendDocumentBody(BaseModel):
 
 @app.post("/api/agent/invoice")
 def agent_create_invoice(body: CreateDocumentBody):
-    products = []
+    import time as _time
+    items_out = []
     for item in body.items:
-        p = {"name": item["name"], "units": item["units"], "subtotal": item["price"]}
-        if "tax" in item:
+        p = {"name": item["name"], "units": item["units"], "subtotal": item.get("price", item.get("subtotal", 0))}
+        if "taxes" in item:
+            p["taxes"] = item["taxes"]  # e.g. ["s_iva_21", "s_ret_15"]
+        elif "tax" in item:
             p["tax"] = item["tax"]
-        products.append(p)
-    payload = {"contactId": body.contact_id, "desc": body.desc, "products": products}
+        if "retention" in item and item["retention"]:
+            # Map retention to taxes array: retention 15 → s_ret_15
+            ret_key = f"s_ret_{int(item['retention'])}"
+            taxes = p.get("taxes", [f"s_iva_{item.get('tax', 21)}"])
+            if ret_key not in taxes:
+                taxes.append(ret_key)
+            p["taxes"] = taxes
+            p.pop("tax", None)
+        if "discount" in item:
+            p["discount"] = item["discount"]
+        if "desc" in item:
+            p["desc"] = item["desc"]
+        # Default: if no taxes specified at all, apply IVA 21%
+        if "taxes" not in p and "tax" not in p:
+            p["taxes"] = ["s_iva_21"]
+        # Default: if no taxes specified at all, apply IVA 21%
+        if "taxes" not in p and "tax" not in p:
+            p["taxes"] = ["s_iva_21"]
+        items_out.append(p)
+    payload = {"contactId": body.contact_id, "desc": body.desc, "items": items_out, "date": int(_time.time())}
     result = connector.create_invoice(payload)
     safe = connector.SAFE_MODE
     if result and not isinstance(result, dict):
@@ -1528,13 +1549,30 @@ def agent_create_invoice(body: CreateDocumentBody):
 
 @app.post("/api/agent/estimate")
 def agent_create_estimate(body: CreateDocumentBody):
-    products = []
+    import time as _time
+    items_out = []
     for item in body.items:
-        p = {"name": item["name"], "units": item["units"], "subtotal": item["price"]}
-        if "tax" in item:
+        p = {"name": item["name"], "units": item["units"], "subtotal": item.get("price", item.get("subtotal", 0))}
+        if "taxes" in item:
+            p["taxes"] = item["taxes"]
+        elif "tax" in item:
             p["tax"] = item["tax"]
-        products.append(p)
-    payload = {"contactId": body.contact_id, "desc": body.desc, "products": products}
+        if "retention" in item and item["retention"]:
+            ret_key = f"s_ret_{int(item['retention'])}"
+            taxes = p.get("taxes", [f"s_iva_{item.get('tax', 21)}"])
+            if ret_key not in taxes:
+                taxes.append(ret_key)
+            p["taxes"] = taxes
+            p.pop("tax", None)
+        if "discount" in item:
+            p["discount"] = item["discount"]
+        if "desc" in item:
+            p["desc"] = item["desc"]
+        # Default IVA 21% if no taxes specified
+        if "taxes" not in p and "tax" not in p:
+            p["taxes"] = ["s_iva_21"]
+        items_out.append(p)
+    payload = {"contactId": body.contact_id, "desc": body.desc, "items": items_out, "date": int(_time.time())}
     result = connector.create_estimate(payload)
     safe = connector.SAFE_MODE
     if result and not isinstance(result, dict):
@@ -1548,7 +1586,6 @@ def agent_update_estimate(estimate_id: str, body: CreateDocumentBody):
     """Update an estimate's products in Holded. Used by job-automation after YES confirmation."""
     if not _re_mod.match(r'^[a-f0-9]{24}$', estimate_id):
         return JSONResponse({"error": "Invalid estimate ID"}, status_code=400)
-    # Holded API expects "items" key with "price" field (not "products"/"subtotal")
     items_list = []
     for item in body.items:
         p = {"name": item["name"], "units": item.get("units", 1), "price": item.get("price", 0)}
@@ -1558,6 +1595,8 @@ def agent_update_estimate(estimate_id: str, body: CreateDocumentBody):
             p["desc"] = item["desc"]
         if "productId" in item:
             p["productId"] = item["productId"]
+        if "serviceId" in item:
+            p["serviceId"] = item["serviceId"]
         items_list.append(p)
     payload = {"items": items_list}
     if body.contact_id:
@@ -1571,10 +1610,13 @@ def agent_update_estimate(estimate_id: str, body: CreateDocumentBody):
 @app.post("/api/agent/contact")
 def agent_create_contact(body: CreateContactBody):
     payload = {"name": body.name}
-    for key in ["email", "phone", "vatnumber", "type"]:
+    for key in ["email", "phone", "type"]:
         val = getattr(body, key, None)
         if val:
             payload[key] = val
+    # Holded uses "code" for NIF/CIF/VAT, not "vatnumber"
+    if body.vatnumber:
+        payload["code"] = body.vatnumber
     result = connector.create_contact(payload)
     safe = connector.SAFE_MODE
     if result and not isinstance(result, dict):
@@ -1582,6 +1624,127 @@ def agent_create_contact(body: CreateContactBody):
     if isinstance(result, dict) and result.get("error"):
         return {"success": False, "error": f"Failed to create contact: {result.get('detail', 'Unknown error')}", "safe_mode": safe}
     return {"success": False, "error": "Failed to create contact", "safe_mode": safe}
+
+
+@app.put("/api/agent/invoice/{invoice_id}/approve")
+def agent_approve_invoice(invoice_id: str):
+    """Approve a draft invoice — assigns number, locks editing."""
+    if not _re_mod.match(r'^[a-zA-Z0-9]+$', invoice_id):
+        return {"success": False, "error": "Invalid invoice ID"}
+    result = connector.holded_put(f"/invoicing/v1/documents/invoice/{invoice_id}", {"approveDoc": True})
+    if result and result.get("status") == 1:
+        return {"success": True, "info": "Invoice approved"}
+    return {"success": False, "error": result.get("info", "Failed to approve")}
+
+
+
+@app.get("/api/agent/contact/{contact_id}")
+def agent_get_contact(contact_id: str):
+    """Get full contact details + check for missing required fields."""
+    if not _re_mod.match(r'^[a-zA-Z0-9]+$', contact_id):
+        return {"success": False, "error": "Invalid contact ID"}
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM contacts WHERE id = ?", (contact_id,))
+        row = cursor.fetchone()
+        if not row:
+            return {"success": False, "error": "Contact not found"}
+        contact = dict(row)
+
+    # Check missing fields
+    missing = []
+    if not contact.get("code"): missing.append("NIF/CIF (code)")
+    if not contact.get("email"): missing.append("email")
+    if not contact.get("country"): missing.append("country (pais)")
+    if not contact.get("address"): missing.append("address (direccion)")
+
+    # Determine tax regime
+    country = (contact.get("country") or "").upper()
+    eu_countries = {"DE","FR","IT","NL","BE","PT","AT","IE","FI","SE","DK","PL","CZ","SK","HU","RO","BG","HR","SI","EE","LV","LT","LU","MT","CY","GR"}
+    if country == "ES":
+        tax_regime = "spain"
+    elif country in eu_countries:
+        tax_regime = "eu"
+    elif country:
+        tax_regime = "extra_eu"
+    else:
+        tax_regime = "unknown"
+
+    return {
+        "success": True,
+        "contact": contact,
+        "missing_fields": missing,
+        "tax_regime": tax_regime,
+        "tax_note": {
+            "spain": "IVA 21% + IRPF segun tipo item",
+            "eu": "Sin IVA, sin IRPF (intracomunitario). Requiere VAT valido.",
+            "extra_eu": "Sin IVA, sin IRPF (exportacion)",
+            "unknown": "Pais desconocido — preguntar a Miguel"
+        }.get(tax_regime, "")
+    }
+
+
+class UpdateContactBody(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    vatnumber: Optional[str] = None
+    phone: Optional[str] = None
+    country: Optional[str] = None
+    address: Optional[str] = None
+    city: Optional[str] = None
+    postal_code: Optional[str] = None
+    province: Optional[str] = None
+    trade_name: Optional[str] = None
+    discount: Optional[float] = None
+
+
+@app.put("/api/agent/contact/{contact_id}")
+def agent_update_contact(contact_id: str, body: UpdateContactBody):
+    """Update contact fields in Holded + local DB."""
+    if not _re_mod.match(r'^[a-zA-Z0-9]+$', contact_id):
+        return {"success": False, "error": "Invalid contact ID"}
+
+    # Build Holded API payload
+    payload = {}
+    if body.name: payload["name"] = body.name
+    if body.email: payload["email"] = body.email
+    if body.phone: payload["phone"] = body.phone
+    if body.trade_name: payload["tradeName"] = body.trade_name
+    if body.vatnumber: payload["code"] = body.vatnumber
+    if body.discount is not None: payload["discount"] = body.discount
+
+    # Address fields
+    addr = {}
+    if body.country: addr["country"] = body.country
+    if body.address: addr["address"] = body.address
+    if body.city: addr["city"] = body.city
+    if body.postal_code: addr["postalCode"] = body.postal_code
+    if body.province: addr["province"] = body.province
+    if addr:
+        payload["billAddress"] = addr
+
+    if not payload:
+        return {"success": False, "error": "No fields to update"}
+
+    # Update in Holded
+    import requests as _req
+    resp = _req.put(
+        f"https://api.holded.com/api/invoicing/v1/contacts/{contact_id}",
+        headers={"key": connector.API_KEY, "Content-Type": "application/json"},
+        json=payload
+    )
+
+    if resp.status_code != 200 or resp.json().get("status") != 1:
+        return {"success": False, "error": f"Holded update failed: {resp.text[:200]}"}
+
+    # Trigger sync to update local DB
+    try:
+        connector.sync_contacts()
+    except Exception:
+        pass
+
+    return {"success": True, "updated_fields": list(payload.keys())}
+
 
 @app.put("/api/agent/invoice/{invoice_id}/status")
 def agent_update_invoice_status(invoice_id: str, body: UpdateStatusBody):
@@ -1853,18 +2016,6 @@ def create_job(request: dict):
         result = ensure_job(project_code, doc_data, cur)
         conn.commit()
 
-        # Notify Brain to review this job (non-blocking, after commit)
-        try:
-            from skills.job_tracker import BRAIN_API_URL, BRAIN_INTERNAL_KEY
-            requests.post(
-                f"{BRAIN_API_URL}/internal/job-review",
-                json={"project_code": project_code, "trigger": "holded_sync"},
-                headers={"x-api-key": BRAIN_INTERNAL_KEY},
-                timeout=5,
-            )
-        except Exception:
-            pass  # Non-critical — cron will pick it up
-
         try:
             from skills.job_tracker import flush_note_queue
             flush_note_queue()
@@ -1973,37 +2124,6 @@ def flush_job_queue():
     from skills.job_tracker import flush_note_queue
     count = flush_note_queue()
     return {"success": True, "processed": count}
-
-
-@app.get("/api/estimates/without-ref")
-def get_estimates_without_ref(request: Request):
-    """List estimates created after cutoff date that have no project_code."""
-    cutoff = request.query_params.get("since", "2026-03-25")
-    try:
-        cutoff_ts = int(datetime.strptime(cutoff, "%Y-%m-%d").timestamp())
-    except (ValueError, TypeError):
-        return JSONResponse({"error": "Invalid 'since' parameter. Expected YYYY-MM-DD."}, status_code=400)
-    conn = connector.get_db()
-    try:
-        cur = connector._cursor(conn)
-        cur.execute(connector._q("""
-            SELECT id, doc_number, contact_id, contact_name, date, amount, tags
-            FROM estimates
-            WHERE project_code IS NULL
-              AND date >= ?
-            ORDER BY date DESC
-            LIMIT 50
-        """), (cutoff_ts,))
-        rows = []
-        for r in cur.fetchall():
-            row = r if isinstance(r, dict) else dict(zip([d[0] for d in cur.description], r))
-            # Normalize: client_name from contact_name (already in table)
-            row["client_name"] = row.pop("contact_name", "") or ""
-            rows.append(row)
-
-        return JSONResponse(rows)
-    finally:
-        connector.release_db(conn)
 
 
 # Serve static files (mount at the end to avoid intercepting /api)

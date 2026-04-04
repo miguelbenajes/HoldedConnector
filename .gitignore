@@ -1,5 +1,6 @@
 # Environment
 .env
+.env.*
 
 # Database
 *.db
@@ -30,6 +31,11 @@ BACKUPS/
 
 # n8n local data
 n8n-data/
+
+# Assets (screenshots, spreadsheets, backups)
+*.png
+*.xlsx
+*.tar.gz
 
 # macOS
 .DS_Store

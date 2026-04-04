@@ -103,7 +103,11 @@ class TestSanitizeForMarkdown:
         assert "\\|" in result
 
 
-from skills.job_tracker import render_job_note, ensure_job
+from skills.job_tracker import (
+    render_job_note, ensure_job,
+    _preserve_manual_content, _extract_section, _has_real_content,
+    MANUAL_MARKER,
+)
 import connector
 
 
@@ -219,3 +223,136 @@ class TestRenderJobNote:
             }
             result = render_job_note(job, [])
             assert emoji in result
+
+
+class TestPreserveManualContent:
+    """Verify that manual edits above and below MANUAL_MARKER survive re-sync."""
+
+    def _make_job(self, code="TEST-1"):
+        return {
+            "project_code": code, "client_name": "Client", "client_email": "a@b.com",
+            "status": "open", "shooting_dates_raw": "1/3", "shooting_dates": '["2026-03-01"]',
+            "created_at": "2026-03-01", "estimate_id": "est1", "estimate_number": "Q-1",
+            "invoice_id": None, "invoice_number": None,
+        }
+
+    def test_preserves_manual_expenses(self):
+        """Manual expenses in existing note survive when DB has no expenses."""
+        new_content = render_job_note(self._make_job(), expenses=[])
+        assert "*No expenses yet*" in new_content
+
+        # Simulate existing note with hand-edited expenses
+        existing = new_content.replace(
+            "| — | *No expenses yet* | — | — |",
+            "| 25-3-2026 | taxi Shelphy | 14,75 | — |\n| — | canon selphy | — | — |"
+        )
+        merged = _preserve_manual_content(new_content, existing)
+
+        assert "taxi Shelphy" in merged
+        assert "canon selphy" in merged
+        assert "*No expenses yet*" not in merged
+
+    def test_db_expenses_override_manual(self):
+        """When DB has real expenses, they take priority over manual ones."""
+        expenses = [{"date": 1742169600, "name": "Hotel", "amount": 120.0, "doc_number": "E-1"}]
+        new_content = render_job_note(self._make_job(), expenses=expenses)
+        assert "Hotel" in new_content
+
+        # Existing note had manual expenses
+        old_content = render_job_note(self._make_job(), expenses=[]).replace(
+            "| — | *No expenses yet* | — | — |",
+            "| 25-3-2026 | taxi | 15 | — |"
+        )
+        merged = _preserve_manual_content(new_content, old_content)
+
+        # DB expenses win because new_content has real content
+        assert "Hotel" in merged
+
+    def test_preserves_manual_email_notes(self):
+        """Hand-edited Email Thread section survives re-sync."""
+        new_content = render_job_note(self._make_job(), expenses=[])
+
+        # Simulate user adding notes to Email Thread
+        existing = new_content.replace(
+            "- **Client contact:** a@b.com",
+            "- **Client contact:** custom@email.com\n- Contacto alternativo: manager@company.com"
+        )
+        merged = _preserve_manual_content(new_content, existing)
+
+        assert "custom@email.com" in merged
+        assert "manager@company.com" in merged
+
+    def test_preserves_below_marker(self):
+        """Content below MANUAL_MARKER is always preserved."""
+        new_content = render_job_note(self._make_job(), expenses=[])
+
+        existing = new_content.replace(
+            "### Items to Add\n<!-- + Product x2 @180€  or  + Transport 150€  or  free text -->",
+            "### Items to Add\n+ Sony FX3 x1 @150€\n+ LED Panel x2 @80€"
+        )
+        merged = _preserve_manual_content(new_content, existing)
+
+        assert "Sony FX3" in merged
+        assert "LED Panel" in merged
+
+    def test_no_existing_note(self):
+        """First sync (no existing note) returns new content unchanged."""
+        new_content = render_job_note(self._make_job(), expenses=[])
+        merged = _preserve_manual_content(new_content, None)
+        assert merged == new_content
+
+    def test_existing_without_marker(self):
+        """Old-format notes without MANUAL_MARKER still get sections preserved."""
+        new_content = render_job_note(self._make_job(), expenses=[])
+
+        # Old note without marker but with manual expenses
+        old_note = """---
+project_code: TEST-1
+---
+
+# TEST-1
+
+## Expenses & Tickets
+
+| Date | Concept | Amount | Source |
+|------|---------|--------|--------|
+| 25-3-2026 | taxi | 14,75 | — |
+
+**Total expenses:** €14.75
+
+## Email Thread
+- **Client contact:** custom@email.com
+
+## Notes
+
+Some important notes here
+"""
+        merged = _preserve_manual_content(new_content, old_note)
+
+        # Expenses should be preserved (old note had real content, new has default)
+        assert "taxi" in merged
+        assert "14,75" in merged
+
+
+class TestExtractSection:
+    def test_extract_expenses(self):
+        content = "## Quote\nstuff\n## Expenses & Tickets\n| a | b |\n\n## Email Thread\nmore"
+        section = _extract_section(content, "## Expenses & Tickets", ["## Email Thread"])
+        assert "| a | b |" in section
+        assert "more" not in section
+
+    def test_missing_section(self):
+        content = "## Quote\nstuff\n## Email Thread\nmore"
+        section = _extract_section(content, "## Expenses & Tickets", ["## Email Thread"])
+        assert section is None
+
+
+class TestHasRealContent:
+    def test_empty_markers(self):
+        assert not _has_real_content("| — | *No expenses yet* | — | — |", ["*No expenses yet*"])
+
+    def test_real_content(self):
+        assert _has_real_content("| 25-3 | taxi | 15 | — |", ["*No expenses yet*"])
+
+    def test_none_input(self):
+        assert not _has_real_content(None, ["*No expenses yet*"])

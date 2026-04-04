@@ -164,8 +164,18 @@ def _build_holded_payload(operation, params):
         payload = {"contactId": params.get("contact_id"), "products": products}
         if params.get("desc"):
             payload["desc"] = _sanitize_text(params["desc"], 1000)
-        if params.get("date"):
-            payload["date"] = params["date"]
+        import time as _time
+        from datetime import datetime as _dt
+        _raw_date = params.get("date")
+        if isinstance(_raw_date, (int, float)) and _raw_date > 1000000000:
+            payload["date"] = int(_raw_date)
+        elif isinstance(_raw_date, str) and _raw_date:
+            try:
+                payload["date"] = int(_dt.strptime(_raw_date[:10], "%Y-%m-%d").timestamp())
+            except ValueError:
+                payload["date"] = int(_time.time())
+        else:
+            payload["date"] = int(_time.time())
         if params.get("notes"):
             payload["notes"] = _sanitize_text(params["notes"], 2000)
         return payload

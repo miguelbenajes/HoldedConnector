@@ -516,6 +516,31 @@ def _init_db_inner(conn):
         )
     ''')
 
+
+    # ── Contact table expansion (country, address, discount) ──────────
+    for col, defn in [
+        ("country", "TEXT DEFAULT ''"),
+        ("address", "TEXT DEFAULT ''"),
+        ("city", "TEXT DEFAULT ''"),
+        ("province", "TEXT DEFAULT ''"),
+        ("postal_code", "TEXT DEFAULT ''"),
+        ("trade_name", "TEXT DEFAULT ''"),
+        ("discount", "REAL DEFAULT 0"),
+    ]:
+        try:
+            if _USE_SQLITE:
+                cursor.execute(f"ALTER TABLE contacts ADD COLUMN {col} {defn}")
+            else:
+                cursor.execute("SAVEPOINT sp_contact_col")
+                cursor.execute(f"ALTER TABLE contacts ADD COLUMN {col} {defn}")
+                cursor.execute("RELEASE SAVEPOINT sp_contact_col")
+        except Exception:
+            if not _USE_SQLITE:
+                try:
+                    cursor.execute("ROLLBACK TO SAVEPOINT sp_contact_col")
+                except Exception:
+                    pass
+
     # ── Job Tracker tables ────────────────────────────────────────────────────
     cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS jobs (
@@ -533,8 +558,8 @@ def _init_db_inner(conn):
             invoice_number TEXT,
             note_path TEXT,
             pdf_hash TEXT,
-            created_at TEXT DEFAULT {_now},
-            updated_at TEXT DEFAULT {_now}
+            created_at TEXT DEFAULT ({_now}),
+            updated_at TEXT DEFAULT ({_now})
         )
     ''')
 
@@ -564,7 +589,7 @@ def _init_db_inner(conn):
             action TEXT NOT NULL,
             retry_count INTEGER DEFAULT 0,
             last_error TEXT,
-            created_at TEXT DEFAULT {_now},
+            created_at TEXT DEFAULT ({_now}),
             processed_at TEXT
         )
     ''')
@@ -576,7 +601,7 @@ def _init_db_inner(conn):
         details TEXT,
         confirmed_by TEXT,
         result TEXT,
-        created_at TEXT DEFAULT {_now}
+        created_at TEXT DEFAULT ({_now})
     )''')
 
     # Audit log indexes
@@ -1091,21 +1116,29 @@ def sync_contacts():
     try:
         cursor = _cursor(conn)
         for item in data:
+            addr = item.get('billAddress') or {}
             vals = (item.get('id'), item.get('name'), item.get('email'), item.get('type'),
-                    item.get('code'), item.get('vat'), item.get('phone'), item.get('mobile'))
+                    item.get('code'), item.get('vat'), item.get('phone'), item.get('mobile'),
+                    addr.get('country', ''), addr.get('address', ''), addr.get('city', ''),
+                    addr.get('province', ''), addr.get('postalCode', ''),
+                    item.get('tradeName', ''), item.get('discount', 0))
             if _USE_SQLITE:
                 cursor.execute("""
-                    INSERT OR REPLACE INTO contacts (id, name, email, type, code, vat, phone, mobile)
-                    VALUES (?,?,?,?,?,?,?,?)
+                    INSERT OR REPLACE INTO contacts (id, name, email, type, code, vat, phone, mobile,
+                        country, address, city, province, postal_code, trade_name, discount)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, vals)
             else:
                 cursor.execute("""
-                    INSERT INTO contacts (id, name, email, type, code, vat, phone, mobile)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                    INSERT INTO contacts (id, name, email, type, code, vat, phone, mobile,
+                        country, address, city, province, postal_code, trade_name, discount)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT (id) DO UPDATE SET
                         name=EXCLUDED.name, email=EXCLUDED.email, type=EXCLUDED.type,
                         code=EXCLUDED.code, vat=EXCLUDED.vat, phone=EXCLUDED.phone,
-                        mobile=EXCLUDED.mobile
+                        mobile=EXCLUDED.mobile, country=EXCLUDED.country, address=EXCLUDED.address,
+                        city=EXCLUDED.city, province=EXCLUDED.province, postal_code=EXCLUDED.postal_code,
+                        trade_name=EXCLUDED.trade_name, discount=EXCLUDED.discount
                 """, vals)
         conn.commit()
     finally:
@@ -1608,9 +1641,25 @@ def create_contact(contact_data):
         return result
     return None
 
+
+
+def holded_put(endpoint, data):
+    """PUT request to Holded API."""
+    try:
+        response = requests.put(f"{BASE_URL}{endpoint}", headers=HEADERS, json=data)
+        if response.status_code == 200:
+            return response.json()
+        logger.error(f"Error putting to {endpoint}: {response.status_code} - {response.text[:200]}")
+        return {"status": 0, "info": response.text[:200]}
+    except Exception as e:
+        logger.error(f"Exception putting to {endpoint}: {e}")
+        return None
+
 def create_estimate(estimate_data):
     logger.info(f"Creating estimate for contact {estimate_data.get('contactId')}...")
+    logger.info(f"[ESTIMATE PAYLOAD] {json.dumps(estimate_data)}")
     result = post_data("/invoicing/v1/documents/estimate", estimate_data)
+    logger.info(f"[ESTIMATE RESULT] {result}")
     if result and result.get('status') == 1:
         logger.info(f"Estimate created successfully: {result.get('id')}")
         return result.get('id')
