@@ -1534,6 +1534,10 @@ def agent_create_invoice(body: CreateDocumentBody):
         # Default: if no taxes specified at all, apply IVA 21%
         if "taxes" not in p and "tax" not in p:
             p["taxes"] = ["s_iva_21"]
+        # Assign account based on retention type or explicit account
+        account_id = _resolve_account(item)
+        if account_id:
+            p["account"] = account_id
         items_out.append(p)
     payload = {"contactId": body.contact_id, "desc": body.desc, "items": items_out, "date": int(_time.time())}
     result = connector.create_invoice(payload)
@@ -1543,6 +1547,31 @@ def agent_create_invoice(body: CreateDocumentBody):
     if isinstance(result, dict) and result.get("error"):
         return {"success": False, "error": f"Failed to create invoice: {result.get('detail', 'Unknown error')}", "safe_mode": safe}
     return {"success": False, "error": "Failed to create invoice", "safe_mode": safe}
+
+# Account number → Holded internal ID mapping
+ACCOUNT_IDS = {
+    "75200000": "69cccc2bd9d45db3170b99a6",  # Arrendamiento de equipos (Alquiler)
+    "75900000": "69cccc2bd9d45db3170b99a8",  # Prestación de servicios (Servicio)
+    "70500000": "69cccc2bd9d45db3170b99a4",  # Venta de productos (Producto)
+    "70000000": "69cccc2bd9d45db3170b99a3",  # Ventas de mercaderías (default)
+}
+
+def _resolve_account(item):
+    """Resolve account ID from item's account number or retention type."""
+    # Explicit account number in item
+    acc = item.get("account", "")
+    if acc in ACCOUNT_IDS:
+        return ACCOUNT_IDS[acc]
+    # Infer from retention: 19% = alquiler, 15% = servicio, 0% = producto
+    ret = item.get("retention", 0)
+    if ret == 19:
+        return ACCOUNT_IDS["75200000"]
+    elif ret == 15:
+        return ACCOUNT_IDS["75900000"]
+    elif ret == 0 and item.get("price", item.get("subtotal", 0)) > 0:
+        return ACCOUNT_IDS["70500000"]
+    return None  # Use Holded default
+
 
 @app.post("/api/agent/estimate")
 def agent_create_estimate(body: CreateDocumentBody):
@@ -1568,6 +1597,10 @@ def agent_create_estimate(body: CreateDocumentBody):
         # Default IVA 21% if no taxes specified
         if "taxes" not in p and "tax" not in p:
             p["taxes"] = ["s_iva_21"]
+        # Assign account based on retention type or explicit account
+        account_id = _resolve_account(item)
+        if account_id:
+            p["account"] = account_id
         items_out.append(p)
     payload = {"contactId": body.contact_id, "desc": body.desc, "items": items_out, "date": int(_time.time())}
     result = connector.create_estimate(payload)
@@ -1603,6 +1636,10 @@ def agent_update_estimate(estimate_id: str, body: CreateDocumentBody):
             p["serviceId"] = item["serviceId"]
         if "taxes" not in p and "tax" not in p:
             p["taxes"] = ["s_iva_21"]
+        # Assign account based on retention type or explicit account
+        account_id = _resolve_account(item)
+        if account_id:
+            p["account"] = account_id
         items_list.append(p)
     payload = {"items": items_list}
     if body.contact_id:
