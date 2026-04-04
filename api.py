@@ -1531,13 +1531,13 @@ def agent_create_invoice(body: CreateDocumentBody):
             p["discount"] = item["discount"]
         if "desc" in item:
             p["desc"] = item["desc"]
+        if "serviceId" in item:
+            p["serviceId"] = item["serviceId"]
+        if "productId" in item:
+            p["productId"] = item["productId"]
         # Default: if no taxes specified at all, apply IVA 21%
         if "taxes" not in p and "tax" not in p:
             p["taxes"] = ["s_iva_21"]
-        # Assign account based on retention type or explicit account
-        account_id = _resolve_account(item)
-        if account_id:
-            p["account"] = account_id
         items_out.append(p)
     payload = {"contactId": body.contact_id, "desc": body.desc, "items": items_out, "date": int(_time.time())}
     result = connector.create_invoice(payload)
@@ -1594,13 +1594,13 @@ def agent_create_estimate(body: CreateDocumentBody):
             p["discount"] = item["discount"]
         if "desc" in item:
             p["desc"] = item["desc"]
+        if "serviceId" in item:
+            p["serviceId"] = item["serviceId"]
+        if "productId" in item:
+            p["productId"] = item["productId"]
         # Default IVA 21% if no taxes specified
         if "taxes" not in p and "tax" not in p:
             p["taxes"] = ["s_iva_21"]
-        # Assign account based on retention type or explicit account
-        account_id = _resolve_account(item)
-        if account_id:
-            p["account"] = account_id
         items_out.append(p)
     payload = {"contactId": body.contact_id, "desc": body.desc, "items": items_out, "date": int(_time.time())}
     result = connector.create_estimate(payload)
