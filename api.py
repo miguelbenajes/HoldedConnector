@@ -2161,6 +2161,46 @@ def sync_job_note(code: str):
     return JSONResponse({"error": "Sync failed"}, status_code=502)
 
 
+@app.get("/api/estimates/without-ref")
+def get_estimates_without_ref(since: str = "2026-03-25", limit: int = 50):
+    """List estimates created after cutoff that have no project_code (REF).
+    Used by Brain's presupuesto audit in the job-review pipeline."""
+    limit = min(max(1, limit), 200)
+    try:
+        cutoff_ts = int(datetime.strptime(since, "%Y-%m-%d").timestamp())
+    except ValueError:
+        return JSONResponse({"error": "Invalid date format. Expected YYYY-MM-DD"}, status_code=400)
+
+    conn = connector.get_db()
+    try:
+        cur = connector._cursor(conn)
+        cur.execute(connector._q("""
+            SELECT id, doc_number, contact_id, date, amount, tags
+            FROM estimates
+            WHERE project_code IS NULL
+              AND date >= ?
+            ORDER BY date DESC
+            LIMIT ?
+        """), (cutoff_ts, limit))
+        rows = []
+        for r in cur.fetchall():
+            row = r if isinstance(r, dict) else dict(zip([d[0] for d in cur.description], r))
+            rows.append(row)
+
+        # Enrich with contact names
+        for row in rows:
+            if row.get("contact_id"):
+                cur.execute(connector._q(
+                    "SELECT name FROM contacts WHERE id = ?"
+                ), (row["contact_id"],))
+                contact = cur.fetchone()
+                if contact:
+                    row["client_name"] = (contact["name"] if isinstance(contact, dict) else contact[0]) or ""
+        return rows
+    finally:
+        connector.release_db(conn)
+
+
 @app.post("/api/jobs/flush-queue")
 def flush_job_queue():
     """Process all pending Obsidian note queue items."""

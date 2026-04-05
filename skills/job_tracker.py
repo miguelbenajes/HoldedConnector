@@ -454,11 +454,25 @@ def ensure_job(project_code, doc_data, cursor):
             INSERT INTO job_note_queue (project_code, action) VALUES (?, ?)
         """), (project_code, action))
 
-    # Fetch and return the row
+    # Fetch the row before triggering Brain (Bug 12: trigger after DB work)
     cursor.execute(conn_mod._q(
         "SELECT * FROM jobs WHERE project_code = ?"
     ), (project_code,))
-    return _row_to_dict(cursor.fetchone(), cursor)
+    result_row = _row_to_dict(cursor.fetchone(), cursor)
+
+    # Notify Brain to review this job (event-driven, non-blocking)
+    if action and BRAIN_INTERNAL_KEY:
+        try:
+            http_requests.post(
+                f"{BRAIN_API_URL}/internal/job-review",
+                json={"project_code": project_code, "action": action},
+                headers={"x-api-key": BRAIN_INTERNAL_KEY},
+                timeout=5,
+            )
+        except Exception as e:
+            logger.warning(f"[JOB_TRACKER] Brain notification failed: {e}")
+
+    return result_row
 
 
 # ── Obsidian Sync ──────────────────────────────────────────────────────────────

@@ -1,0 +1,254 @@
+# Product Mapping Rules & Learning File
+# Purpose: Document product classification decisions and learned patterns for future automations
+# Last Updated: 2026-03-02
+
+##############################################################################
+# CLASSIFICATION RULES
+##############################################################################
+
+classification_rules:
+  real_products:
+    description: "Physical inventory items - equipment, materials, tools, hardware"
+    keywords:
+      - "adapter"
+      - "camera"
+      - "lens"
+      - "battery"
+      - "cable"
+      - "filter"
+      - "reflector"
+      - "light"
+      - "stand"
+      - "tripod"
+      - "kit"
+    examples:
+      - "E200 Spigot adapter 16-29mm"
+      - "Nikon D850"
+      - "Canon 70-200mm lens"
+
+  services:
+    description: "Time-based services, labor, consulting, fees (becomes 'fee' product type in Holded)"
+    keywords:
+      - "session"
+      - "consultation"
+      - "labor"
+      - "hora"
+      - "hour"
+      - "photography"
+      - "assistance"
+    examples:
+      - "Photo session 2 hours"
+      - "Consulting project"
+      - "Labor - setup and takedown"
+
+  expenses:
+    description: "Operating costs, non-inventory items (becomes 'expense' type in Holded)"
+    keywords:
+      - "taxi"
+      - "parking"
+      - "petrol"
+      - "fuel"
+      - "courier"
+      - "shipping"
+      - "dinner"
+      - "cena"
+      - "glovo"
+      - "transport"
+      - "food"
+    special_rules:
+      - name: "Dinner entries"
+        pattern: "Dinner .* \\d{1,2}-\\d{1,2}-\\d{4}"
+        action: "Classify as Expense"
+        reason: "Operating cost, not inventory"
+        example: "Dinner Thursday 12-9-2024"
+    examples:
+      - "Taxi a Estacion Sants"
+      - "Parking tickets 15€ + 9€ + 8€"
+      - "Dinner Friday 13-9-2024"
+
+  administrative:
+    description: "Notes, project codes, references - should be IGNORED/DELETED"
+    keywords:
+      - "project"
+      - "anulacion"
+      - "annulation"
+      - "invoice"
+      - "reference"
+      - "code"
+    examples:
+      - "Project name: BIR17235"
+      - "Invoice reference ABC123"
+      - "Transavia booking"
+
+##############################################################################
+# PRODUCT LINKING RULES
+##############################################################################
+
+product_links:
+  "ALQ MACBOOK":
+    description: "Rental/loan of MacBook Pro Max M3"
+    maps_to_product_id: "6638b3809e91425c3f008177"
+    maps_to_product_name: "Macbook Pro Max M3"
+    action: "Link to existing product + create amortization"
+    reasoning: "ALQ = rental/loan code; this should track ROI on the MacBook"
+    created_amortization: true
+    notes: |
+      Search term: "Macbook Pro Max M3" (case-sensitive partial match)
+      Alternative names in inventory:
+        - Macbook pro retina display (ID: 65931294d6de4947240dbf4e)
+        - Macbook Pro Max M2 64gb 2Tb (ID: 6593f402d122a3f1d6077c9d)
+
+##############################################################################
+# RECLASSIFICATIONS APPLIED (Session 2026-03-02)
+##############################################################################
+
+applied_reclassifications:
+  - original_text: "E200 Spigot adapter 16-29mm"
+    original_classification: "Service"
+    reclassified_to: "Real Product"
+    reasoning: "Physical equipment item, not a service"
+    applied_in_session: "2026-03-02"
+
+  - original_text: "ALQ MACBOOK"
+    original_classification: "Service"
+    action: "Linked to inventory"
+    linked_to: "Macbook Pro Max M3"
+    product_id: "6638b3809e91425c3f008177"
+    created_amortization: true
+    reasoning: "Existing equipment that's being rented/loaned"
+    applied_in_session: "2026-03-02"
+
+  - original_text: "Dinner Thursday 12-9-2024"
+    original_classification: "Service"
+    reclassified_to: "Expense"
+    reasoning: "Operating cost, not billable service"
+    applied_in_session: "2026-03-02"
+
+  - original_text: "Dinner Friday 13-9-2024"
+    original_classification: "Service"
+    reclassified_to: "Expense"
+    reasoning: "Operating cost, not billable service"
+    applied_in_session: "2026-03-02"
+
+  - original_text: "Project name: BIR17235"
+    original_classification: "Service"
+    action: "Deleted/Ignored"
+    reasoning: "Administrative note, not a product"
+    applied_in_session: "2026-03-02"
+
+##############################################################################
+# ADMINISTRATIVE ITEMS (All Ignored 2026-03-02)
+##############################################################################
+
+administrative_items_ignored:
+  count: 20
+  decision: "Delete all (no products to create)"
+  session: "2026-03-02"
+  examples:
+    - "Transavia booking reference"
+    - "Invoice notes"
+    - "Project codes"
+    - "Internal references"
+
+##############################################################################
+# CUSTOM FIELDS & ENHANCEMENTS
+##############################################################################
+
+custom_fields:
+  expenses:
+    - name: "project_id"
+      type: "String"
+      description: "Link expense to specific project for tracking"
+      optional: true
+      example: "BIR17235"
+
+  amortizations:
+    - name: "purchase_price"
+      type: "Numeric"
+      description: "Original cost of the equipment"
+
+    - name: "purchase_date"
+      type: "Date"
+      description: "When the equipment was purchased"
+
+    - name: "notes"
+      type: "Text"
+      description: "Free text notes about the amortization"
+
+##############################################################################
+# FUTURE AUTOMATION PATTERNS
+##############################################################################
+
+automation_opportunities:
+  - pattern: "ALQ .+"
+    description: "ALQ prefix likely means rental/loan"
+    action: "Try to match against existing inventory; if match, link to amortization"
+    confidence: "Medium"
+
+  - pattern: "Dinner|Cena|Glovo|Taxi|Parking"
+    description: "Known expense keywords"
+    action: "Automatically classify as Expense"
+    confidence: "High"
+
+  - pattern: "OT \\d+ hours? on .+"
+    description: "Overtime entries with hours and date"
+    action: "Extract hours and date; classify as Service with hourly rate"
+    confidence: "High"
+    note: "Currently 0 detected in data, but pattern ready for future"
+
+##############################################################################
+# REFERENCE DATA (For Quick Lookups)
+##############################################################################
+
+existing_products_with_macbook:
+  - id: "6638b3809e91425c3f008177"
+    name: "Macbook Pro Max M3"
+    status: "Used for linking ALQ MACBOOK"
+
+  - id: "65931294d6de4947240dbf4e"
+    name: "Macbook pro retina display"
+    status: "Alternative if M3 not available"
+
+  - id: "6593f402d122a3f1d6077c9d"
+    name: "Macbook Pro Max M2 64gb 2Tb"
+    status: "Alternative if M3 not available"
+
+##############################################################################
+# SESSION SUMMARY
+##############################################################################
+
+session_2026_03_02:
+  date: "2026-03-02"
+  total_products_processed: 307
+  breakdown:
+    real_products_created: 178
+    expenses_created: 67
+    services_created: 42
+    linked_to_inventory: 1
+    administrative_ignored: 20
+
+  key_decisions:
+    - "All 20 administrative items deleted (no business value)"
+    - "Dinner entries reclassified as expenses"
+    - "ALQ MACBOOK linked to existing Macbook Pro Max M3 with amortization"
+    - "Physical adapter moved from services to real products"
+
+  impact:
+    - "Real products ready for Holded import: 178 items"
+    - "Expenses ready for tracking: 67 items (with optional project_id)"
+    - "Services/Fees ready for creation: 42 items"
+    - "Inventory link created: ALQ MACBOOK → Amortization tracking"
+
+##############################################################################
+# NOTES FOR FUTURE SESSIONS
+##############################################################################
+
+notes: |
+  1. This file should grow as more products are classified
+  2. When new unmapped products appear, check this file for similar patterns
+  3. The "ALQ" prefix is a strong signal for equipment rental/loan linking
+  4. Dinner/food items are always expenses, not services
+  5. Search for existing products using ILIKE (case-insensitive partial match)
+  6. When linking to existing product, always create an amortization record
+  7. Project codes (BIRxxxxx) should be treated as administrative, not products
+  8. Consider adding more keywords as patterns emerge in future sessions
