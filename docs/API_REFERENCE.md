@@ -376,4 +376,34 @@ Every write operation via the gateway creates an entry in `write_audit_log`:
 
 ---
 
+## Holded API Limitations
+
+Known limitations of the Holded API that affect consumers:
+
+### Estimate status changes DO NOT WORK
+
+The Holded API **accepts** PUT requests to change estimate status (returns `{"status": 1, "info": "Updated"}`) but **does not actually change the status**. Verified 2026-04-08: all estimates remain in their original status after the PUT call.
+
+**Workaround:** Estimate lifecycle is managed through:
+- **Create** → automatically draft (status 0)
+- **Send to client** → via `POST /api/agent/send/estimate/{id}`
+- **Convert to invoice** → via `POST /api/agent/convert-estimate` (marks estimate as invoiced)
+- **Cancel** → only via Holded web UI (no API support)
+
+### Approved invoices cannot be PUT-edited
+
+Once an invoice is approved (status 1, submitted to Hacienda/SII), the Holded API rejects all PUT requests with `"Approved documents cannot be edited"`.
+
+**To mark as paid:** Use the payment endpoint:
+```bash
+POST /api/documents/invoice/{id}/pay
+{"date": 1744142400, "amount": 605.00, "treasury": "main", "desc": "Payment received"}
+```
+
+### Status field is unreliable
+
+The `status` field returned by the Holded API does not always reflect the real document state. The connector derives the actual status from multiple fields: `approvedAt` (approval), `paymentsPending` (paid vs unpaid), `dueDate` (overdue), and API `status==3` (cancelled).
+
+---
+
 *Last updated: 2026-04-08 — Fase 3 (Gateway Bypass Migration)*
