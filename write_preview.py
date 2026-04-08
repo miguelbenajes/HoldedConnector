@@ -229,6 +229,10 @@ REVERSIBILITY = {
         "endpoint": "/invoicing/v1/documents/invoice/{id}",
         "conditions": "Invoice can be deleted while in borrador. Estimate status change is permanent.",
     },
+    "approve_invoice": {
+        "can_reverse": False,
+        "conditions": "Invoice approval submits to Hacienda/SII. IRREVERSIBLE and legally binding.",
+    },
 }
 
 
@@ -315,6 +319,20 @@ def build_preview(operation, params, context=None):
             "type": params.get("doc_type"),
         }
         preview["recipients"] = params.get("emails", [])
+
+    elif operation == "approve_invoice":
+        doc = context.get("document", {})
+        preview["document"] = {
+            "id": params.get("doc_id"),
+            "doc_number": doc.get("doc_number", ""),
+            "current_status": "borrador",
+        }
+        preview["action"] = "Aprobar factura — envío a Hacienda/SII irreversible"
+        warnings.append({
+            "level": "critical",
+            "code": "HACIENDA_SUBMISSION",
+            "msg": "APROBAR esta factura la enviará a Hacienda (SII). Esta acción es IRREVERSIBLE y legalmente vinculante."
+        })
 
     elif operation == "convert_estimate_to_invoice":
         estimate = context.get("estimate", {})

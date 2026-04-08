@@ -268,8 +268,8 @@ def validate_create_contact(params):
     if tax_op and tax_op not in VALID_TAX_OPERATIONS:
         errors.append({"field": "taxOperation", "msg": f"Must be one of {VALID_TAX_OPERATIONS}"})
 
-    # Duplicate check
-    code = params.get("code", "")
+    # Duplicate check — api.py sends "vat", gateway maps to "code"
+    code = params.get("code") or params.get("vat", "")
     if name:
         conn = connector.get_db()
         try:
@@ -425,6 +425,34 @@ def validate_convert_estimate_to_invoice(params):
 
 # ── Validator Registry ───────────────────────────────────────────────
 
+def validate_approve_invoice(params):
+    """Validate approve_invoice: doc_id must exist and be a draft invoice (status 0)."""
+    errors = []
+    context = {}
+
+    doc_id = params.get("doc_id")
+    id_err = _validate_holded_id(doc_id, "doc_id")
+    if id_err:
+        errors.append(id_err)
+        return (False, errors, context)
+
+    doc = _fetch_document("invoice", doc_id)
+    if not doc:
+        errors.append({"field": "doc_id", "msg": f"Invoice {doc_id} not found in local DB"})
+        return (False, errors, context)
+
+    context["document"] = doc
+    status = doc.get("status", 0)
+    if status != 0:
+        status_labels = {0: "draft", 1: "approved", 2: "partial", 3: "paid", 4: "overdue", 5: "cancelled"}
+        errors.append({
+            "field": "status",
+            "msg": f"Invoice is already {status_labels.get(status, status)} — only draft invoices can be approved"
+        })
+
+    return (len(errors) == 0, errors, context)
+
+
 VALIDATORS = {
     "create_invoice": validate_create_invoice,
     "create_estimate": validate_create_estimate,
@@ -432,6 +460,7 @@ VALIDATORS = {
     "update_document_status": validate_update_document_status,
     "send_document": validate_send_document,
     "convert_estimate_to_invoice": validate_convert_estimate_to_invoice,
+    "approve_invoice": validate_approve_invoice,
 }
 
 
