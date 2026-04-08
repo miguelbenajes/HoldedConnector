@@ -55,7 +55,13 @@ async def auth_middleware(request: Request, call_next):
         token = auth_header[7:]
 
         # Legacy HOLDED_CONNECTOR_TOKEN (Brain inter-service) → full access
+        # EXCEPT: /approve routes require X-Confirm-Hacienda header (SII safety)
         if auth_module.is_legacy_token(token):
+            if "/approve" in request.url.path:
+                if request.headers.get("x-confirm-hacienda") != "true":
+                    return JSONResponse(status_code=403, content={
+                        "error": "Approve requires X-Confirm-Hacienda: true header (Hacienda/SII submission)"
+                    })
             request.state.user = None
             return await call_next(request)
 
@@ -92,10 +98,15 @@ async def auth_middleware(request: Request, call_next):
     return JSONResponse(status_code=401, content={"error": "Authentication required"})
 
 # CORS: restrict to known origins in production.
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*")
+# In production (DATABASE_URL set), ALLOWED_ORIGINS is required — never allow *.
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "")
+if not ALLOWED_ORIGINS and connector.DATABASE_URL:
+    logger.critical("ALLOWED_ORIGINS must be set in production (DATABASE_URL is set). Defaulting to coyoterent.com")
+    ALLOWED_ORIGINS = "https://coyoterent.com,https://bolsa.coyoterent.com"
+cors_origins = ALLOWED_ORIGINS.split(",") if ALLOWED_ORIGINS else ["*"]  # * only in local dev (SQLite)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"] if ALLOWED_ORIGINS == "*" else ALLOWED_ORIGINS.split(","),
+    allow_origins=cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -1670,14 +1681,44 @@ def agent_create_contact(body: CreateContactBody):
 
 
 @app.put("/api/agent/invoice/{invoice_id}/approve")
-def agent_approve_invoice(invoice_id: str):
-    """Approve a draft invoice — assigns number, locks editing."""
+def agent_approve_invoice(invoice_id: str, request: Request):
+    """Approve a draft invoice — assigns number, locks editing.
+    CRITICAL: This submits the invoice to Hacienda/SII. Irreversible and legally binding.
+    Requires X-Confirm-Hacienda: true header."""
     if not _re_mod.match(r'^[a-zA-Z0-9]+$', invoice_id):
         return {"success": False, "error": "Invalid invoice ID"}
+
+    # Safety: require explicit confirmation header
+    if request.headers.get("x-confirm-hacienda") != "true":
+        return JSONResponse(status_code=400, content={
+            "success": False,
+            "error": "Invoice approval submits to Hacienda/SII (irreversible). "
+                     "Set header X-Confirm-Hacienda: true to confirm."
+        })
+
+    # Audit log before execution
+    audit_id = connector.insert_audit_log(
+        source="rest_api",
+        operation="approve_invoice",
+        entity_type="invoice",
+        payload_sent={"approveDoc": True, "invoice_id": invoice_id},
+        conversation_id=None,
+    )
+    logger.warning(f"[APPROVE] Invoice {invoice_id} approval requested — Hacienda/SII submission (audit:{audit_id})")
+
     result = connector.holded_put(f"/invoicing/v1/documents/invoice/{invoice_id}", {"approveDoc": True})
     if result and result.get("status") == 1:
-        return {"success": True, "info": "Invoice approved"}
-    return {"success": False, "error": result.get("info", "Failed to approve")}
+        connector.update_audit_log(audit_id, status="success", entity_id=invoice_id, response_received=result)
+        return {
+            "success": True,
+            "info": "Invoice approved",
+            "hacienda_warning": True,
+            "hacienda_detail": "Invoice submitted to Hacienda/SII. This is irreversible.",
+            "audit_id": audit_id,
+        }
+    error_msg = result.get("info", "Failed to approve") if result else "No response from Holded API"
+    connector.update_audit_log(audit_id, status="failed", error_detail=error_msg)
+    return {"success": False, "error": error_msg, "audit_id": audit_id}
 
 
 
