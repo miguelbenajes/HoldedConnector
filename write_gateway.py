@@ -447,7 +447,9 @@ class WriteGateway:
                 "units": item.get("units", 1),
                 "subtotal": item.get("price", 0),
             }
-            if item.get("tax") is not None:
+            if item.get("taxes"):
+                p["taxes"] = item["taxes"]
+            elif item.get("tax") is not None:
                 p["tax"] = item["tax"]
             if item.get("desc"):
                 p["desc"] = _sanitize_text(item["desc"], 500)
@@ -519,13 +521,40 @@ class WriteGateway:
         if not is_dry_run and invoice_id:
             _sync_back_async("convert_estimate_to_invoice", invoice_id, {}, audit_id)
 
+        # Verify taxes match between estimate and invoice items
+        tax_warnings = []
+        if not is_dry_run and invoice_id:
+            try:
+                # Fetch created invoice from Holded API to verify taxes
+                inv_list = connector.fetch_data(f"/invoicing/v1/documents/invoice/{invoice_id}")
+                invoice_data = inv_list[0] if inv_list else None
+                if invoice_data and invoice_data.get("products"):
+                    inv_items = invoice_data["products"]
+                    for i, est_item in enumerate(estimate_items):
+                        est_taxes = est_item.get("taxes", [])
+                        if i < len(inv_items):
+                            inv_taxes = inv_items[i].get("taxes", [])
+                            if est_taxes and sorted(est_taxes) != sorted(inv_taxes):
+                                tax_warnings.append(
+                                    f"Item '{est_item.get('name', '?')}': "
+                                    f"estimate taxes={est_taxes}, invoice taxes={inv_taxes}"
+                                )
+            except Exception as e:
+                logger.warning(f"[GATEWAY] Tax verification failed for invoice {invoice_id}: {e}")
+
+        if tax_warnings:
+            logger.warning(
+                f"[GATEWAY] TAX MISMATCH in convert estimate:{estimate_id} → invoice:{invoice_id}: "
+                + "; ".join(tax_warnings)
+            )
+
         logger.info(
             f"[GATEWAY] convert_estimate_to_invoice | estimate:{estimate_id} → "
             f"invoice:{invoice_id} | duration:{duration}ms | "
             f"status:{'dry_run' if is_dry_run else 'success'}"
         )
 
-        return {
+        response = {
             "success": True,
             "entity_id": invoice_id,
             "entity_type": "invoice",
@@ -534,6 +563,9 @@ class WriteGateway:
             "audit_id": audit_id,
             "safe_mode": is_dry_run,
         }
+        if tax_warnings:
+            response["tax_warnings"] = tax_warnings
+        return response
 
 
 # ── Singleton ────────────────────────────────────────────────────────
