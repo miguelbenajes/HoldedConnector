@@ -15,6 +15,7 @@ import threading
 from datetime import datetime, timedelta
 import connector
 from app.db.connection import db_context
+from app.domain.item_builder import build_holded_items, build_holded_items_with_accounts
 
 # ── Table name validation (SQL injection prevention) ─────────────────────
 _VALID_TABLE_RE = _re_mod.compile(r'^[a-z_][a-z0-9_]*$')
@@ -1494,33 +1495,7 @@ class SendDocumentBody(BaseModel):
 @app.post("/api/agent/invoice")
 def agent_create_invoice(body: CreateDocumentBody):
     import time as _time
-    items_out = []
-    for item in body.items:
-        p = {"name": item["name"], "units": item["units"], "subtotal": item.get("price", item.get("subtotal", 0))}
-        if "taxes" in item:
-            p["taxes"] = item["taxes"]  # e.g. ["s_iva_21", "s_ret_15"]
-        elif "tax" in item:
-            p["tax"] = item["tax"]
-        if "retention" in item and item["retention"]:
-            # Map retention to taxes array: retention 15 → s_ret_15
-            ret_key = f"s_ret_{int(item['retention'])}"
-            taxes = p.get("taxes", [f"s_iva_{item.get('tax', 21)}"])
-            if ret_key not in taxes:
-                taxes.append(ret_key)
-            p["taxes"] = taxes
-            p.pop("tax", None)
-        if "discount" in item:
-            p["discount"] = item["discount"]
-        if "desc" in item:
-            p["desc"] = item["desc"]
-        if "serviceId" in item:
-            p["serviceId"] = item["serviceId"]
-        if "productId" in item:
-            p["productId"] = item["productId"]
-        # Default: if no taxes specified at all, apply IVA 21%
-        if "taxes" not in p and "tax" not in p:
-            p["taxes"] = ["s_iva_21"]
-        items_out.append(p)
+    items_out = build_holded_items(body.items, sanitize=False, apply_default_iva=True)
     payload = {"contactId": body.contact_id, "desc": body.desc, "items": items_out, "date": int(_time.time())}
     result = connector.create_invoice(payload)
     safe = connector.SAFE_MODE
@@ -1530,60 +1505,12 @@ def agent_create_invoice(body: CreateDocumentBody):
         return {"success": False, "error": f"Failed to create invoice: {result.get('detail', 'Unknown error')}", "safe_mode": safe}
     return {"success": False, "error": "Failed to create invoice", "safe_mode": safe}
 
-# Account number → Holded internal ID mapping
-ACCOUNT_IDS = {
-    "75200000": "69cccc2bd9d45db3170b99a6",  # Arrendamiento de equipos (Alquiler)
-    "75900000": "69cccc2bd9d45db3170b99a8",  # Prestación de servicios (Servicio)
-    "70500000": "69cccc2bd9d45db3170b99a4",  # Venta de productos (Producto)
-    "70000000": "69cccc2bd9d45db3170b99a3",  # Ventas de mercaderías (default)
-}
-
-def _resolve_account(item):
-    """Resolve account ID from item's account number or retention type."""
-    # Explicit account number in item
-    acc = item.get("account", "")
-    if acc in ACCOUNT_IDS:
-        return ACCOUNT_IDS[acc]
-    # Infer from retention: 19% = alquiler, 15% = servicio, 0% = producto
-    ret = item.get("retention", 0)
-    if ret == 19:
-        return ACCOUNT_IDS["75200000"]
-    elif ret == 15:
-        return ACCOUNT_IDS["75900000"]
-    elif ret == 0 and item.get("price", item.get("subtotal", 0)) > 0:
-        return ACCOUNT_IDS["70500000"]
-    return None  # Use Holded default
-
+# ACCOUNT_IDS and _resolve_account moved to app.domain.item_builder
 
 @app.post("/api/agent/estimate")
 def agent_create_estimate(body: CreateDocumentBody):
     import time as _time
-    items_out = []
-    for item in body.items:
-        p = {"name": item["name"], "units": item["units"], "subtotal": item.get("price", item.get("subtotal", 0))}
-        if "taxes" in item:
-            p["taxes"] = item["taxes"]
-        elif "tax" in item:
-            p["tax"] = item["tax"]
-        if "retention" in item and item["retention"]:
-            ret_key = f"s_ret_{int(item['retention'])}"
-            taxes = p.get("taxes", [f"s_iva_{item.get('tax', 21)}"])
-            if ret_key not in taxes:
-                taxes.append(ret_key)
-            p["taxes"] = taxes
-            p.pop("tax", None)
-        if "discount" in item:
-            p["discount"] = item["discount"]
-        if "desc" in item:
-            p["desc"] = item["desc"]
-        if "serviceId" in item:
-            p["serviceId"] = item["serviceId"]
-        if "productId" in item:
-            p["productId"] = item["productId"]
-        # Default IVA 21% if no taxes specified
-        if "taxes" not in p and "tax" not in p:
-            p["taxes"] = ["s_iva_21"]
-        items_out.append(p)
+    items_out = build_holded_items(body.items, sanitize=False, apply_default_iva=True)
     payload = {"contactId": body.contact_id, "desc": body.desc, "items": items_out, "date": int(_time.time())}
     result = connector.create_estimate(payload)
     safe = connector.SAFE_MODE
@@ -1598,31 +1525,7 @@ def agent_update_estimate(estimate_id: str, body: CreateDocumentBody):
     """Update an estimate's products in Holded. Used by job-automation after YES confirmation."""
     if not _re_mod.match(r'^[a-f0-9]{24}$', estimate_id):
         return JSONResponse({"error": "Invalid estimate ID"}, status_code=400)
-    items_list = []
-    for item in body.items:
-        p = {"name": item["name"], "units": item.get("units", 1), "subtotal": item.get("price", item.get("subtotal", 0))}
-        if "taxes" in item:
-            p["taxes"] = item["taxes"]
-        elif "tax" in item:
-            p["tax"] = item["tax"]
-            if "retention" in item and item["retention"]:
-                ret_key = f"s_ret_{int(item['retention'])}"
-                taxes = [f"s_iva_{item.get('tax', 21)}", ret_key]
-                p["taxes"] = taxes
-                p.pop("tax", None)
-        if "desc" in item:
-            p["desc"] = item["desc"]
-        if "productId" in item:
-            p["productId"] = item["productId"]
-        if "serviceId" in item:
-            p["serviceId"] = item["serviceId"]
-        if "taxes" not in p and "tax" not in p:
-            p["taxes"] = ["s_iva_21"]
-        # Assign account based on retention type or explicit account
-        account_id = _resolve_account(item)
-        if account_id:
-            p["account"] = account_id
-        items_list.append(p)
+    items_list = build_holded_items_with_accounts(body.items, sanitize=False)
     payload = {"items": items_list}
     if body.contact_id:
         payload["contactId"] = body.contact_id

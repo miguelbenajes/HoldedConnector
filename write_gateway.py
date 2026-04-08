@@ -22,6 +22,7 @@ import connector
 import write_validators
 from write_validators import _sanitize_text
 import write_preview
+from app.domain.item_builder import build_holded_items, build_holded_items_with_accounts
 
 logger = logging.getLogger(__name__)
 
@@ -149,18 +150,7 @@ def _compute_checksum(audit_id, timestamp, operation, entity_id, payload):
 def _build_holded_payload(operation, params):
     """Convert gateway params to Holded API payload format."""
     if operation in ("create_invoice", "create_estimate"):
-        items = params.get("items", [])
-        products = []
-        for item in items:
-            p = {"name": _sanitize_text(item.get("name"), 200),
-                 "units": item.get("units", 1),
-                 "subtotal": item.get("price")}
-            if "tax" in item:
-                p["tax"] = item["tax"]
-            if "desc" in item:
-                p["desc"] = _sanitize_text(item["desc"], 500)
-            products.append(p)
-
+        products = build_holded_items(params.get("items", []), sanitize=True)
         payload = {"contactId": params.get("contact_id"), "items": products}
         if params.get("desc"):
             payload["desc"] = _sanitize_text(params["desc"], 1000)
@@ -200,6 +190,14 @@ def _build_holded_payload(operation, params):
             payload["subject"] = _sanitize_text(params["subject"], 200)
         if params.get("message"):
             payload["message"] = _sanitize_text(params["message"], 2000)
+        return payload
+
+    elif operation == "update_estimate_items":
+        items = params.get("items", [])
+        products = build_holded_items_with_accounts(items, sanitize=True)
+        payload = {"items": products}
+        if params.get("contact_id"):
+            payload["contactId"] = params["contact_id"]
         return payload
 
     return None

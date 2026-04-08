@@ -600,21 +600,6 @@ def exec_get_document_details(params):
         connector.release_db(conn)
 
 
-def _prepare_line_items(items):
-    """Convert AI tool items to Holded API product format."""
-    products = []
-    for item in items:
-        if not item.get("name") or not item.get("price"):
-            continue
-        p = {"name": item["name"], "units": item.get("units", 1), "subtotal": item["price"]}
-        if "tax" in item:
-            p["tax"] = item["tax"]
-        if "retention" in item:
-            p["retention"] = item["retention"]
-        products.append(p)
-    return products
-
-
 def exec_create_estimate(params):
     """Create estimate via WriteGateway."""
     result = gateway.execute("create_estimate", params, source="ai_agent", skip_confirm=True)
