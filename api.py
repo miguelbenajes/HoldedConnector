@@ -3,7 +3,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from typing import Optional, List
-from contextlib import contextmanager
 import os
 import time
 import logging
@@ -15,6 +14,7 @@ import re as _re_mod
 import threading
 from datetime import datetime, timedelta
 import connector
+from app.db.connection import db_context
 
 # ── Table name validation (SQL injection prevention) ─────────────────────
 _VALID_TABLE_RE = _re_mod.compile(r'^[a-z_][a-z0-9_]*$')
@@ -299,38 +299,9 @@ def on_shutdown():
     """Signal scheduler thread to stop gracefully."""
     _scheduler_stop.set()
 
-class _CompatCursor:
-    """Cursor wrapper: auto-converts ? placeholders for PostgreSQL and returns dict-like rows."""
-    def __init__(self, inner):
-        self._cur = inner
-    def execute(self, sql, params=None):
-        if not connector._USE_SQLITE:
-            sql = sql.replace("?", "%s")
-        self._cur.execute(sql, params) if params is not None else self._cur.execute(sql)
-    def fetchone(self):      return self._cur.fetchone()
-    def fetchall(self):      return self._cur.fetchall()
-    def fetchmany(self, n):  return self._cur.fetchmany(n)
-    @property
-    def description(self):  return self._cur.description
-    @property
-    def rowcount(self):      return self._cur.rowcount
-
-class _ConnProxy:
-    """Connection proxy: .cursor() returns a _CompatCursor backed by connector._cursor()."""
-    def __init__(self, conn):
-        self._conn = conn
-    def cursor(self):    return _CompatCursor(connector._cursor(self._conn))
-    def commit(self):    self._conn.commit()
-    def rollback(self):  self._conn.rollback()
-    def close(self):     connector.release_db(self._conn)
-
-@contextmanager
-def get_db_connection():
-    conn = connector.get_db()
-    try:
-        yield _ConnProxy(conn)
-    finally:
-        connector.release_db(conn)
+# get_db_connection → db_context (from app.db.connection)
+# _CompatCursor, _ConnProxy also live there now.
+get_db_connection = db_context
 
 def run_sync():
     sync_status["errors"] = []

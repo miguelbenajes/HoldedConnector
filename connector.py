@@ -1,171 +1,81 @@
+"""Holded Connector — thin facade + business logic.
+
+DB primitives (get_db, _cursor, _q, etc.) live in app.db.connection.
+Schema (init_db) lives in app.db.schema.
+Settings (reload_config, get/save_setting) live in app.db.settings.
+
+This module re-exports everything for backwards compatibility:
+    import connector
+    connector.get_db()      # works
+    connector.API_KEY       # works (via __getattr__ for mutables)
+    connector.init_db()     # works
+"""
+
 import os
 import json
-import sqlite3
 import logging
 import requests
-from dotenv import load_dotenv
 import time
+
+# ── DB layer imports (canonical location: app.db.*) ──────────────────────────
+import app.db.connection as _conn
+import app.db.schema as _schema
+import app.db.settings as _settings
 
 logger = logging.getLogger(__name__)
 
-# Load configuration
-load_dotenv()
-API_KEY = os.getenv("HOLDED_API_KEY")
-SAFE_MODE = os.getenv("HOLDED_SAFE_MODE", "true").lower() == "true"
+# ── Function re-exports (safe — functions look up globals at call time) ──────
+get_db = _conn.get_db
+release_db = _conn.release_db
+_cursor = _conn._cursor
+_q = _conn._q
+_num = _conn._num
+_row_val = _conn._row_val
+_fetch_one_val = _conn._fetch_one_val
+insert_audit_log = _conn.insert_audit_log
+update_audit_log = _conn.update_audit_log
+db_context = _conn.db_context
 
-# ── Project code detection ────────────────────────────────────────────────────
-# Product "Proyect REF:" in Holded — its description field carries the project code
-# Format convention: CLIENT-YYMMDD (e.g. MEDIASET-260315)
+init_db = _schema.init_db
+
+reload_config = _settings.reload_config
+get_setting = _settings.get_setting
+save_setting = _settings.save_setting
+
+# ── Shared-reference globals (used by business functions in this file) ───────
+# HEADERS is a dict — shared reference, mutations from reload_config propagate.
+# BASE_URL, DB_NAME, _USE_SQLITE, SAFE_MODE are immutable after init — snapshots are safe.
+# API_KEY can change via reload_config → accessed through __getattr__ by external callers.
+HEADERS = _conn.HEADERS
+BASE_URL = _conn.BASE_URL
+DB_NAME = _conn.DB_NAME
+_USE_SQLITE = _conn._USE_SQLITE
+SAFE_MODE = _conn.SAFE_MODE
+
+# ── Module-level __getattr__ for mutable globals (external callers) ──────────
+# When other modules do `connector.API_KEY`, this resolves to the canonical
+# value in connection.py, even after reload_config() changes it.
+# _USE_SQLITE and SAFE_MODE are module-level snapshots (never change), so they
+# don't need __getattr__. API_KEY and DATABASE_URL can change via reload_config.
+_MUTABLE_CONN_ATTRS = ('API_KEY', 'DATABASE_URL', '_pool')
+
+def __getattr__(name):
+    """Proxy mutable globals to their canonical module."""
+    if name in _MUTABLE_CONN_ATTRS:
+        return getattr(_conn, name)
+    raise AttributeError(f"module 'connector' has no attribute {name!r}")
+
+
+# ── Holded-specific constants (used by sync functions below) ─────────────────
 PROYECTO_PRODUCT_ID = os.getenv("HOLDED_PROYECTO_PRODUCT_ID", "69b2b35f75ae381d8f05c133")
-PROYECTO_PRODUCT_NAME = "proyect ref:"  # lowercase for case-insensitive comparison
-
-# ── Shooting dates detection ─────────────────────────────────────────────────
-# Product "Shooting Dates:" in Holded — its description field carries the dates
+PROYECTO_PRODUCT_NAME = "proyect ref:"
 SHOOTING_DATES_PRODUCT_ID = os.getenv("HOLDED_SHOOTING_DATES_PRODUCT_ID", "69b2cfcd0df77ff4010e4ac8")
-SHOOTING_DATES_PRODUCT_NAME = "shooting dates:"  # lowercase for case-insensitive
-
-BASE_URL = "https://api.holded.com/api"
-HEADERS = {
-    "key": API_KEY,
-    "Content-Type": "application/json"
-}
-
-# ── Database backend selection ───────────────────────────────────────────────
-# If DATABASE_URL is set → use PostgreSQL (Supabase in production).
-# If not set → fall back to local SQLite (dev mode, zero config required).
-DATABASE_URL = os.getenv("DATABASE_URL")
-_USE_SQLITE = not DATABASE_URL
-
-if not _USE_SQLITE:
-    import psycopg2
-    import psycopg2.extras
-    import psycopg2.pool as _pg_pool
-
-DB_NAME = os.getenv("DB_NAME", "holded.db")  # used only in SQLite mode
-
-# ── Connection pooling (PostgreSQL only) ──────────────────────────────────
-_pool = None
-
-def _get_pool():
-    global _pool
-    if _pool is None:
-        _pool = _pg_pool.ThreadedConnectionPool(minconn=2, maxconn=10, dsn=DATABASE_URL, connect_timeout=10)
-    return _pool
+SHOOTING_DATES_PRODUCT_NAME = "shooting dates:"
 
 
-def get_db():
-    """Return a database connection for the active backend."""
-    if _USE_SQLITE:
-        conn = sqlite3.connect(DB_NAME)
-        conn.row_factory = sqlite3.Row
-        return conn
-    try:
-        conn = _get_pool().getconn()
-    except Exception as e:
-        logger.error("Failed to get connection from pool: %s", e)
-        raise RuntimeError("Database connection unavailable") from e
-    try:
-        conn.autocommit = False
-        # Validate the connection is alive (stale connections return errors)
-        cur = conn.cursor()
-        cur.execute("SELECT 1")
-        cur.close()
-    except Exception:
-        # Connection is dead — discard it and get a fresh one
-        try:
-            _get_pool().putconn(conn, close=True)
-        except Exception:
-            pass
-        conn = _get_pool().getconn()
-    return conn
-
-
-def release_db(conn):
-    """Return a PostgreSQL connection to the pool, rolling back any uncommitted transaction."""
-    if _USE_SQLITE:
-        conn.close()
-    else:
-        try:
-            conn.rollback()  # Clean up any aborted transaction state
-        except Exception:
-            pass
-        _get_pool().putconn(conn)
-
-
-def _cursor(conn):
-    """Return a dict-like cursor regardless of DB backend."""
-    if _USE_SQLITE:
-        return conn.cursor()
-    return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
-
-def _q(sql):
-    """Convert SQLite ? placeholders to PostgreSQL %s when needed."""
-    if _USE_SQLITE:
-        return sql
-    return sql.replace("?", "%s")
-
-# ────────────────────────────────────────────────────────────────────────────
-
-
-def reload_config():
-    global API_KEY, HEADERS
-    conn = get_db()
-    try:
-        cursor = _cursor(conn)
-        cursor.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
-        cursor.execute("SELECT key, value FROM settings")
-        rows = cursor.fetchall()
-        if _USE_SQLITE:
-            settings = {row[0]: row[1] for row in rows}
-        else:
-            settings = {row["key"]: row["value"] for row in rows}
-
-        if 'holded_api_key' in settings:
-            API_KEY = settings['holded_api_key']
-        else:
-            load_dotenv()
-            API_KEY = os.getenv("HOLDED_API_KEY")
-
-        HEADERS["key"] = API_KEY
-    finally:
-        release_db(conn)
-
-
-def get_setting(key, default=None):
-    conn = get_db()
-    try:
-        cursor = _cursor(conn)
-        cursor.execute(_q("SELECT value FROM settings WHERE key = ?"), (key,))
-        row = cursor.fetchone()
-        if row is None:
-            return default
-        return row[0] if _USE_SQLITE else row["value"]
-    finally:
-        release_db(conn)
-
-
-def save_setting(key, value):
-    conn = get_db()
-    try:
-        cursor = _cursor(conn)
-        if _USE_SQLITE:
-            cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
-        else:
-            cursor.execute("""
-                INSERT INTO settings (key, value) VALUES (%s, %s)
-                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
-            """, (key, value))
-        conn.commit()
-    finally:
-        release_db(conn)
-
-
-# Initial load — always safe: SQLite file may not exist yet, PG may not be reachable
-try:
-    reload_config()
-except Exception:
-    pass  # DB not ready yet (first run before init_db)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Business logic (Holded API sync, data access, amortizations, analysis)
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def extract_ret(prod):
     r = prod.get('retention')
@@ -180,609 +90,6 @@ def extract_ret(prod):
                 try: return float(st.split('_ret_')[-1])
                 except (ValueError, IndexError): pass
     return 0
-
-def init_db():
-    conn = get_db()
-    try:
-        _init_db_inner(conn)
-    finally:
-        release_db(conn)
-
-def _init_db_inner(conn):
-    cursor = _cursor(conn)
-
-    # Dialect-specific type tokens
-    if _USE_SQLITE:
-        _serial  = "INTEGER PRIMARY KEY AUTOINCREMENT"
-        _real    = "REAL"
-        _now     = "datetime('now')"
-    else:
-        _serial  = "SERIAL PRIMARY KEY"
-        _real    = "NUMERIC"
-        _now     = "NOW()"
-
-    cursor.execute(f'''
-        CREATE TABLE IF NOT EXISTS invoices (
-            id TEXT PRIMARY KEY,
-            contact_id TEXT,
-            contact_name TEXT,
-            "desc" TEXT,
-            date INTEGER,
-            amount {_real},
-            status INTEGER,
-            payments_pending {_real} DEFAULT 0,
-            payments_total {_real} DEFAULT 0,
-            due_date INTEGER,
-            doc_number TEXT,
-            tags TEXT,
-            notes TEXT,
-            project_code TEXT
-        )
-    ''')
-
-    cursor.execute(f'''
-        CREATE TABLE IF NOT EXISTS purchase_invoices (
-            id TEXT PRIMARY KEY,
-            contact_id TEXT,
-            contact_name TEXT,
-            "desc" TEXT,
-            date INTEGER,
-            amount {_real},
-            status INTEGER,
-            doc_number TEXT,
-            tags TEXT,
-            notes TEXT,
-            project_code TEXT
-        )
-    ''')
-
-    cursor.execute(f'''
-        CREATE TABLE IF NOT EXISTS estimates (
-            id TEXT PRIMARY KEY,
-            contact_id TEXT,
-            contact_name TEXT,
-            "desc" TEXT,
-            date INTEGER,
-            amount {_real},
-            status INTEGER,
-            doc_number TEXT,
-            tags TEXT,
-            notes TEXT,
-            project_code TEXT
-        )
-    ''')
-
-    cursor.execute(f'''
-        CREATE TABLE IF NOT EXISTS products (
-            id TEXT PRIMARY KEY,
-            name TEXT,
-            "desc" TEXT,
-            price {_real},
-            stock {_real},
-            sku TEXT,
-            kind TEXT DEFAULT 'simple',
-            web_include INTEGER NOT NULL DEFAULT 1
-        )
-    ''')
-
-    cursor.execute(f'''
-        CREATE TABLE IF NOT EXISTS pack_components (
-            pack_id TEXT NOT NULL,
-            component_id TEXT NOT NULL,
-            quantity {_real} NOT NULL DEFAULT 1,
-            UNIQUE(pack_id, component_id)
-        )
-    ''')
-
-    cursor.execute(f'''
-        CREATE TABLE IF NOT EXISTS invoice_items (
-            id {_serial},
-            invoice_id TEXT,
-            product_id TEXT,
-            name TEXT,
-            sku TEXT,
-            units {_real},
-            price {_real},
-            subtotal {_real},
-            discount {_real},
-            tax {_real},
-            retention {_real},
-            account TEXT,
-            project_id TEXT,
-            kind TEXT,
-            "desc" TEXT
-        )
-    ''')
-
-    cursor.execute(f'''
-        CREATE TABLE IF NOT EXISTS estimate_items (
-            id {_serial},
-            estimate_id TEXT,
-            product_id TEXT,
-            name TEXT,
-            sku TEXT,
-            units {_real},
-            price {_real},
-            subtotal {_real},
-            discount {_real},
-            tax {_real},
-            retention {_real},
-            account TEXT,
-            project_id TEXT,
-            kind TEXT,
-            "desc" TEXT
-        )
-    ''')
-
-    cursor.execute(f'''
-        CREATE TABLE IF NOT EXISTS purchase_items (
-            id {_serial},
-            purchase_id TEXT,
-            product_id TEXT,
-            name TEXT,
-            sku TEXT,
-            units {_real},
-            price {_real},
-            subtotal {_real},
-            discount {_real},
-            tax {_real},
-            retention {_real},
-            account TEXT,
-            project_id TEXT,
-            kind TEXT,
-            "desc" TEXT
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS ledger_accounts (
-            id TEXT PRIMARY KEY,
-            name TEXT,
-            num TEXT
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS contacts (
-            id TEXT PRIMARY KEY,
-            name TEXT,
-            email TEXT,
-            type TEXT,
-            code TEXT,
-            vat TEXT,
-            phone TEXT,
-            mobile TEXT
-        )
-    ''')
-
-    cursor.execute(f'''
-        CREATE TABLE IF NOT EXISTS projects (
-            id TEXT PRIMARY KEY,
-            name TEXT,
-            "desc" TEXT,
-            status TEXT,
-            customer_id TEXT,
-            budget {_real}
-        )
-    ''')
-
-    cursor.execute(f'''
-        CREATE TABLE IF NOT EXISTS payments (
-            id TEXT PRIMARY KEY,
-            document_id TEXT,
-            amount {_real},
-            date INTEGER,
-            method TEXT,
-            type TEXT
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS settings (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    ''')
-
-    cursor.execute(f'''
-        CREATE TABLE IF NOT EXISTS amortizations (
-            id {_serial},
-            product_id TEXT NOT NULL,
-            product_name TEXT NOT NULL,
-            purchase_price {_real} NOT NULL,
-            purchase_date TEXT NOT NULL,
-            notes TEXT,
-            product_type TEXT NOT NULL DEFAULT 'alquiler',
-            created_at TEXT DEFAULT ({_now}),
-            updated_at TEXT DEFAULT ({_now}),
-            UNIQUE(product_id)
-        )
-    ''')
-
-    # Fiscal rules per product type — drives IRPF logic across the whole app
-    # irpf_pct: retention applied on invoices (15% services, 19% rentals, 0% sales/expenses)
-    # is_expense: True for purchase-side concepts (gastos / suplidos)
-    cursor.execute(f'''
-        CREATE TABLE IF NOT EXISTS product_type_rules (
-            type_key TEXT PRIMARY KEY,
-            label TEXT NOT NULL,
-            irpf_pct {_real} NOT NULL DEFAULT 0,
-            is_expense INTEGER NOT NULL DEFAULT 0,
-            description TEXT
-        )
-    ''')
-
-    cursor.execute(f'''
-        CREATE TABLE IF NOT EXISTS purchase_analysis (
-            id {_serial},
-            purchase_id TEXT NOT NULL UNIQUE,
-            category TEXT,
-            subcategory TEXT,
-            confidence TEXT,
-            method TEXT,
-            reasoning TEXT,
-            analyzed_at TEXT DEFAULT ({_now})
-        )
-    ''')
-
-    cursor.execute(f'''
-        CREATE TABLE IF NOT EXISTS inventory_matches (
-            id {_serial},
-            purchase_id TEXT NOT NULL,
-            purchase_item_id INTEGER,
-            product_id TEXT NOT NULL,
-            product_name TEXT NOT NULL,
-            matched_price {_real} NOT NULL,
-            matched_date TEXT NOT NULL,
-            match_method TEXT,
-            status TEXT DEFAULT 'pending',
-            created_at TEXT DEFAULT ({_now}),
-            UNIQUE(purchase_id, product_id)
-        )
-    ''')
-
-    # ── amortization_purchases: many-to-many between amortizations and purchase sources
-    # Each row represents one purchase invoice (or item) linked to one amortization product.
-    # cost_override is the actual cost assigned to this product from that purchase —
-    # it can differ from the invoice price (pack splits, kit allocations, etc.)
-    cursor.execute(f'''
-        CREATE TABLE IF NOT EXISTS amortization_purchases (
-            id {_serial},
-            amortization_id INTEGER NOT NULL,
-            purchase_id TEXT,
-            purchase_item_id INTEGER,
-            cost_override {_real} NOT NULL,
-            allocation_note TEXT,
-            created_at TEXT DEFAULT ({_now})
-        )
-    ''')
-
-    # ── AI tables ────────────────────────────────────────────────────────────
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS ai_history (
-            id TEXT PRIMARY KEY,
-            role TEXT,
-            content TEXT,
-            timestamp TEXT,
-            conversation_id TEXT,
-            tool_calls TEXT
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS ai_favorites (
-            id TEXT PRIMARY KEY,
-            query TEXT,
-            label TEXT,
-            created_at TEXT
-        )
-    ''')
-
-    # ── Sync log table (used by n8n flows) ───────────────────────────────────
-    cursor.execute(f'''
-        CREATE TABLE IF NOT EXISTS sync_logs (
-            id {_serial},
-            started_at TEXT NOT NULL,
-            finished_at TEXT,
-            status TEXT,
-            duration_seconds {_real},
-            counts TEXT
-        )
-    ''')
-
-    # ── Write Audit Log ──────────────────────────────────────────────
-    cursor.execute(f'''
-        CREATE TABLE IF NOT EXISTS write_audit_log (
-            id              {_serial},
-            timestamp       TEXT DEFAULT ({_now}),
-            source          TEXT NOT NULL,
-            operation       TEXT NOT NULL,
-            entity_type     TEXT NOT NULL,
-            entity_id       TEXT,
-            payload_sent    TEXT,
-            response_received TEXT,
-            preview_data    TEXT,
-            warnings        TEXT,
-            status          TEXT NOT NULL DEFAULT 'pending',
-            tables_synced   TEXT,
-            reverse_action  TEXT,
-            reverse_payload TEXT,
-            user_confirmed  BOOLEAN,
-            error_detail    TEXT,
-            safe_mode       BOOLEAN DEFAULT FALSE,
-            conversation_id TEXT,
-            checksum        TEXT,
-            duration_ms     INTEGER
-        )
-    ''')
-
-
-    # ── Contact table expansion (country, address, discount) ──────────
-    for col, defn in [
-        ("country", "TEXT DEFAULT ''"),
-        ("address", "TEXT DEFAULT ''"),
-        ("city", "TEXT DEFAULT ''"),
-        ("province", "TEXT DEFAULT ''"),
-        ("postal_code", "TEXT DEFAULT ''"),
-        ("trade_name", "TEXT DEFAULT ''"),
-        ("discount", "REAL DEFAULT 0"),
-    ]:
-        try:
-            if _USE_SQLITE:
-                cursor.execute(f"ALTER TABLE contacts ADD COLUMN {col} {defn}")
-            else:
-                cursor.execute("SAVEPOINT sp_contact_col")
-                cursor.execute(f"ALTER TABLE contacts ADD COLUMN {col} {defn}")
-                cursor.execute("RELEASE SAVEPOINT sp_contact_col")
-        except Exception:
-            if not _USE_SQLITE:
-                try:
-                    cursor.execute("ROLLBACK TO SAVEPOINT sp_contact_col")
-                except Exception:
-                    pass
-
-    # ── Job Tracker tables ────────────────────────────────────────────────────
-    cursor.execute(f'''
-        CREATE TABLE IF NOT EXISTS jobs (
-            project_code TEXT PRIMARY KEY,
-            client_id TEXT,
-            client_name TEXT,
-            client_email TEXT,
-            status TEXT DEFAULT 'open',
-            shooting_dates_raw TEXT,
-            shooting_dates TEXT,
-            quarter TEXT,
-            estimate_id TEXT,
-            estimate_number TEXT,
-            invoice_id TEXT,
-            invoice_number TEXT,
-            note_path TEXT,
-            pdf_hash TEXT,
-            created_at TEXT DEFAULT ({_now}),
-            updated_at TEXT DEFAULT ({_now})
-        )
-    ''')
-
-    # Job tracker automation columns
-    for col, col_type in [
-        ("notes_hash", "TEXT"),
-        ("invoice_draft_created_at", "TEXT"),
-        ("last_alerts", "TEXT"),
-    ]:
-        try:
-            if _USE_SQLITE:
-                cursor.execute(f'ALTER TABLE jobs ADD COLUMN {col} {col_type}')
-            else:
-                # PostgreSQL: use savepoint to avoid aborting the whole transaction
-                cursor.execute("SAVEPOINT sp_add_col")
-                cursor.execute(f'ALTER TABLE jobs ADD COLUMN {col} {col_type}')
-                cursor.execute("RELEASE SAVEPOINT sp_add_col")
-        except Exception:
-            if not _USE_SQLITE:
-                cursor.execute("ROLLBACK TO SAVEPOINT sp_add_col")
-            pass  # Column already exists
-
-    cursor.execute(f'''
-        CREATE TABLE IF NOT EXISTS job_note_queue (
-            id {_serial},
-            project_code TEXT NOT NULL,
-            action TEXT NOT NULL,
-            retry_count INTEGER DEFAULT 0,
-            last_error TEXT,
-            created_at TEXT DEFAULT ({_now}),
-            processed_at TEXT
-        )
-    ''')
-
-    cursor.execute(f'''CREATE TABLE IF NOT EXISTS job_note_actions (
-        id {_serial},
-        project_code TEXT NOT NULL,
-        action_type TEXT NOT NULL,
-        details TEXT,
-        confirmed_by TEXT,
-        result TEXT,
-        created_at TEXT DEFAULT ({_now})
-    )''')
-
-    # Audit log indexes
-    if not _USE_SQLITE:
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON write_audit_log(timestamp)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_entity ON write_audit_log(entity_type, entity_id)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_operation ON write_audit_log(operation)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_status ON write_audit_log(status)')
-
-        try:
-            cursor.execute("""CREATE INDEX IF NOT EXISTS idx_job_queue_pending
-                ON job_note_queue (created_at) WHERE processed_at IS NULL AND retry_count < 5""")
-        except Exception:
-            pass
-
-    # ── Column migrations (SQLite only — PG creates all columns upfront) ──────
-    if _USE_SQLITE:
-        for col, definition in [
-            ("payments_pending", "REAL DEFAULT 0"),
-            ("payments_total",   "REAL DEFAULT 0"),
-            ("due_date",         "INTEGER"),
-            ("doc_number",       "TEXT"),
-        ]:
-            try:
-                cursor.execute(f"ALTER TABLE invoices ADD COLUMN {col} {definition}")
-            except Exception:
-                pass  # column already exists
-
-        for tbl in ("purchase_invoices", "estimates"):
-            try:
-                cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN doc_number TEXT")
-            except Exception:
-                pass
-
-        for tbl, col, defn in [
-            ("invoices",          "tags",       "TEXT"),
-            ("invoices",          "notes",      "TEXT"),
-            ("purchase_invoices", "tags",       "TEXT"),
-            ("purchase_invoices", "notes",      "TEXT"),
-            ("estimates",         "tags",       "TEXT"),
-            ("estimates",         "notes",      "TEXT"),
-            ("invoice_items",     "project_id", "TEXT"),
-            ("invoice_items",     "kind",       "TEXT"),
-            ("purchase_items",    "project_id", "TEXT"),
-            ("purchase_items",    "kind",       "TEXT"),
-            ("estimate_items",    "project_id", "TEXT"),
-            ("estimate_items",    "kind",       "TEXT"),
-            # line item description (carries project code for "Proyect REF:" items)
-            ("invoice_items",     '"desc"',     "TEXT"),
-            ("purchase_items",    '"desc"',     "TEXT"),
-            ("estimate_items",    '"desc"',     "TEXT"),
-            # project code extracted from "Proyect REF:" line item
-            ("invoices",          "project_code", "TEXT"),
-            ("purchase_invoices", "project_code", "TEXT"),
-            ("estimates",         "project_code", "TEXT"),
-            # shooting dates raw text from "Shooting Dates:" line item
-            ("invoices",          "shooting_dates_raw", "TEXT"),
-            ("purchase_invoices", "shooting_dates_raw", "TEXT"),
-            ("estimates",         "shooting_dates_raw", "TEXT"),
-        ]:
-            try:
-                cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {defn}")
-            except Exception:
-                pass
-
-        try:
-            cursor.execute("ALTER TABLE amortizations ADD COLUMN product_type TEXT NOT NULL DEFAULT 'alquiler'")
-        except Exception:
-            pass
-        try:
-            cursor.execute("ALTER TABLE products ADD COLUMN kind TEXT DEFAULT 'simple'")
-        except Exception:
-            pass
-        try:
-            cursor.execute("ALTER TABLE products ADD COLUMN web_include INTEGER NOT NULL DEFAULT 1")
-        except Exception:
-            pass
-    else:
-        # PostgreSQL: ADD COLUMN IF NOT EXISTS (PG 9.6+)
-        for stmt in [
-            "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS payments_pending NUMERIC DEFAULT 0",
-            "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS payments_total NUMERIC DEFAULT 0",
-            "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS due_date INTEGER",
-            "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS doc_number TEXT",
-            "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS doc_number TEXT",
-            "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS doc_number TEXT",
-            "ALTER TABLE amortizations ADD COLUMN IF NOT EXISTS product_type TEXT NOT NULL DEFAULT 'alquiler'",
-            "ALTER TABLE products ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'simple'",
-            # project + tags support
-            "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS tags TEXT",
-            "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS notes TEXT",
-            "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS tags TEXT",
-            "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS notes TEXT",
-            "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS tags TEXT",
-            "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS notes TEXT",
-            "ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS project_id TEXT",
-            "ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS kind TEXT",
-            "ALTER TABLE purchase_items ADD COLUMN IF NOT EXISTS project_id TEXT",
-            "ALTER TABLE purchase_items ADD COLUMN IF NOT EXISTS kind TEXT",
-            "ALTER TABLE estimate_items ADD COLUMN IF NOT EXISTS project_id TEXT",
-            "ALTER TABLE estimate_items ADD COLUMN IF NOT EXISTS kind TEXT",
-            "ALTER TABLE products ADD COLUMN IF NOT EXISTS web_include INTEGER NOT NULL DEFAULT 1",
-            # line item description (carries project code for "Proyect REF:" items)
-            'ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS "desc" TEXT',
-            'ALTER TABLE purchase_items ADD COLUMN IF NOT EXISTS "desc" TEXT',
-            'ALTER TABLE estimate_items ADD COLUMN IF NOT EXISTS "desc" TEXT',
-            # project code extracted from "Proyect REF:" line item
-            "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS project_code TEXT",
-            "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS project_code TEXT",
-            "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS project_code TEXT",
-            # shooting dates raw text from "Shooting Dates:" line item
-            "ALTER TABLE invoices ADD COLUMN IF NOT EXISTS shooting_dates_raw TEXT",
-            "ALTER TABLE purchase_invoices ADD COLUMN IF NOT EXISTS shooting_dates_raw TEXT",
-            "ALTER TABLE estimates ADD COLUMN IF NOT EXISTS shooting_dates_raw TEXT",
-        ]:
-            try:
-                cursor.execute(stmt)
-            except Exception:
-                pass
-
-    # ── Seed product_type_rules (never overwrites user edits) ────────────────
-    default_rules = [
-        ('alquiler', 'Alquiler',        19.0, 0, 'Equipamiento cedido en uso. IRPF retención 19%.'),
-        ('venta',    'Venta',            0.0, 0, 'Venta de producto. Sin retención IRPF. Match 1-to-1 compra→venta.'),
-        ('servicio', 'Servicio / Fee',  15.0, 0, 'Honorarios profesionales. IRPF retención 15%.'),
-        ('gasto',    'Gasto',            0.0, 1, 'Gasto deducible / suplido. No genera ingreso directo.'),
-    ]
-    for rule in default_rules:
-        if _USE_SQLITE:
-            cursor.execute(
-                "INSERT OR IGNORE INTO product_type_rules "
-                "(type_key, label, irpf_pct, is_expense, description) VALUES (?,?,?,?,?)",
-                rule
-            )
-        else:
-            cursor.execute(
-                "INSERT INTO product_type_rules "
-                "(type_key, label, irpf_pct, is_expense, description) VALUES (%s,%s,%s,%s,%s) "
-                "ON CONFLICT (type_key) DO NOTHING",
-                rule
-            )
-
-    # ── Data migration: populate amortization_purchases from legacy notes ─────
-    # Only runs in SQLite mode (Supabase starts fresh, no legacy data to migrate)
-    if _USE_SQLITE:
-        cursor.execute('''
-            INSERT OR IGNORE INTO amortization_purchases (amortization_id, purchase_id, cost_override, allocation_note)
-            SELECT
-                a.id,
-                CASE
-                    WHEN a.notes LIKE 'Auto-detected from purchase %'
-                    THEN TRIM(SUBSTR(a.notes, 27, INSTR(SUBSTR(a.notes,27),' ')-1))
-                    ELSE NULL
-                END AS purchase_id,
-                a.purchase_price,
-                'Migrado automáticamente'
-            FROM amortizations a
-            WHERE a.id NOT IN (SELECT DISTINCT amortization_id FROM amortization_purchases)
-              AND a.purchase_price > 0
-        ''')
-
-    # ── Indexes ───────────────────────────────────────────────────────────────
-    for idx_sql in [
-        'CREATE INDEX IF NOT EXISTS idx_invoices_contact ON invoices(contact_id)',
-        'CREATE INDEX IF NOT EXISTS idx_invoices_date ON invoices(date)',
-        'CREATE INDEX IF NOT EXISTS idx_purchases_contact ON purchase_invoices(contact_id)',
-        'CREATE INDEX IF NOT EXISTS idx_purchases_date ON purchase_invoices(date)',
-        'CREATE INDEX IF NOT EXISTS idx_inv_items_product ON invoice_items(product_id)',
-        'CREATE INDEX IF NOT EXISTS idx_inv_items_invoice ON invoice_items(invoice_id)',
-        'CREATE INDEX IF NOT EXISTS idx_pur_items_product ON purchase_items(product_id)',
-        'CREATE INDEX IF NOT EXISTS idx_pur_items_purchase ON purchase_items(purchase_id)',
-        'CREATE INDEX IF NOT EXISTS idx_pack_components_pack ON pack_components(pack_id)',
-        'CREATE INDEX IF NOT EXISTS idx_pack_components_comp ON pack_components(component_id)',
-        'CREATE INDEX IF NOT EXISTS idx_ai_history_conv ON ai_history(conversation_id, timestamp)',
-        'CREATE INDEX IF NOT EXISTS idx_invoices_status ON invoices(status)',
-        'CREATE INDEX IF NOT EXISTS idx_invoices_payments_pending ON invoices(payments_pending)',
-        'CREATE INDEX IF NOT EXISTS idx_ai_history_conv_role ON ai_history(conversation_id, role, timestamp)',
-    ]:
-        cursor.execute(idx_sql)
-
-    conn.commit()
 
 def fetch_data(endpoint, params=None):
     if params is None: params = {}
@@ -858,24 +165,6 @@ def _extract_shooting_dates(products):
         if pid == SHOOTING_DATES_PRODUCT_ID or name == SHOOTING_DATES_PRODUCT_NAME:
             return (prod.get('desc') or '').strip() or None
     return None
-
-
-def _row_val(row, key, idx):
-    """Retrieve a value from a DB row that may be a dict (PG) or tuple (SQLite)."""
-    if isinstance(row, dict):
-        return row.get(key)
-    return row[idx]
-
-
-def _num(val):
-    """Sanitize a value for a NUMERIC column: empty strings → None (NULL).
-    PostgreSQL rejects empty strings in NUMERIC columns; SQLite accepts them silently."""
-    if val is None or val == '':
-        return None
-    try:
-        return float(val)
-    except (TypeError, ValueError):
-        return None
 
 
 def sync_documents(doc_type, table, items_table, fk_column):
@@ -1909,14 +1198,6 @@ def categorize_by_rules(desc: str, contact_name: str, item_names: list):
     return None
 
 
-def _fetch_one_val(cursor, key):
-    """Fetch a single scalar value from a row, works for both dict and tuple cursors."""
-    row = cursor.fetchone()
-    if row is None:
-        return None
-    return row[key] if isinstance(row, dict) else row[0]
-
-
 def get_unanalyzed_purchases(limit: int = 10) -> list:
     """Return up to `limit` purchase invoices not yet in purchase_analysis."""
     # Aggregate item names — SQLite uses GROUP_CONCAT, PostgreSQL uses STRING_AGG
@@ -2727,81 +2008,12 @@ def get_amortization_summary():
     }
 
 
-# ── Write Audit Log Helpers ──────────────────────────────────────────
-
-def insert_audit_log(source, operation, entity_type, payload_sent=None,
-                     preview_data=None, warnings=None, status='pending',
-                     safe_mode=False, conversation_id=None):
-    """Insert a new audit log entry. Returns the new row ID."""
-    conn = get_db()
-    try:
-        cursor = _cursor(conn)
-        insert_params = (source, operation, entity_type,
-               json.dumps(payload_sent) if payload_sent else None,
-               json.dumps(preview_data) if preview_data else None,
-               json.dumps(warnings) if warnings else None,
-               status, safe_mode, conversation_id)
-        if _USE_SQLITE:
-            cursor.execute('''
-                INSERT INTO write_audit_log
-                    (source, operation, entity_type, payload_sent, preview_data,
-                     warnings, status, safe_mode, conversation_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', insert_params)
-            audit_id = cursor.lastrowid
-        else:
-            cursor.execute('''
-                INSERT INTO write_audit_log
-                    (source, operation, entity_type, payload_sent, preview_data,
-                     warnings, status, safe_mode, conversation_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                RETURNING id
-            ''', insert_params)
-            row = cursor.fetchone()
-            audit_id = row['id'] if row else None
-        conn.commit()
-        return audit_id
-    except Exception as e:
-        logger.error(f"Failed to insert audit log: {e}")
-        conn.rollback()
-        return None
-    finally:
-        release_db(conn)
-
-
-def update_audit_log(audit_id, **kwargs):
-    """Update an existing audit log entry. Accepts any column as kwarg."""
-    if not audit_id:
-        return
-    json_fields = {'payload_sent', 'response_received', 'preview_data',
-                   'warnings', 'tables_synced', 'reverse_action', 'reverse_payload'}
-    conn = get_db()
-    try:
-        cursor = _cursor(conn)
-        sets = []
-        vals = []
-        for k, v in kwargs.items():
-            sets.append(f'{k} = {_q("?")}')
-            if k in json_fields and v is not None and not isinstance(v, str):
-                vals.append(json.dumps(v))
-            else:
-                vals.append(v)
-        vals.append(audit_id)
-        cursor.execute(_q(f'UPDATE write_audit_log SET {", ".join(sets)} WHERE id = ?'), vals)
-        conn.commit()
-    except Exception as e:
-        logger.error(f"Failed to update audit log {audit_id}: {e}")
-        conn.rollback()
-    finally:
-        release_db(conn)
-
-
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-    if not API_KEY:
+    if not _conn.API_KEY:
         logger.error("HOLDED_API_KEY not found in .env file.")
     else:
-        if SAFE_MODE:
+        if _conn.SAFE_MODE:
             logger.warning("SAFE MODE (DRY RUN) ACTIVE - No data will be modified in Holded")
 
         init_db()
