@@ -23,3 +23,14 @@ from app.holded.upsert import (
     _upsert_single_contact,
     _upsert_single_product,
 )
+from app.holded.sync import (
+    sync_documents,
+    sync_invoices,
+    sync_purchases,
+    sync_estimates,
+    sync_accounts,
+    sync_products,
+    sync_contacts,
+    sync_projects,
+    sync_payments,
+)
