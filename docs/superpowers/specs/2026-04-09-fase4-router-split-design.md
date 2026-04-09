@@ -303,6 +303,15 @@ Final verification:
 | Auth middleware broken | Middleware stays in api.py, applies to all routes globally |
 | Static files override routes | Mount remains LAST (after all routers) |
 
+## Rules from Bug Fix Session (cozy-coalescing-blum)
+
+These rules apply during the split — do NOT introduce regressions:
+
+1. **Holded API: POST uses "items", GET returns "products". NEVER confuse.** Already fixed in write_gateway.py — don't touch that file.
+2. **DB reads with API fallback:** `_fetch_document`, `_fetch_contact`, and `validate_convert_estimate` now have API fallbacks. These live in write_validators.py — don't touch that file.
+3. **fetch_estimate_fresh** now includes tax/taxes/retention/discount/account fields. Lives in connector.py — don't touch.
+4. **None of these files (write_gateway.py, write_validators.py, connector.py) are modified in Fase 4.** Only api.py is split.
+
 ## Out of Scope
 
 - Factory pattern (Commit 2)
