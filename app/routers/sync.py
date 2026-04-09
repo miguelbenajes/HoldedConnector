@@ -5,7 +5,7 @@ Handles Holded data sync triggers, sync status, API key configuration,
 and DB schema introspection for Brain's db_schema tool.
 Extracted from api.py (Fase 4 router split, Task 6).
 
-Note: sync_status, _sync_lock, and run_sync() live in api.py (shared state).
+Note: sync_status, _sync_lock, and run_sync() live in app.background.sync_runner.
 They are imported lazily inside endpoint functions to avoid circular imports.
 
 Endpoints:
@@ -42,7 +42,7 @@ def health():
 
 @router.post("/api/sync")
 async def sync_data(background_tasks: BackgroundTasks):
-    from api import sync_status, _sync_lock, run_sync
+    from app.background.sync_runner import sync_status, _sync_lock, run_sync
     with _sync_lock:
         if sync_status["running"]:
             return {"status": "already_running"}
@@ -53,7 +53,7 @@ async def sync_data(background_tasks: BackgroundTasks):
 
 @router.get("/api/sync/status")
 async def get_sync_status():
-    from api import sync_status
+    from app.background.sync_runner import sync_status
     return sync_status
 
 

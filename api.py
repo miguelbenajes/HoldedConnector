@@ -1,20 +1,26 @@
-from fastapi import FastAPI, BackgroundTasks, Response, UploadFile, File, Request, Query
+"""Holded Connector — FastAPI application factory.
+
+Entry point for the API server. Creates and configures the FastAPI app:
+middleware (auth, CORS), routers, background schedulers, and static files.
+"""
+
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
-from typing import Optional, List
+from fastapi.responses import FileResponse
 import os
-import time
 import logging
-import json
-import requests
-import io
-import pandas as pd
 import re as _re_mod
-import threading
-from datetime import datetime, timedelta
+
 import connector
 from app.db.connection import db_context
+from app.background.analysis import (  # noqa: F401 — re-exported for legacy `from api import`
+    start_scheduler, stop_scheduler,
+    analysis_status, run_analysis_job,
+)
+from app.background.sync_runner import (  # noqa: F401 — re-exported for legacy `from api import`
+    sync_status, _sync_lock, run_sync,
+)
 
 # ── Table name validation (SQL injection prevention) ─────────────────────
 _VALID_TABLE_RE = _re_mod.compile(r'^[a-z_][a-z0-9_]*$')
@@ -23,8 +29,8 @@ def _assert_valid_table(name: str) -> None:
     """Raise ValueError if table name contains unexpected characters."""
     if not _VALID_TABLE_RE.match(name):
         raise ValueError(f"Invalid table name: {name!r}")
-import reports
-import ai_agent
+
+# ── Router imports ───────────────────────────────────────────────────────
 from app.routers import jobs as jobs_router
 from app.routers import treasury as treasury_router
 from app.routers import gateway_api as gateway_api_router
@@ -36,15 +42,16 @@ from app.routers import dashboard as dashboard_router
 from app.routers import agent_writes as agent_writes_router
 from app.routers import ai as ai_router
 
-
 logger = logging.getLogger(__name__)
+
+# ── Application factory ─────────────────────────────────────────────────
 
 app = FastAPI()
 
-# ── API Authentication ─────────────────────────────────────────────────
-# Triple-auth middleware: Supabase cookie + Supabase JWT Bearer + legacy token.
-# See auth.py for full documentation of each auth path.
+# ── Authentication middleware ────────────────────────────────────────────
 import auth as auth_module
+from fastapi import Request
+from fastapi.responses import JSONResponse
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
@@ -64,7 +71,6 @@ async def auth_middleware(request: Request, call_next):
         token = auth_header[7:]
 
         # Legacy HOLDED_CONNECTOR_TOKEN (Brain inter-service) → full access
-        # EXCEPT: /approve routes require X-Confirm-Hacienda header (SII safety)
         if auth_module.is_legacy_token(token):
             if "/approve" in request.url.path:
                 if request.headers.get("x-confirm-hacienda") != "true":
@@ -106,8 +112,7 @@ async def auth_middleware(request: Request, call_next):
 
     return JSONResponse(status_code=401, content={"error": "Authentication required"})
 
-# CORS: restrict to known origins in production.
-# In production (DATABASE_URL set), ALLOWED_ORIGINS is required — never allow *.
+# ── CORS ─────────────────────────────────────────────────────────────────
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "")
 if not ALLOWED_ORIGINS and connector.DATABASE_URL:
     logger.critical("ALLOWED_ORIGINS must be set in production (DATABASE_URL is set). Defaulting to coyoterent.com")
@@ -120,265 +125,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-sync_status = {"running": False, "last_result": None, "last_time": None, "errors": []}
-_sync_lock = threading.Lock()
-
-# ── Invoice Analysis Job ─────────────────────────────────────────────
-analysis_status = {
-    "running": False,
-    "last_run": None,
-    "last_result": None,
-    "processed": 0,
-    "pending_matches": 0,
-}
-_analysis_lock = threading.Lock()
-
-def run_analysis_job(batch_size: int = 10):
-    """
-    Core analysis job:
-    1. Categorize up to batch_size unanalyzed purchase invoices (rules → Claude fallback)
-    2. Scan ALL purchase_items for inventory matches and save pending ones
-    """
-    with _analysis_lock:
-        if analysis_status["running"]:
-            return {"error": "Already running"}
-        analysis_status["running"] = True
-        analysis_status["last_run"] = datetime.now().isoformat()
-    processed = 0
-    errors = []
-
-    try:
-        # ── Step 1: Categorize unanalyzed invoices ───────────────────
-        invoices = connector.get_unanalyzed_purchases(limit=batch_size)
-        logger.info(f"Analysis job: {len(invoices)} invoices to categorize")
-
-        for inv in invoices:
-            try:
-                result = connector.categorize_by_rules(
-                    inv.get('desc') or '',
-                    inv.get('contact_name') or '',
-                    inv.get('item_names') or []
-                )
-
-                if result is None:
-                    # Claude fallback for ambiguous invoices
-                    result = _claude_categorize(inv)
-
-                connector.save_purchase_analysis(
-                    purchase_id=inv['id'],
-                    category=result.get('category', 'Sin categoría'),
-                    subcategory=result.get('subcategory', ''),
-                    confidence=result.get('confidence', 'low'),
-                    method=result.get('method', 'unknown'),
-                    reasoning=result.get('reasoning', '')
-                )
-                processed += 1
-            except Exception as e:
-                logger.error(f"Error categorizing {inv['id']}: {e}")
-                errors.append(str(e))
-
-        # ── Step 2: Scan for inventory matches ───────────────────────
-        matches = connector.find_inventory_in_purchases()
-        logger.info(f"Analysis job: {len(matches)} inventory matches found")
-        for m in matches:
-            try:
-                connector.save_inventory_match(
-                    m['purchase_id'], m['purchase_item_id'], m['product_id'],
-                    m['product_name'], m['matched_price'], m['matched_date'],
-                    m['match_method']
-                )
-            except Exception as e:
-                logger.warning(f"Match save error: {e}")
-
-        pending = len(connector.get_pending_matches())
-        analysis_status["processed"] = processed
-        analysis_status["pending_matches"] = pending
-        analysis_status["last_result"] = "success" if not errors else "partial"
-        return {"processed": processed, "matches_found": len(matches), "pending": pending}
-
-    except Exception as e:
-        logger.error(f"Analysis job failed: {e}", exc_info=True)
-        analysis_status["last_result"] = "error"
-        return {"error": "Analysis job failed"}
-    finally:
-        analysis_status["running"] = False
-
-
-def _claude_categorize(inv: dict) -> dict:
-    """
-    Use Claude to categorize a purchase invoice when rules don't match.
-    Keeps prompt minimal to save tokens.
-    """
-    try:
-        api_key = ai_agent._get_api_key()
-        if not api_key:
-            return {"category": "Sin categoría", "subcategory": "", "confidence": "low",
-                    "method": "no_key", "reasoning": "No Claude API key configured"}
-
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        item_list = ", ".join(inv.get('item_names') or []) or "—"
-        prompt = (
-            f"Clasifica esta factura de gasto empresarial. "
-            f"Elige la carpeta contable que mejor encaje.\n"
-            f"Proveedor: {inv.get('contact_name','')}\n"
-            f"Descripción: {inv.get('desc','')}\n"
-            f"Items: {item_list}\n"
-            f"Importe: {inv.get('amount',0)}€\n\n"
-            f"Carpetas contables disponibles:\n"
-            f"- AIRBNB RECIBOS (recibos de alojamiento Airbnb)\n"
-            f"- AMAZON (compras en Amazon de cualquier tipo)\n"
-            f"- GASTOS LOCAL → subcarpeta: agua y luz | alarma | alquiler\n"
-            f"- SEGUROS - SEG SOCIAL → subcarpeta: Seguro | Seg. Social\n"
-            f"- SOFTWARE → subcarpeta: adobe | apple | capture one | google | holded | hostalia | spotify | Suscripción\n"
-            f"- TELEFONIA E INTERNET → subcarpeta: Digi | finetwork | Telefonía\n"
-            f"- TRANSPORTE → subcarpeta: dhl | gasolina | renfe | taxis | uber | vuelos | Mensajería\n"
-            f"- A AMORTIZAR (equipamiento de alto valor: cámaras, ordenadores, maquinaria)\n"
-            f"- VARIOS → subcarpeta: Restaurante | Formación | Varios\n\n"
-            f"Responde SOLO con JSON: "
-            f'{{\"category\":\"...\",\"subcategory\":\"...\",\"reasoning\":\"...\"}}'
-        )
-        msg = client.messages.create(
-            model=ai_agent._get_model(),
-            max_tokens=150,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        raw = msg.content[0].text.strip()
-        # Extract JSON even if Claude adds surrounding text
-        import re
-        m = re.search(r'\{.*\}', raw, re.DOTALL)
-        if m:
-            data = json.loads(m.group())
-            return {
-                "category": data.get("category", "Otros"),
-                "subcategory": data.get("subcategory", ""),
-                "confidence": "medium",
-                "method": "claude",
-                "reasoning": data.get("reasoning", "")
-            }
-    except Exception as e:
-        logger.warning(f"Claude categorization failed: {e}")
-
-    return {"category": "Sin categoría", "subcategory": "", "confidence": "low",
-            "method": "failed", "reasoning": "Categorization failed"}
-
-
-# Daily scheduler: runs analysis job automatically each day
-_scheduler_thread = None
-_scheduler_stop = threading.Event()
-
-def _daily_scheduler():
-    """Background thread: runs analysis job once per day."""
-    while not _scheduler_stop.is_set():
-        now = datetime.now()
-        # Run at 3:00 AM
-        next_run = now.replace(hour=3, minute=0, second=0, microsecond=0)
-        if next_run <= now:
-            next_run += timedelta(days=1)
-        wait_secs = (next_run - now).total_seconds()
-        logger.info(f"Analysis scheduler: next run in {wait_secs/3600:.1f}h at {next_run.strftime('%H:%M')}")
-        if _scheduler_stop.wait(timeout=wait_secs):
-            break  # Shutdown requested
-        logger.info("Analysis scheduler: starting daily job")
-        try:
-            run_analysis_job(batch_size=10)
-        except Exception as e:
-            logger.error(f"Analysis scheduler: job failed: {e}", exc_info=True)
-
+# ── Lifecycle ────────────────────────────────────────────────────────────
 
 @app.on_event("startup")
 def on_startup():
-    """Initialize DB schema on server start (creates tables if they don't exist)."""
+    """Initialize DB schema and start background schedulers."""
     connector.init_db()
-    # Start daily analysis scheduler in background
-    global _scheduler_thread
-    _scheduler_thread = threading.Thread(target=_daily_scheduler, daemon=True)
-    _scheduler_thread.start()
-    logger.info("Daily analysis scheduler started")
+    start_scheduler()
 
 @app.on_event("shutdown")
 def on_shutdown():
-    """Signal scheduler thread to stop gracefully."""
-    _scheduler_stop.set()
+    """Signal background threads to stop gracefully."""
+    stop_scheduler()
 
-# get_db_connection → db_context (from app.db.connection)
-# _CompatCursor, _ConnProxy also live there now.
+# ── Legacy alias ─────────────────────────────────────────────────────────
 get_db_connection = db_context
 
-def run_sync():
-    sync_status["errors"] = []
-    try:
-        connector.init_db()
-        steps = [
-            ("accounts", connector.sync_accounts),
-            ("contacts", connector.sync_contacts),
-            ("products", connector.sync_products),
-            ("invoices", connector.sync_invoices),
-            ("purchases", connector.sync_purchases),
-            ("estimates", connector.sync_estimates),
-            ("projects", connector.sync_projects),
-            ("payments", connector.sync_payments),
-        ]
-        for step_name, step_fn in steps:
-            try:
-                step_fn()
-            except Exception as e:
-                logger.error(f"Sync step '{step_name}' failed: {e}", exc_info=True)
-                sync_status["errors"].append(f"{step_name} failed")
-
-        # Flush pending job notes to Obsidian
-        try:
-            from skills.job_tracker import flush_note_queue
-            count = flush_note_queue()
-            if count:
-                logger.info(f"[JOB_TRACKER] Flushed {count} job notes to Obsidian")
-        except Exception as e:
-            logger.error(f"[JOB_TRACKER] Queue flush failed: {e}")
-    finally:
-        sync_status["running"] = False
-        sync_status["last_time"] = datetime.now().isoformat()
-        sync_status["last_result"] = "error" if sync_status["errors"] else "success"
-
-# ── Dashboard endpoints — moved to app/routers/dashboard.py ──────────────────
-# (registered via app.include_router(dashboard_router.router) below)
-
-# ── Entities endpoints — moved to app/routers/entities.py ────────────────────
-# (registered via app.include_router(entities_router.router) below)
-
-# ─── AI Chat Endpoints — moved to app/routers/ai.py ─────────────────────────
-# (registered via app.include_router(ai_router.router) below)
-
-# ────────────── File Management Endpoints ──────────────
-# Moved to app/routers/files.py
-
-# ── Amortizations, audit log, analysis endpoints — moved to app/routers/amortizations.py
-# (registered via app.include_router(amortizations_router.router) below)
-
-
-# ── Schema Introspection ─────────────────────────────────────────────────────
-# Moved to app/routers/sync.py
-
-# ── Agent Write Endpoints — moved to app/routers/agent_writes.py ─────────────
-# (registered via app.include_router(agent_writes_router.router) below)
-
-
-# ── Gateway Estimate endpoint — moved to app/routers/gateway_api.py ─────────────
-# (registered via app.include_router(gateway_api_router.router) below)
-
-
-# ── Treasury & Payment endpoints — moved to app/routers/treasury.py ────────────
-# (registered via app.include_router(treasury_router.router) below)
-
-
-# Backup endpoints removed — security risk: exposed full DB and codebase.
-# Use direct DB access (pg_dump) or Supabase dashboard for backups.
-
-
-# ── Job Tracker Endpoints — moved to app/routers/jobs.py ──────────────────────
-# (registered via app.include_router(jobs_router.router) below)
-
-
-# ── Router registrations (extracted routers) ──────────────────────────────────
+# ── Router registrations ─────────────────────────────────────────────────
 app.include_router(jobs_router.router)
 app.include_router(treasury_router.router)
 app.include_router(gateway_api_router.router)
@@ -390,7 +153,7 @@ app.include_router(dashboard_router.router)
 app.include_router(agent_writes_router.router)
 app.include_router(ai_router.router)
 
-# Serve static files (mount at the end to avoid intercepting /api)
+# ── Static files ─────────────────────────────────────────────────────────
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/")

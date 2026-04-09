@@ -299,7 +299,7 @@ def get_audit_log_detail(audit_id: int):
 @router.get("/api/analysis/status")
 def get_analysis_status():
     """Current state of the analysis job + overall progress stats."""
-    from api import analysis_status
+    from app.background.analysis import analysis_status
     stats = connector.get_analysis_stats()
     merged = {**analysis_status, **stats}
     # last_run in memory is reset on every server restart; use DB value as fallback
@@ -310,7 +310,7 @@ def get_analysis_status():
 @router.post("/api/analysis/run")
 async def trigger_analysis(background_tasks: BackgroundTasks, batch_size: int = 10):
     """Manually trigger an analysis batch (runs in background)."""
-    from api import run_analysis_job, analysis_status
+    from app.background.analysis import run_analysis_job, analysis_status
     if analysis_status["running"]:
         return {"status": "already_running"}
     background_tasks.add_task(run_analysis_job, batch_size)
