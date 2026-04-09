@@ -29,6 +29,7 @@ import ai_agent
 from write_gateway import gateway, RateLimiter
 from app.routers import jobs as jobs_router
 from app.routers import treasury as treasury_router
+from app.routers import gateway_api as gateway_api_router
 
 # Feature flag: route /api/agent/* endpoints through Write Gateway (default: true)
 # Set USE_GATEWAY_FOR_AGENT=false to rollback to direct connector calls (requires restart)
@@ -1852,72 +1853,8 @@ def agent_convert_estimate(body: ConvertEstimateBody):
     )
 
 
-# ── Gateway Estimate endpoint (Gaffer SP3 Quote Engine) ──────────────────────
-
-class GatewayEstimateItem(BaseModel):
-    name: str
-    units: float = 1
-    subtotal: float = 0
-    tax: float = 21
-    desc: Optional[str] = None
-
-class GatewayEstimateBody(BaseModel):
-    contact_id: str = Field(..., description="Holded contact ID")
-    items: List[GatewayEstimateItem] = Field(..., min_length=1)
-    desc: Optional[str] = None
-    date: Optional[str] = None
-    notes: Optional[str] = None
-
-@app.post("/api/gateway/estimate")
-def gateway_create_estimate(request: Request, body: GatewayEstimateBody):
-    """
-    REST wrapper around Write Gateway's create_estimate operation.
-    For service-to-service calls (Gaffer → Holded).
-    Auth: BRAIN_INTERNAL_KEY Bearer token.
-    """
-    from fastapi import HTTPException
-
-    # Auth check
-    auth_header = request.headers.get("authorization", "")
-    expected_key = os.environ.get("BRAIN_INTERNAL_KEY", "")
-    if not expected_key or not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    import hmac as _hmac
-    if not _hmac.compare_digest(auth_header[7:], expected_key):
-        raise HTTPException(status_code=401, detail="Invalid key")
-
-    # Remap 'subtotal' → 'price' so _build_holded_payload picks it up correctly
-    gateway_items = []
-    for item in body.items:
-        d = item.model_dump(exclude_none=True)
-        if "subtotal" in d:
-            d["price"] = d.pop("subtotal")
-        gateway_items.append(d)
-
-    params = {
-        "contact_id": body.contact_id,
-        "items": gateway_items,
-    }
-    if body.desc:
-        params["desc"] = body.desc
-    # Holded requires Unix timestamp; default to now if not provided
-    params["date"] = body.date if body.date else str(int(time.time()))
-    if body.notes:
-        params["notes"] = body.notes
-
-    result = gateway.execute("create_estimate", params, source="gaffer", skip_confirm=True)
-
-    if result.get("success"):
-        return {
-            "success": True,
-            "entity_id": result.get("entity_id", ""),
-            "doc_number": result.get("doc_number", ""),
-        }
-    else:
-        raise HTTPException(
-            status_code=500,
-            detail=result.get("error") or result.get("errors", "Unknown error"),
-        )
+# ── Gateway Estimate endpoint — moved to app/routers/gateway_api.py ─────────────
+# (registered via app.include_router(gateway_api_router.router) below)
 
 
 # ── Treasury & Payment endpoints — moved to app/routers/treasury.py ────────────
@@ -1935,6 +1872,7 @@ def gateway_create_estimate(request: Request, body: GatewayEstimateBody):
 # ── Router registrations (extracted routers) ──────────────────────────────────
 app.include_router(jobs_router.router)
 app.include_router(treasury_router.router)
+app.include_router(gateway_api_router.router)
 
 # Serve static files (mount at the end to avoid intercepting /api)
 app.mount("/static", StaticFiles(directory="static"), name="static")
