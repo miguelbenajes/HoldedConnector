@@ -157,6 +157,29 @@ def delete_data(endpoint):
         logger.error(f"Network error deleting {endpoint}: {e}")
         return {"error": True, "status_code": 0, "detail": str(e)}
 
+def _extract_project_code(products):
+    """Scan line items for the 'Proyect REF:' product and return its desc as project code.
+    Returns the project code string, or None if not found.
+    Detection: by productId (reliable) or by name (fallback, case-insensitive)."""
+    for prod in (products or []):
+        pid = prod.get('productId')
+        name = (prod.get('name') or '').strip().lower()
+        if pid == PROYECTO_PRODUCT_ID or name == PROYECTO_PRODUCT_NAME:
+            return (prod.get('desc') or '').strip() or None
+    return None
+
+
+def _extract_shooting_dates(products):
+    """Scan line items for 'Shooting Dates:' product and return its desc.
+    Detection: by productId (reliable) or by name (fallback, case-insensitive)."""
+    for prod in (products or []):
+        pid = prod.get('productId')
+        name = (prod.get('name') or '').strip().lower()
+        if pid == SHOOTING_DATES_PRODUCT_ID or name == SHOOTING_DATES_PRODUCT_NAME:
+            return (prod.get('desc') or '').strip() or None
+    return None
+
+
 def holded_put(endpoint, data):
     """PUT request to Holded API."""
     try:

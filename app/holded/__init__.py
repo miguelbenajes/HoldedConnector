@@ -11,8 +11,15 @@ from app.holded.client import (
     delete_data,
     holded_put,
     extract_ret,
+    _extract_project_code,
+    _extract_shooting_dates,
     PROYECTO_PRODUCT_ID,
     PROYECTO_PRODUCT_NAME,
     SHOOTING_DATES_PRODUCT_ID,
     SHOOTING_DATES_PRODUCT_NAME,
+)
+from app.holded.upsert import (
+    _upsert_single_document,
+    _upsert_single_contact,
+    _upsert_single_product,
 )
