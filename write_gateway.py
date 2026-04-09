@@ -467,7 +467,7 @@ class WriteGateway:
 
         invoice_payload = {
             "contactId": estimate.get("contact_id"),
-            "products": products,
+            "items": products,
         }
         if estimate.get("desc"):
             invoice_payload["desc"] = _sanitize_text(estimate["desc"], 1000)

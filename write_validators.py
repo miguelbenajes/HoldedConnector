@@ -118,15 +118,30 @@ def _row_to_dict(cursor, row):
 
 
 def _fetch_contact(contact_id):
-    """Fetch contact from local DB. Returns dict or None."""
+    """Fetch contact from local DB, with API fallback. Returns dict or None."""
+    import logging
+    _logger = logging.getLogger(__name__)
     conn = connector.get_db()
     try:
         cursor = connector._cursor(conn)
         cursor.execute(connector._q('SELECT * FROM contacts WHERE id = ?'), (contact_id,))
         row = cursor.fetchone()
-        return _row_to_dict(cursor, row)
+        result = _row_to_dict(cursor, row)
     finally:
         connector.release_db(conn)
+    if result:
+        return result
+    # Fallback: fetch from Holded API
+    _logger.warning(f"Contact {contact_id} not in local DB, fetching from Holded API")
+    api_data = connector.fetch_data(f"/invoicing/v1/contacts/{contact_id}")
+    if api_data and not api_data.get("error") and api_data.get("id"):
+        return {
+            "id": api_data.get("id"),
+            "name": api_data.get("name", ""),
+            "code": api_data.get("code", ""),
+            "email": api_data.get("email", ""),
+        }
+    return None
 
 
 def _fetch_products_batch(product_ids):
@@ -154,7 +169,9 @@ def _fetch_products_batch(product_ids):
 _VALID_DOC_TABLES = frozenset({"invoices", "estimates", "purchase_invoices"})
 
 def _fetch_document(doc_type, doc_id):
-    """Fetch document from local DB. Returns dict or None."""
+    """Fetch document from local DB, with API fallback. Returns dict or None."""
+    import logging
+    _logger = logging.getLogger(__name__)
     table_map = {"invoice": "invoices", "estimate": "estimates",
                  "purchase": "purchase_invoices"}
     table = table_map.get(doc_type)
@@ -165,9 +182,28 @@ def _fetch_document(doc_type, doc_id):
         cursor = connector._cursor(conn)
         cursor.execute(connector._q(f'SELECT * FROM {table} WHERE id = ?'), (doc_id,))
         row = cursor.fetchone()
-        return _row_to_dict(cursor, row)
+        result = _row_to_dict(cursor, row)
     finally:
         connector.release_db(conn)
+    if result:
+        return result
+    # Fallback: fetch from Holded API
+    _logger.warning(f"Document {doc_type}/{doc_id} not in local DB, fetching from Holded API")
+    api_endpoint = f"/invoicing/v1/documents/{doc_type}/{doc_id}"
+    api_data = connector.fetch_data(api_endpoint)
+    if api_data and not api_data.get("error") and api_data.get("id"):
+        # Map API response to internal format
+        return {
+            "id": api_data.get("id"),
+            "contact_id": api_data.get("contact"),
+            "status": api_data.get("status", 0),
+            "date": api_data.get("date"),
+            "desc": api_data.get("desc", ""),
+            "notes": api_data.get("notes", ""),
+            "total": api_data.get("total", 0),
+            "subtotal": api_data.get("subtotal", 0),
+        }
+    return None
 
 
 # ── Validators ───────────────────────────────────────────────────────
@@ -400,8 +436,14 @@ def validate_convert_estimate_to_invoice(params):
         connector.release_db(conn)
 
     if not items:
-        errors.append({"field": "items", "msg": "Estimate has no line items to convert"})
-        return (False, errors, context)
+        # Fallback: fetch items directly from Holded API (DB may not have synced)
+        import logging
+        _logger = logging.getLogger(__name__)
+        _logger.warning(f"No items in local DB for estimate {estimate_id}, falling back to Holded API")
+        items = connector.fetch_estimate_fresh(estimate_id)
+        if not items:
+            errors.append({"field": "items", "msg": "Estimate has no line items (checked DB + API)"})
+            return (False, errors, context)
 
     context["estimate_items"] = items
 

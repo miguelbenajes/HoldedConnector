@@ -892,7 +892,7 @@ def fetch_estimate_fresh(estimate_id):
                 raw_items = data.get("products") or []
                 items = []
                 for it in raw_items:
-                    items.append({
+                    item = {
                         "name": it.get("name", ""),
                         "units": _num(it.get("units")) or 1,
                         "subtotal": _num(it.get("price")) or _num(it.get("subtotal")) or 0,
@@ -900,7 +900,18 @@ def fetch_estimate_fresh(estimate_id):
                         "desc": it.get("desc", ""),
                         "productId": it.get("productId", ""),
                         "product_id": it.get("productId", ""),
-                    })
+                    }
+                    if it.get("tax") is not None:
+                        item["tax"] = it["tax"]
+                    if it.get("taxes"):
+                        item["taxes"] = it["taxes"]
+                    if it.get("retention"):
+                        item["retention"] = it["retention"]
+                    if it.get("discount"):
+                        item["discount"] = it["discount"]
+                    if it.get("account"):
+                        item["account"] = it["account"]
+                    items.append(item)
                 logger.info(f"Fresh read estimate {estimate_id}: {len(items)} items from Holded API")
                 return items
             elif response.status_code == 429:
