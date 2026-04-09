@@ -151,6 +151,70 @@ def test_send_response_format():
     assert "id" not in response  # send endpoint does NOT return id
 
 
+# ── Tax normalization tests ───────────────────────────────────────────
+
+def test_normalize_taxes_from_api_item():
+    """API items with taxes array should pass through unchanged."""
+    from write_gateway import _normalize_item_taxes
+    item = {"name": "Test", "taxes": ["s_iva_21", "s_ret_15"], "tax": 21}
+    assert _normalize_item_taxes(item) == ["s_iva_21", "s_ret_15"]
+
+
+def test_normalize_taxes_from_db_item_with_retention():
+    """DB items with tax + retention should reconstruct taxes array."""
+    from write_gateway import _normalize_item_taxes
+    item = {"name": "Test", "tax": 21, "retention": 15}
+    result = _normalize_item_taxes(item)
+    assert result == ["s_iva_21", "s_ret_15"]
+
+
+def test_normalize_taxes_from_db_item_retention_19():
+    """DB items with 19% retention (equipment rental)."""
+    from write_gateway import _normalize_item_taxes
+    item = {"name": "Camera", "tax": 21, "retention": 19}
+    result = _normalize_item_taxes(item)
+    assert result == ["s_iva_21", "s_ret_19"]
+
+
+def test_normalize_taxes_from_db_item_no_retention():
+    """DB items with only tax (no retention) should return IVA only."""
+    from write_gateway import _normalize_item_taxes
+    item = {"name": "Test", "tax": 21}
+    result = _normalize_item_taxes(item)
+    assert result == ["s_iva_21"]
+
+
+def test_normalize_taxes_zero_tax():
+    """Items with tax=0 and no retention."""
+    from write_gateway import _normalize_item_taxes
+    item = {"name": "REF", "tax": 0}
+    result = _normalize_item_taxes(item)
+    assert result == ["s_iva_0"]
+
+
+def test_normalize_taxes_empty_taxes_array():
+    """Empty taxes array should fall through to numeric fields."""
+    from write_gateway import _normalize_item_taxes
+    item = {"name": "REF", "taxes": [], "tax": 0}
+    result = _normalize_item_taxes(item)
+    assert result == ["s_iva_0"]
+
+
+def test_normalize_taxes_negative_retention():
+    """Retention stored as negative number (some DB formats)."""
+    from write_gateway import _normalize_item_taxes
+    item = {"name": "Test", "tax": 21, "retention": -15}
+    result = _normalize_item_taxes(item)
+    assert result == ["s_iva_21", "s_ret_15"]
+
+
+def test_normalize_taxes_no_tax_fields():
+    """Item with no tax info at all should return None."""
+    from write_gateway import _normalize_item_taxes
+    item = {"name": "Test"}
+    assert _normalize_item_taxes(item) is None
+
+
 # ── Validator tests ──────────────────────────────────────────────────
 
 def test_approve_invoice_validator_registered():

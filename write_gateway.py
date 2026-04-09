@@ -152,6 +152,37 @@ def _compute_checksum(audit_id, timestamp, operation, entity_id, payload):
     return hashlib.sha256(data.encode()).hexdigest()
 
 
+# ── Tax Normalization ───────────────────────────────────────────────
+
+def _normalize_item_taxes(item):
+    """Build Holded taxes array from any item source (API or DB).
+
+    API items (fetch_estimate_fresh) already have taxes=['s_iva_21', 's_ret_15'].
+    DB items have tax=21 and retention=15 as separate numeric fields, no taxes array.
+    This function ensures consistent output for Holded POST payloads.
+
+    Returns: list of tax IDs (e.g. ['s_iva_21', 's_ret_15']) or None.
+    """
+    # Case 1: Already has taxes array from API → use directly
+    if item.get("taxes") and isinstance(item["taxes"], list) and len(item["taxes"]) > 0:
+        return item["taxes"]
+
+    # Case 2: Reconstruct from numeric tax + retention fields (DB items)
+    taxes = []
+    tax = item.get("tax")
+    if tax is not None:
+        tax_int = abs(int(float(tax)))
+        taxes.append(f"s_iva_{tax_int}")
+
+    retention = item.get("retention")
+    if retention:
+        ret_int = abs(int(float(retention)))
+        if ret_int > 0:
+            taxes.append(f"s_ret_{ret_int}")
+
+    return taxes if taxes else None
+
+
 # ── Payload Builders ─────────────────────────────────────────────────
 
 def _build_holded_payload(operation, params):
@@ -455,14 +486,18 @@ class WriteGateway:
                 "units": item.get("units", 1),
                 "subtotal": item.get("price", 0),
             }
-            if item.get("taxes"):
-                p["taxes"] = item["taxes"]
-            elif item.get("tax") is not None:
-                p["tax"] = item["tax"]
+            # Normalize taxes: handles both API items (taxes array) and DB items (tax + retention nums)
+            taxes = _normalize_item_taxes(item)
+            if taxes:
+                p["taxes"] = taxes
             if item.get("desc"):
                 p["desc"] = _sanitize_text(item["desc"], 500)
             if item.get("sku"):
                 p["sku"] = item["sku"]
+            if item.get("account"):
+                p["account"] = item["account"]
+            if item.get("discount"):
+                p["discount"] = item["discount"]
             products.append(p)
 
         invoice_payload = {
