@@ -34,3 +34,8 @@ from app.holded.sync import (
     sync_projects,
     sync_payments,
 )
+from app.holded.sync_single import (
+    sync_single_document,
+    sync_single_contact,
+    sync_single_product,
+)
