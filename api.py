@@ -1,7 +1,7 @@
 from fastapi import FastAPI, BackgroundTasks, Response, UploadFile, File, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from typing import Optional, List
 import os
 import time
@@ -34,8 +34,8 @@ from app.routers import amortizations as amortizations_router
 from app.routers import entities as entities_router
 from app.routers import dashboard as dashboard_router
 from app.routers import agent_writes as agent_writes_router
+from app.routers import ai as ai_router
 
-from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
@@ -345,93 +345,8 @@ def run_sync():
 # ── Entities endpoints — moved to app/routers/entities.py ────────────────────
 # (registered via app.include_router(entities_router.router) below)
 
-# ─── AI Chat Endpoints ───────────────────────────────────────────────
-
-class ChatRequest(BaseModel):
-    message: str = Field(..., max_length=8000)
-    conversation_id: Optional[str] = Field(None, max_length=100)
-
-class ConfirmRequest(BaseModel):
-    pending_state_id: str = Field(..., max_length=100)
-    confirmed: bool
-
-@app.post("/api/ai/chat")
-async def ai_chat(body: ChatRequest, request: Request):
-    if not ai_agent.check_rate_limit():
-        return {"type": "error", "content": "Rate limit exceeded. Please wait a moment."}
-    user_role = getattr(getattr(request.state, "user", None), "role", "admin")
-    result = ai_agent.chat(body.message, body.conversation_id, user_role=user_role)
-    return result
-
-@app.post("/api/ai/chat/stream")
-async def ai_chat_stream(body: ChatRequest, request: Request):
-    if not ai_agent.check_rate_limit():
-        async def error_gen():
-            yield f"event: error\ndata: {json.dumps({'content': 'Rate limit exceeded.'})}\n\n"
-        return StreamingResponse(error_gen(), media_type="text/event-stream")
-
-    user_role = getattr(getattr(request.state, "user", None), "role", "admin")
-
-    def sse_generator():
-        for event in ai_agent.chat_stream(body.message, body.conversation_id, user_role=user_role):
-            evt = event.get("event", "message")
-            data = event.get("data", "{}")
-            yield f"event: {evt}\ndata: {data}\n\n"
-
-    return StreamingResponse(sse_generator(), media_type="text/event-stream")
-
-@app.post("/api/ai/confirm")
-async def ai_confirm(body: ConfirmRequest):
-    result = ai_agent.confirm_action(body.pending_state_id, body.confirmed)
-    return result
-
-@app.get("/api/ai/history")
-async def ai_history(conversation_id: Optional[str] = None):
-    return ai_agent.get_history(conversation_id)
-
-@app.delete("/api/ai/history")
-async def ai_clear_history(conversation_id: Optional[str] = None):
-    ai_agent.clear_history(conversation_id)
-    return {"status": "success"}
-
-@app.get("/api/ai/conversations")
-async def ai_conversations():
-    return ai_agent.get_conversations()
-
-@app.get("/api/ai/favorites")
-async def ai_favorites():
-    return ai_agent.get_favorites()
-
-class FavoriteRequest(BaseModel):
-    query: str
-    label: Optional[str] = None
-
-@app.post("/api/ai/favorites")
-async def ai_add_favorite(body: FavoriteRequest):
-    fav_id = ai_agent.add_favorite(body.query, body.label)
-    return {"status": "success", "id": fav_id}
-
-@app.delete("/api/ai/favorites/{fav_id}")
-async def ai_remove_favorite(fav_id: int):
-    ai_agent.remove_favorite(fav_id)
-    return {"status": "success"}
-
-@app.get("/api/ai/config")
-async def ai_config():
-    has_key = bool(ai_agent._get_api_key())
-    return {"hasKey": has_key, "model": ai_agent._get_model(), "safeMode": connector.SAFE_MODE}
-
-class AIConfigUpdate(BaseModel):
-    claudeApiKey: Optional[str] = Field(None, max_length=200)
-
-@app.post("/api/ai/config")
-async def ai_config_update(body: AIConfigUpdate):
-    if body.claudeApiKey:
-        key = body.claudeApiKey.strip()
-        if not key.startswith("sk-ant-"):
-            return {"status": "error", "message": "Invalid API key format"}
-        connector.save_setting("claude_api_key", key)
-    return {"status": "success"}
+# ─── AI Chat Endpoints — moved to app/routers/ai.py ─────────────────────────
+# (registered via app.include_router(ai_router.router) below)
 
 # ────────────── File Management Endpoints ──────────────
 # Moved to app/routers/files.py
@@ -473,6 +388,7 @@ app.include_router(amortizations_router.router)
 app.include_router(entities_router.router)
 app.include_router(dashboard_router.router)
 app.include_router(agent_writes_router.router)
+app.include_router(ai_router.router)
 
 # Serve static files (mount at the end to avoid intercepting /api)
 app.mount("/static", StaticFiles(directory="static"), name="static")
