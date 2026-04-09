@@ -31,6 +31,7 @@ from app.routers import jobs as jobs_router
 from app.routers import treasury as treasury_router
 from app.routers import gateway_api as gateway_api_router
 from app.routers import files as files_router
+from app.routers import sync as sync_router
 
 # Feature flag: route /api/agent/* endpoints through Write Gateway (default: true)
 # Set USE_GATEWAY_FOR_AGENT=false to rollback to direct connector calls (requires restart)
@@ -141,10 +142,6 @@ analysis_status = {
     "pending_matches": 0,
 }
 _analysis_lock = threading.Lock()
-
-@app.get("/health")
-def health():
-    return {"status": "ok", "service": "holded-connector"}
 
 def run_analysis_job(batch_size: int = 10):
     """
@@ -351,50 +348,6 @@ def run_sync():
         sync_status["running"] = False
         sync_status["last_time"] = datetime.now().isoformat()
         sync_status["last_result"] = "error" if sync_status["errors"] else "success"
-
-@app.post("/api/sync")
-async def sync_data(background_tasks: BackgroundTasks):
-    with _sync_lock:
-        if sync_status["running"]:
-            return {"status": "already_running"}
-        sync_status["running"] = True
-    background_tasks.add_task(run_sync)
-    return {"status": "Sync started"}
-
-@app.get("/api/sync/status")
-async def get_sync_status():
-    return sync_status
-
-@app.get("/api/config")
-async def get_config():
-    return {
-        "hasKey": bool(connector.API_KEY),
-        "apiKey": "****" if connector.API_KEY else None
-    }
-
-class ConfigUpdate(BaseModel):
-    apiKey: Optional[str] = None
-
-@app.post("/api/config")
-async def update_config(body: ConfigUpdate, request: Request):
-    # POST /api/config requires auth (GET is public for SPA init check)
-    if not getattr(request.state, "user", None):
-        return JSONResponse(status_code=401, content={"error": "Authentication required"})
-    if body.apiKey:
-        url = "https://api.holded.com/api/invoicing/v1/contacts"
-        headers = {"key": body.apiKey}
-        try:
-            response = requests.get(url, headers=headers, params={"limit": 1}, timeout=15)
-            if response.status_code == 200:
-                connector.save_setting("holded_api_key", body.apiKey)
-                connector.reload_config()
-            else:
-                return {"status": "error", "message": "Invalid Holded API Key"}
-        except Exception as e:
-            logger.error(f"Holded config validation error: {e}")
-            return {"status": "error", "message": "Could not validate API key with Holded"}
-
-    return {"status": "success"}
 
 @app.get("/api/summary")
 def get_summary():
@@ -1264,57 +1217,7 @@ def get_analyzed_invoices(limit: int = Query(50, ge=1, le=500), offset: int = Qu
 
 
 # ── Schema Introspection ─────────────────────────────────────────────────────
-# Used by Brain's db_schema tool to understand the Holded DB structure.
-
-@app.get("/api/schema")
-def get_holded_schema():
-    """Return table names, columns, types, and row counts for the Holded DB."""
-    tables = []
-    conn = connector.get_db()
-    cur = connector._cursor(conn)
-    try:
-        if connector._USE_SQLITE:
-            cur.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-            table_names = [r["name"] if isinstance(r, dict) else r[0] for r in cur.fetchall()]
-            for tname in table_names:
-                if tname.startswith("sqlite_") or not _VALID_TABLE_RE.match(tname): continue
-                _assert_valid_table(tname)
-                cur.execute(f"PRAGMA table_info({tname})")
-                cols = [{"name": r["name"] if isinstance(r, dict) else r[1],
-                         "type": r["type"] if isinstance(r, dict) else r[2]}
-                        for r in cur.fetchall()]
-                cur.execute(f"SELECT count(*) as c FROM {tname}")
-                row = cur.fetchone()
-                count = row["c"] if isinstance(row, dict) else row[0]
-                tables.append({"table_name": tname, "row_count": count, "columns": cols})
-        else:
-            cur.execute("""
-                SELECT table_name FROM information_schema.tables
-                WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
-                ORDER BY table_name
-            """)
-            table_names = [r["table_name"] if isinstance(r, dict) else r[0] for r in cur.fetchall()]
-            for tname in table_names:
-                if not _VALID_TABLE_RE.match(tname): continue
-                _assert_valid_table(tname)
-                cur.execute("""
-                    SELECT column_name, data_type, is_nullable
-                    FROM information_schema.columns
-                    WHERE table_schema = 'public' AND table_name = %s
-                    ORDER BY ordinal_position
-                """, (tname,))
-                cols = [{"name": r["column_name"] if isinstance(r, dict) else r[0],
-                         "type": r["data_type"] if isinstance(r, dict) else r[1],
-                         "nullable": (r["is_nullable"] if isinstance(r, dict) else r[2]) == "YES"}
-                        for r in cur.fetchall()]
-                cur.execute(f"SELECT count(*) as c FROM {tname}")
-                row = cur.fetchone()
-                count = row["c"] if isinstance(row, dict) else row[0]
-                tables.append({"table_name": tname, "row_count": count, "columns": cols})
-    finally:
-        connector.release_db(conn)
-    return tables
-
+# Moved to app/routers/sync.py
 
 # ── Agent Write Endpoints ────────────────────────────────────────────────────
 # Used by the agent-runner accounts agent. SAFE_MODE is enforced by connector.py.
@@ -1705,6 +1608,7 @@ app.include_router(jobs_router.router)
 app.include_router(treasury_router.router)
 app.include_router(gateway_api_router.router)
 app.include_router(files_router.router)
+app.include_router(sync_router.router)
 
 # Serve static files (mount at the end to avoid intercepting /api)
 app.mount("/static", StaticFiles(directory="static"), name="static")
