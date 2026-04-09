@@ -39,3 +39,12 @@ from app.holded.sync_single import (
     sync_single_contact,
     sync_single_product,
 )
+from app.holded.write_wrappers import (
+    create_invoice,
+    update_estimate,
+    fetch_estimate_fresh,
+    create_contact,
+    create_estimate,
+    send_document,
+    create_product,
+)
