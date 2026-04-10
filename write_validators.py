@@ -422,28 +422,28 @@ def validate_convert_estimate_to_invoice(params):
 
     context["estimate"] = estimate
 
-    # Fetch estimate items
-    conn = connector.get_db()
-    try:
-        cursor = connector._cursor(conn)
-        cursor.execute(connector._q(
-            'SELECT * FROM estimate_items WHERE estimate_id = ?'
-        ), (estimate_id,))
-        rows = cursor.fetchall()
-        items = [_row_to_dict(cursor, r) for r in rows]
-        items = [i for i in items if i]  # filter None
-    finally:
-        connector.release_db(conn)
-
+    # Always fetch items fresh from Holded API for convert operations.
+    # DB items have account stored as human-readable text ("Nombre (num)"),
+    # but Holded API needs the account ID. Fresh API items have the correct ID.
+    import logging
+    _logger = logging.getLogger(__name__)
+    items = connector.fetch_estimate_fresh(estimate_id)
     if not items:
-        # Fallback: fetch items directly from Holded API (DB may not have synced)
-        import logging
-        _logger = logging.getLogger(__name__)
-        _logger.warning(f"No items in local DB for estimate {estimate_id}, falling back to Holded API")
-        items = connector.fetch_estimate_fresh(estimate_id)
-        if not items:
-            errors.append({"field": "items", "msg": "Estimate has no line items (checked DB + API)"})
-            return (False, errors, context)
+        _logger.warning(f"API returned no items for estimate {estimate_id}, falling back to local DB")
+        conn = connector.get_db()
+        try:
+            cursor = connector._cursor(conn)
+            cursor.execute(connector._q(
+                'SELECT * FROM estimate_items WHERE estimate_id = ?'
+            ), (estimate_id,))
+            rows = cursor.fetchall()
+            items = [_row_to_dict(cursor, r) for r in rows]
+            items = [i for i in items if i]  # filter None
+        finally:
+            connector.release_db(conn)
+    if not items:
+        errors.append({"field": "items", "msg": "Estimate has no line items (checked API + DB)"})
+        return (False, errors, context)
 
     context["estimate_items"] = items
 
