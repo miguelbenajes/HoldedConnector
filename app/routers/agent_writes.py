@@ -1,11 +1,12 @@
 """
-Agent Write router — /api/agent/* endpoints (12 endpoints).
+Agent Write router — /api/agent/* endpoints.
 
 Fase 3 gateway-migrated write operations: create/update invoices, estimates,
-contacts, approve invoices, send documents, convert estimates.
+contacts, purchases, approve invoices, send documents, convert estimates,
+file attachments.
 Extracted from api.py (Fase 4 router split, Task 10).
 """
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List
@@ -14,8 +15,14 @@ import os
 import re as _re_mod
 import requests
 import logging
-from app.db.connection import db_context
+import time as _time
+from app.db.connection import db_context, _q, _cursor
 from app.domain.item_builder import build_holded_items, build_holded_items_with_accounts
+from app.holded.write_wrappers import (
+    create_purchase, attach_file_to_document, compute_file_hash,
+    ALLOWED_ATTACH_TYPES, MAX_ATTACH_SIZE,
+)
+from app.holded.sync_single import sync_single_document
 from write_gateway import gateway, RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -35,12 +42,29 @@ def _gw_error(result, default="Operation failed"):
     return errs[0].get("msg", default) if errs else default
 
 
+def _enrich_response(result, doc_type):
+    """Add holded_url and warnings to gateway success response."""
+    entity_id = result.get("entity_id", "")
+    response = {
+        "success": True,
+        "id": entity_id,
+        "safe_mode": result.get("safe_mode", False),
+    }
+    if entity_id:
+        plural = "estimates" if doc_type == "estimate" else "invoices"
+        response["holded_url"] = f"https://app.holded.com/invoicing/{plural}/{entity_id}"
+    if result.get("warnings"):
+        response["warnings"] = result["warnings"]
+    return response
+
+
 # ── Pydantic Models ─────────────────────────────────────────────────────
 
 class CreateDocumentBody(BaseModel):
     contact_id: str = Field(..., max_length=100)
     desc: Optional[str] = Field("", max_length=500)
     items: list = Field(..., max_length=100)  # [{name, units, price, tax?}]
+    date: Optional[int] = Field(None, description="Unix timestamp for document date. If omitted, defaults to now.")
 
 class CreateContactBody(BaseModel):
     name: str = Field(..., max_length=200)
@@ -89,10 +113,10 @@ def agent_create_invoice(body: CreateDocumentBody):
         if isinstance(result, dict) and result.get("error"):
             return {"success": False, "error": f"Failed to create invoice: {result.get('detail', 'Unknown error')}", "safe_mode": safe}
         return {"success": False, "error": "Failed to create invoice", "safe_mode": safe}
-    params = {"contact_id": body.contact_id, "desc": body.desc, "items": body.items}
+    params = {"contact_id": body.contact_id, "desc": body.desc, "items": body.items, "date": body.date}
     result = gateway.execute("create_invoice", params, source="rest_api", skip_confirm=True)
     if result.get("success"):
-        return {"success": True, "id": result.get("entity_id", ""), "safe_mode": result.get("safe_mode", False)}
+        return _enrich_response(result, "invoice")
     return {"success": False, "error": _gw_error(result, "Failed to create invoice"), "safe_mode": connector.SAFE_MODE}
 
 # ACCOUNT_IDS and _resolve_account moved to app.domain.item_builder
@@ -110,10 +134,10 @@ def agent_create_estimate(body: CreateDocumentBody):
         if isinstance(result, dict) and result.get("error"):
             return {"success": False, "error": f"Failed to create estimate: {result.get('detail', 'Unknown error')}", "safe_mode": safe}
         return {"success": False, "error": "Failed to create estimate", "safe_mode": safe}
-    params = {"contact_id": body.contact_id, "desc": body.desc, "items": body.items}
+    params = {"contact_id": body.contact_id, "desc": body.desc, "items": body.items, "date": body.date}
     result = gateway.execute("create_estimate", params, source="rest_api", skip_confirm=True)
     if result.get("success"):
-        return {"success": True, "id": result.get("entity_id", ""), "safe_mode": result.get("safe_mode", False)}
+        return _enrich_response(result, "estimate")
     return {"success": False, "error": _gw_error(result, "Failed to create estimate"), "safe_mode": connector.SAFE_MODE}
 
 @router.put("/api/agent/estimate/{estimate_id}")
@@ -401,3 +425,199 @@ def agent_convert_estimate(body: ConvertEstimateBody):
             "errors": result.get("errors", []),
         }
     )
+
+
+# ── Purchase (expense) endpoints ───────────────────────────────────────────
+
+class CreatePurchaseBody(BaseModel):
+    contact_id: Optional[str] = Field(None, max_length=100)
+    contact_name: Optional[str] = Field(None, max_length=200)
+    desc: Optional[str] = Field("", max_length=500)
+    notes: Optional[str] = Field(None, max_length=2000)
+    items: list = Field(..., max_length=100)
+    date: Optional[int] = None
+    tags: Optional[list] = None
+
+
+@router.post("/api/agent/purchase")
+def agent_create_purchase(body: CreatePurchaseBody):
+    """Create a purchase (supplier invoice / expense) in Holded.
+
+    Always created as draft. Never approveDoc.
+    Requires at least contact_id or contact_name.
+    """
+    if not body.contact_id and not body.contact_name:
+        return JSONResponse(status_code=400, content={
+            "success": False, "error": "Either contact_id or contact_name is required"
+        })
+
+    if not _USE_GATEWAY:
+        items_out = build_holded_items(body.items, sanitize=False, apply_default_iva=True)
+        payload = {
+            "items": items_out,
+            "date": body.date or int(_time.time()),
+        }
+        if body.contact_id:
+            payload["contactId"] = body.contact_id
+        if body.contact_name:
+            payload["contactName"] = body.contact_name
+        if body.desc:
+            payload["desc"] = body.desc
+        if body.notes:
+            payload["notes"] = body.notes
+        if body.tags:
+            payload["tags"] = body.tags
+
+        result = create_purchase(payload)
+        safe = connector.SAFE_MODE
+        if result and not isinstance(result, dict):
+            # Sync back the new purchase
+            try:
+                sync_single_document(result, "purchase", "purchase_invoices", "purchase_items", "purchase_id")
+            except Exception as e:
+                logger.warning(f"Sync-back failed for purchase {result}: {e}")
+            return {"success": True, "id": result, "safe_mode": safe}
+        if isinstance(result, dict) and result.get("error"):
+            return {"success": False, "error": f"Failed to create purchase: {result.get('detail', 'Unknown error')}", "safe_mode": safe}
+        return {"success": False, "error": "Failed to create purchase", "safe_mode": safe}
+
+    params = {
+        "items": body.items,
+        "date": body.date or int(_time.time()),
+    }
+    if body.contact_id:
+        params["contact_id"] = body.contact_id
+    if body.contact_name:
+        params["contact_name"] = body.contact_name
+    if body.desc:
+        params["desc"] = body.desc
+    if body.notes:
+        params["notes"] = body.notes
+    if body.tags:
+        params["tags"] = body.tags
+
+    result = gateway.execute("create_purchase", params, source="rest_api", skip_confirm=True)
+    if result.get("success"):
+        return {"success": True, "id": result.get("entity_id", ""), "safe_mode": result.get("safe_mode", False)}
+    return {"success": False, "error": _gw_error(result, "Failed to create purchase"), "safe_mode": connector.SAFE_MODE}
+
+
+# ── Document attachment endpoints ──────────────────────────────────────────
+
+@router.post("/api/agent/document/{doc_type}/{doc_id}/attach")
+async def agent_attach_file(doc_type: str, doc_id: str, file: UploadFile = File(...)):
+    """Attach a file to a Holded document.
+
+    Accepts multipart/form-data with a 'file' field.
+    Supported types: JPEG, PNG, PDF. Max size: 20MB.
+
+    Holded API limitations (confirmed probe 2026-04-11):
+    - No list/delete attachment API
+    - No attachment ID returned
+    - Attachments only visible in Holded web UI
+    - We track uploads locally in file_attachments table
+    """
+    # Validate doc_type
+    allowed_types = {"invoice", "estimate", "purchase", "creditnote", "proform"}
+    if doc_type not in allowed_types:
+        return JSONResponse(status_code=400, content={
+            "success": False, "error": f"Invalid doc_type. Allowed: {', '.join(sorted(allowed_types))}"
+        })
+
+    # Validate doc_id format
+    if not _re_mod.match(r'^[a-f0-9]{24}$', doc_id):
+        return JSONResponse(status_code=400, content={
+            "success": False, "error": "Invalid document ID (must be 24-char hex)"
+        })
+
+    # Validate content type
+    content_type = file.content_type or "application/octet-stream"
+    if content_type not in ALLOWED_ATTACH_TYPES:
+        return JSONResponse(status_code=400, content={
+            "success": False,
+            "error": f"File type '{content_type}' not supported. Allowed: JPEG, PNG, PDF"
+        })
+
+    # Read file content
+    file_bytes = await file.read()
+
+    if len(file_bytes) == 0:
+        return JSONResponse(status_code=400, content={
+            "success": False, "error": "Empty file"
+        })
+
+    if len(file_bytes) > MAX_ATTACH_SIZE:
+        mb = len(file_bytes) / (1024 * 1024)
+        return JSONResponse(status_code=400, content={
+            "success": False, "error": f"File too large ({mb:.1f}MB). Max: 20MB"
+        })
+
+    filename = file.filename or "attachment"
+
+    # Check for duplicate (same file + same document)
+    file_hash = compute_file_hash(file_bytes)
+    with db_context() as conn:
+        cur = _cursor(conn)
+        cur.execute(_q("SELECT id FROM file_attachments WHERE file_hash = ? AND document_id = ?"),
+                     (file_hash, doc_id))
+        existing = cur.fetchone()
+        if existing:
+            return JSONResponse(status_code=409, content={
+                "success": False,
+                "error": "This file is already attached to this document",
+                "hash": file_hash,
+            })
+
+    # Upload to Holded
+    result = attach_file_to_document(doc_type, doc_id, filename, file_bytes, content_type)
+
+    if result and not result.get("error"):
+        # Track locally
+        try:
+            with db_context() as conn:
+                cur = _cursor(conn)
+                cur.execute(_q(
+                    "INSERT INTO file_attachments (file_hash, document_type, document_id, filename, content_type, file_size) "
+                    "VALUES (?, ?, ?, ?, ?, ?)"
+                ), (file_hash, doc_type, doc_id, filename, content_type, len(file_bytes)))
+                conn.commit()
+        except Exception as e:
+            logger.warning(f"Failed to track attachment locally: {e}")
+
+        return {
+            "success": True,
+            "hash": file_hash,
+            "filename": result.get("filename", filename),
+            "size": len(file_bytes),
+            "safe_mode": result.get("dry_run", False),
+        }
+
+    error_detail = result.get("detail", "Unknown error") if result else "No response"
+    return JSONResponse(status_code=500, content={
+        "success": False, "error": f"Failed to attach file: {error_detail}"
+    })
+
+
+@router.get("/api/agent/document/{doc_type}/{doc_id}/attachments")
+def agent_list_attachments(doc_type: str, doc_id: str):
+    """List locally-tracked attachments for a document.
+
+    NOTE: This queries the local file_attachments table, NOT the Holded API
+    (which has no list endpoint). Only shows files uploaded through this API.
+    """
+    if not _re_mod.match(r'^[a-f0-9]{24}$', doc_id):
+        return JSONResponse(status_code=400, content={
+            "success": False, "error": "Invalid document ID"
+        })
+
+    with db_context() as conn:
+        cur = _cursor(conn)
+        cur.execute(_q(
+            "SELECT file_hash, filename, content_type, file_size, uploaded_at, uploaded_by "
+            "FROM file_attachments WHERE document_type = ? AND document_id = ? "
+            "ORDER BY uploaded_at DESC"
+        ), (doc_type, doc_id))
+        rows = cur.fetchall()
+
+    attachments = [dict(r) for r in rows]
+    return {"success": True, "count": len(attachments), "attachments": attachments}

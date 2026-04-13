@@ -63,16 +63,18 @@ def test_update_estimate_items_payload():
 # ── Response format compatibility tests ──────────────────────────────
 # These verify the SHAPE of responses, not actual API calls.
 
-def _mock_gateway_success(entity_id="abc123"):
+def _mock_gateway_success(entity_id="abc123", warnings=None):
     """Simulate a successful gateway.execute() response."""
-    return {
+    result = {
         "success": True,
         "entity_id": entity_id,
         "entity_type": "invoice",
         "doc_number": "F-001",
         "audit_id": 42,
         "safe_mode": False,
+        "warnings": warnings or [],
     }
+    return result
 
 
 def _mock_gateway_error(msg="Test error"):
@@ -84,17 +86,52 @@ def _mock_gateway_error(msg="Test error"):
 
 
 def test_invoice_response_format_success():
-    """POST /api/agent/invoice must return {success, id, safe_mode}."""
+    """POST /api/agent/invoice must return {success, id, safe_mode, holded_url}."""
+    from app.routers.agent_writes import _enrich_response
     gw_result = _mock_gateway_success("inv123")
-    # Simulate what the endpoint does with a success result
-    response = {
-        "success": True,
-        "id": gw_result.get("entity_id", ""),
-        "safe_mode": gw_result.get("safe_mode", False),
-    }
-    assert "id" in response  # NOT entity_id
-    assert "safe_mode" in response
+    response = _enrich_response(gw_result, "invoice")
+    assert response["success"] is True
     assert response["id"] == "inv123"
+    assert "safe_mode" in response
+    assert response["holded_url"] == "https://app.holded.com/invoicing/invoices/inv123"
+    assert "warnings" not in response  # empty warnings list → key omitted
+
+
+def test_enrich_response_invoice_url():
+    """_enrich_response builds correct Holded URL for invoices."""
+    from app.routers.agent_writes import _enrich_response
+    result = _mock_gateway_success("abc999")
+    response = _enrich_response(result, "invoice")
+    assert "invoices" in response["holded_url"]
+    assert "abc999" in response["holded_url"]
+
+
+def test_enrich_response_estimate_url():
+    """_enrich_response builds correct Holded URL for estimates."""
+    from app.routers.agent_writes import _enrich_response
+    result = _mock_gateway_success("est456")
+    response = _enrich_response(result, "estimate")
+    assert "estimates" in response["holded_url"]
+    assert "est456" in response["holded_url"]
+
+
+def test_enrich_response_includes_warnings_when_present():
+    """_enrich_response includes warnings key only when non-empty."""
+    from app.routers.agent_writes import _enrich_response
+    warning = {"level": "warning", "code": "DATE_IS_TODAY", "msg": "Date is today"}
+    result = _mock_gateway_success("abc", warnings=[warning])
+    response = _enrich_response(result, "invoice")
+    assert "warnings" in response
+    assert len(response["warnings"]) == 1
+    assert response["warnings"][0]["code"] == "DATE_IS_TODAY"
+
+
+def test_enrich_response_no_url_when_no_entity_id():
+    """_enrich_response omits holded_url when entity_id is empty."""
+    from app.routers.agent_writes import _enrich_response
+    result = {"success": True, "entity_id": "", "safe_mode": False, "warnings": []}
+    response = _enrich_response(result, "invoice")
+    assert "holded_url" not in response
 
 
 def test_invoice_response_format_error():

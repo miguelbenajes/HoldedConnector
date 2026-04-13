@@ -462,6 +462,7 @@ class WriteGateway:
             "doc_number": result.get("invoiceNum", ""),
             "audit_id": audit_id,
             "safe_mode": is_dry_run,
+            "warnings": preview_result.get("warnings", []),
         }
 
     def _execute_convert_estimate(self, params, context, preview_result,

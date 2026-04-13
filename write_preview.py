@@ -7,6 +7,7 @@ Receives pre-fetched data from validation context to avoid duplicate queries.
 
 import logging
 import time
+from datetime import datetime, timezone
 import connector
 from write_validators import _row_to_dict
 
@@ -162,6 +163,63 @@ def _get_item_warnings(calculated_items, high_amount_threshold=5000):
     return warnings
 
 
+def _get_document_warnings(params, context):
+    """Generate document-level warnings: date, retention, price modifications."""
+    warnings = []
+    contact = context.get("contact", {})
+    items = params.get("items", [])
+    products_map = context.get("products", {})
+
+    # Date check: if date is today or not provided, warn
+    doc_date = params.get("date")
+    if doc_date:
+        doc_dt = datetime.fromtimestamp(doc_date, tz=timezone.utc)
+        now_dt = datetime.now(tz=timezone.utc)
+        if doc_dt.date() == now_dt.date():
+            warnings.append({
+                "level": "warning",
+                "code": "DATE_IS_TODAY",
+                "msg": "Document date is today. Should it be the shooting/service date instead?"
+            })
+    else:
+        warnings.append({
+            "level": "warning",
+            "code": "DATE_NOT_SET",
+            "msg": "No date provided — will default to today. Consider setting the shooting/service date."
+        })
+
+    # Retention check: Spanish contact without IRPF retention on any item
+    country = (contact.get("bill_country") or contact.get("country") or "").upper()
+    if country in ("ES", "ESPAÑA", "SPAIN"):
+        has_retention = any(
+            item.get("retention") and float(item.get("retention", 0)) > 0
+            for item in items
+        )
+        if not has_retention:
+            warnings.append({
+                "level": "warning",
+                "code": "MISSING_IRPF_RETENTION",
+                "msg": "Spanish contact but no items have IRPF retention. Does retention apply? (15% services, 19% rental)"
+            })
+
+    # Price modification check: item price differs from catalog without discount
+    for idx, item in enumerate(items):
+        pid = item.get("product_id")
+        if pid and pid in products_map:
+            catalog_price = float(products_map[pid].get("price") or 0)
+            item_price = float(item.get("price") or 0)
+            discount = float(item.get("discount") or 0)
+            if catalog_price > 0 and item_price != catalog_price and discount == 0:
+                warnings.append({
+                    "level": "warning",
+                    "code": "PRICE_MODIFIED_DIRECTLY",
+                    "msg": (f"Item '{item.get('name', '')}' price ({item_price}€) differs from "
+                            f"catalog ({catalog_price}€) with no discount. Use original price + discount instead?")
+                })
+
+    return warnings
+
+
 def _check_duplicate_recent(contact_id, grand_total, window_hours=24):
     """Check for similar documents created recently."""
     if not contact_id or grand_total <= 0:
@@ -279,6 +337,9 @@ def build_preview(operation, params, context=None):
 
         warnings.extend(_get_contact_warnings(contact, operation.split("_")[1]))
         warnings.extend(_get_item_warnings(calculated))
+
+        doc_warnings = _get_document_warnings(params, context or {})
+        warnings.extend(doc_warnings)
 
         dup = _check_duplicate_recent(contact.get("id"), grand_total)
         if dup:
