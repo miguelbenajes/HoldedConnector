@@ -9,6 +9,10 @@ import re
 import logging
 import time
 import connector
+from app.holded.client import (
+    PROYECTO_PRODUCT_ID, PROYECTO_PRODUCT_NAME,
+    SHOOTING_DATES_PRODUCT_ID, SHOOTING_DATES_PRODUCT_NAME,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +144,9 @@ def _fetch_contact(contact_id):
             "name": api_data.get("name", ""),
             "code": api_data.get("code", ""),
             "email": api_data.get("email", ""),
+            # Fiscal fields needed for contact completeness check
+            "vatnumber": api_data.get("vatnumber", ""),
+            "bill_country": api_data.get("bill_country", "") or api_data.get("country", ""),
         }
     return None
 
@@ -218,6 +225,53 @@ def validate_create_estimate(params):
     return _validate_create_document(params, "estimate")
 
 
+def _validate_required_items(items):
+    """Check that Proyect REF and Shooting Dates items are present.
+    Both are mandatory for estimates and invoices.
+    Detection: by product_id (reliable) or by name (fallback, case-insensitive).
+    """
+    errors = []
+    has_proyect_ref = False
+    has_shooting_dates = False
+    proyect_ref_has_desc = False
+
+    for item in items:
+        pid = item.get("product_id", "")
+        name = (item.get("name") or "").strip().lower()
+
+        if pid == PROYECTO_PRODUCT_ID or name.startswith(PROYECTO_PRODUCT_NAME):
+            has_proyect_ref = True
+            desc = (item.get("desc") or item.get("description") or "").strip()
+            if desc:
+                proyect_ref_has_desc = True
+
+        if pid == SHOOTING_DATES_PRODUCT_ID or name.startswith(SHOOTING_DATES_PRODUCT_NAME):
+            has_shooting_dates = True
+
+    if not has_proyect_ref:
+        errors.append({
+            "field": "items",
+            "msg": (f"Missing required 'Proyect REF' item. "
+                    f"Add an item with product_id='{PROYECTO_PRODUCT_ID}' "
+                    f"and the project code (e.g. CLIENT-DDMMYYYY) in the description field.")
+        })
+    elif not proyect_ref_has_desc:
+        errors.append({
+            "field": "items",
+            "msg": "Proyect REF item found but description is empty. Set the project code (e.g. LLUMM-160426) in the desc field."
+        })
+
+    if not has_shooting_dates:
+        errors.append({
+            "field": "items",
+            "msg": (f"Missing required 'Shooting Dates' item. "
+                    f"Add an item with product_id='{SHOOTING_DATES_PRODUCT_ID}' "
+                    f"and the shooting date(s) in the description field.")
+        })
+
+    return errors
+
+
 def _validate_create_document(params, doc_type):
     """Shared validation for invoice/estimate creation."""
     errors = []
@@ -234,6 +288,22 @@ def _validate_create_document(params, doc_type):
             errors.append({"field": "contact_id", "msg": f"Contact '{contact_id}' not found in database"})
         else:
             context["contact"] = contact
+
+            # Contact fiscal completeness check
+            contact_name = contact.get("name", "Unknown")
+            vatnumber = contact.get("vatnumber", "") or contact.get("code", "") or ""
+            bill_country = contact.get("bill_country") or contact.get("country") or ""
+
+            if not vatnumber:
+                errors.append({
+                    "field": "contact_id",
+                    "msg": f"Contact '{contact_name}' is missing NIF/CIF (vatnumber). Update in Holded before creating documents."
+                })
+            if not bill_country:
+                errors.append({
+                    "field": "contact_id",
+                    "msg": f"Contact '{contact_name}' is missing country. Update in Holded before creating documents."
+                })
 
     # Items validation
     items = params.get("items", [])
@@ -274,6 +344,10 @@ def _validate_create_document(params, doc_type):
             pid = item.get("product_id")
             if pid and pid not in products_map:
                 errors.append({"field": f"items[{idx}].product_id", "msg": f"Product '{pid}' not found"})
+
+        # Required items check (Proyect REF + Shooting Dates)
+        req_errors = _validate_required_items(items)
+        errors.extend(req_errors)
 
     # Date validation (optional)
     err = _validate_date(params.get("date"), "date")
