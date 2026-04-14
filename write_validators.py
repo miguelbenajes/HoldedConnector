@@ -252,7 +252,19 @@ def _validate_retention(items, contact, products_map):
             continue
 
         retention = float(item.get("retention", 0) or 0)
-        is_product = pid in products_map if pid else False
+
+        if not pid:
+            # No product_id → can't determine type → require it
+            errors.append({
+                "field": f"items[{idx}].product_id",
+                "msg": (f"Item '{item.get('name', '')}' has no product_id. For Spanish contacts, "
+                        f"product_id is required to determine IRPF rate "
+                        f"(products/rental=19%, services=15%). "
+                        f"Search the product in Holded first and include its ID.")
+            })
+            continue
+
+        is_product = pid in products_map
 
         if is_product:
             # Equipment rental → 19% IRPF
@@ -263,7 +275,7 @@ def _validate_retention(items, contact, products_map):
                             f"for Spanish contact — requires 19% IRPF retention, got {retention}%.")
                 })
         else:
-            # Service/fee → 15% IRPF
+            # Not in products catalog → service/fee → 15% IRPF
             if retention != 15:
                 errors.append({
                     "field": f"items[{idx}].retention",
