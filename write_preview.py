@@ -188,19 +188,8 @@ def _get_document_warnings(params, context):
             "msg": "No date provided — will default to today. Consider setting the shooting/service date."
         })
 
-    # Retention check: Spanish contact without IRPF retention on any item
-    country = (contact.get("bill_country") or contact.get("country") or "").upper()
-    if country in ("ES", "ESPAÑA", "SPAIN"):
-        has_retention = any(
-            item.get("retention") and float(item.get("retention", 0)) > 0
-            for item in items
-        )
-        if not has_retention:
-            warnings.append({
-                "level": "warning",
-                "code": "MISSING_IRPF_RETENTION",
-                "msg": "Spanish contact but no items have IRPF retention. Does retention apply? (15% services, 19% rental)"
-            })
+    # Retention: now enforced as hard gate in write_validators._validate_retention()
+    # No soft warning needed — validator rejects if wrong.
 
     # Price modification check: item price differs from catalog without discount
     for idx, item in enumerate(items):

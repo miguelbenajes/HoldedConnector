@@ -146,7 +146,9 @@ def _fetch_contact(contact_id):
             "email": api_data.get("email", ""),
             # Fiscal fields needed for contact completeness check
             "vatnumber": api_data.get("vatnumber", ""),
-            "bill_country": api_data.get("bill_country", "") or api_data.get("country", ""),
+            "bill_country": (api_data.get("billAddress") or {}).get("countryCode", "")
+                or (api_data.get("billAddress") or {}).get("country", "")
+                or api_data.get("country", ""),
         }
     return None
 
@@ -223,6 +225,53 @@ def validate_create_invoice(params):
 def validate_create_estimate(params):
     """Validate create_estimate parameters. Returns (is_valid, errors, context)."""
     return _validate_create_document(params, "estimate")
+
+
+def _validate_retention(items, contact, products_map):
+    """Enforce IRPF retention rules for Spanish contacts.
+    - Products (rental equipment): 19% IRPF
+    - Services (fees): 15% IRPF
+    - Items with price=0 (Proyect REF, Shooting Dates): exempt
+    For non-Spanish contacts: no retention required.
+    """
+    country = (contact.get("bill_country") or contact.get("country") or "").upper()
+    if country not in ("ES", "ESPAÑA", "SPAIN"):
+        return []
+
+    errors = []
+    for idx, item in enumerate(items):
+        price = float(item.get("price", 0) or 0)
+        if price == 0:
+            continue  # exempt: tracking items (Proyect REF, Shooting Dates)
+
+        pid = item.get("product_id", "")
+        name = (item.get("name") or "").strip().lower()
+
+        # Skip special tracking items by name too
+        if name.startswith(PROYECTO_PRODUCT_NAME) or name.startswith(SHOOTING_DATES_PRODUCT_NAME):
+            continue
+
+        retention = float(item.get("retention", 0) or 0)
+        is_product = pid in products_map if pid else False
+
+        if is_product:
+            # Equipment rental → 19% IRPF
+            if retention != 19:
+                errors.append({
+                    "field": f"items[{idx}].retention",
+                    "msg": (f"Item '{item.get('name', '')}' is a product (rental equipment) "
+                            f"for Spanish contact — requires 19% IRPF retention, got {retention}%.")
+                })
+        else:
+            # Service/fee → 15% IRPF
+            if retention != 15:
+                errors.append({
+                    "field": f"items[{idx}].retention",
+                    "msg": (f"Item '{item.get('name', '')}' is a service/fee "
+                            f"for Spanish contact — requires 15% IRPF retention, got {retention}%.")
+                })
+
+    return errors
 
 
 def _validate_required_items(items):
@@ -348,6 +397,12 @@ def _validate_create_document(params, doc_type):
         # Required items check (Proyect REF + Shooting Dates)
         req_errors = _validate_required_items(items)
         errors.extend(req_errors)
+
+        # IRPF retention check for Spanish contacts
+        contact = context.get("contact")
+        if contact:
+            ret_errors = _validate_retention(items, contact, products_map)
+            errors.extend(ret_errors)
 
     # Date validation (optional)
     err = _validate_date(params.get("date"), "date")
