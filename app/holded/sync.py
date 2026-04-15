@@ -268,7 +268,8 @@ def sync_contacts():
             addr = item.get('billAddress') or {}
             vals = (item.get('id'), item.get('name'), item.get('email'), item.get('type'),
                     item.get('code'), item.get('vat'), item.get('phone'), item.get('mobile'),
-                    addr.get('country', ''), addr.get('address', ''), addr.get('city', ''),
+                    addr.get('countryCode', '') or addr.get('country', ''),
+                    addr.get('address', ''), addr.get('city', ''),
                     addr.get('province', ''), addr.get('postalCode', ''),
                     item.get('tradeName', ''), item.get('discount', 0))
             if _USE_SQLITE:

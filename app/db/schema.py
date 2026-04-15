@@ -429,6 +429,21 @@ def _init_db_inner(conn):
         created_at TEXT DEFAULT ({_now})
     )''')
 
+    # ── File attachment tracking ────────────────────────────────────────────
+    # Holded has no list/delete attachment API — we track locally.
+    cursor.execute(f'''CREATE TABLE IF NOT EXISTS file_attachments (
+        id {_serial},
+        file_hash TEXT NOT NULL,
+        document_type TEXT NOT NULL,
+        document_id TEXT NOT NULL,
+        filename TEXT,
+        content_type TEXT,
+        file_size INTEGER,
+        uploaded_at TEXT DEFAULT ({_now}),
+        uploaded_by TEXT DEFAULT 'api',
+        UNIQUE(file_hash, document_id)
+    )''')
+
     # Audit log indexes (PG only)
     if not _USE_SQLITE:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON write_audit_log(timestamp)')

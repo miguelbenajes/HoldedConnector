@@ -92,9 +92,9 @@ def _build_contact_result(raw: dict) -> dict:
 
     return {
         "id":         raw.get("id", ""),
-        "name":       raw.get("name", "").strip(),
-        "tradeName":  raw.get("tradeName", "").strip(),
-        "vatnumber":  raw.get("vatnumber", "").strip(),
+        "name":       (raw.get("name") or "").strip(),
+        "tradeName":  (raw.get("tradeName") or "").strip(),
+        "vatnumber":  (raw.get("vatnumber") or "").strip(),
         "address":    billing.get("address") or raw.get("address", ""),
         "city":       billing.get("city") or raw.get("city", ""),
         "postalCode": billing.get("postalCode") or raw.get("postalCode", ""),
@@ -118,8 +118,8 @@ def _score_contact(query: str, contact: dict) -> float:
     Exact match on either field returns 1.0.
     """
     q = query.lower().strip()
-    name = contact.get("name", "").lower().strip()
-    trade = contact.get("tradeName", "").lower().strip()
+    name = (contact.get("name") or "").lower().strip()
+    trade = (contact.get("tradeName") or "").lower().strip()
 
     # Exact match wins immediately
     if q == name or q == trade:

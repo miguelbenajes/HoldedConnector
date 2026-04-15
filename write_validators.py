@@ -253,35 +253,33 @@ def _validate_retention(items, contact, products_map):
 
         retention = float(item.get("retention", 0) or 0)
 
-        if not pid:
-            # No product_id → can't determine type → require it
-            errors.append({
-                "field": f"items[{idx}].product_id",
-                "msg": (f"Item '{item.get('name', '')}' has no product_id. For Spanish contacts, "
-                        f"product_id is required to determine IRPF rate "
-                        f"(products/rental=19%, services=15%). "
-                        f"Search the product in Holded first and include its ID.")
-            })
+        # If caller provides explicit valid retention, trust it
+        if retention in (15, 19):
             continue
 
-        is_product = pid in products_map
-
-        if is_product:
-            # Equipment rental → 19% IRPF
-            if retention != 19:
-                errors.append({
-                    "field": f"items[{idx}].retention",
-                    "msg": (f"Item '{item.get('name', '')}' is a product (rental equipment) "
-                            f"for Spanish contact — requires 19% IRPF retention, got {retention}%.")
-                })
+        # Retention missing or invalid (0, wrong value)
+        if pid and pid in products_map:
+            # Known product → rental → must be 19%
+            errors.append({
+                "field": f"items[{idx}].retention",
+                "msg": (f"Item '{item.get('name', '')}' is a product (rental equipment) "
+                        f"for Spanish contact — requires 19% IRPF retention, got {retention}%.")
+            })
+        elif pid:
+            # product_id provided but not in local catalog — can't classify
+            # Require explicit retention
+            errors.append({
+                "field": f"items[{idx}].retention",
+                "msg": (f"Item '{item.get('name', '')}' has product_id but not in local catalog. "
+                        f"Set retention explicitly: 19 for rental equipment, 15 for services.")
+            })
         else:
-            # Not in products catalog → service/fee → 15% IRPF
-            if retention != 15:
-                errors.append({
-                    "field": f"items[{idx}].retention",
-                    "msg": (f"Item '{item.get('name', '')}' is a service/fee "
-                            f"for Spanish contact — requires 15% IRPF retention, got {retention}%.")
-                })
+            # No product_id, no retention — can't determine anything
+            errors.append({
+                "field": f"items[{idx}].retention",
+                "msg": (f"Item '{item.get('name', '')}' needs IRPF retention for Spanish contact. "
+                        f"Set retention: 19 for rental equipment, 15 for services.")
+            })
 
     return errors
 

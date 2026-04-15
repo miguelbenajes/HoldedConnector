@@ -274,8 +274,25 @@ PUT /documents/{docType}/{documentId}/pipeline
 
 ```
 POST /documents/{docType}/{documentId}/attach
-GET  /documents/{docType}/{documentId}/attachments
 ```
+
+**Probed 2026-04-11 — Actual behavior:**
+
+| Aspect | Result |
+|--------|--------|
+| **Endpoint** | `POST /documents/{docType}/{documentId}/attach` (NOT `/attachments`) |
+| **Content-Type** | `multipart/form-data` (field name: `file`) |
+| **Response** | `201 {"status": 1, "info": "Attachment uploaded"}` |
+| **No attachment ID** | Response does NOT include an ID for the uploaded file |
+| **Formats tested** | JPEG ✓, PNG ✓, PDF ✓ |
+| **Size limit** | ≥20MB (tested up to 20MB, all succeeded) |
+| **docTypes tested** | `purchase` ✓, `estimate` ✓ |
+| **List attachments** | NOT AVAILABLE — neither GET `/attach` nor `/attachments` returns JSON |
+| **Delete attachments** | NOT AVAILABLE — no endpoint discovered, no attachment ID returned |
+| **Document detail** | Attachments NOT visible in GET `/documents/{type}/{id}` response |
+| **Visibility** | Attachments only visible in Holded web UI |
+
+**WARNING:** The `/attachments` path (with 's') returns 200 with HTML (Holded SPA catch-all), NOT the API. Always use `/attach` (without 's').
 
 ### List Payment Methods
 

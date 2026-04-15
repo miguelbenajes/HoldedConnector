@@ -133,6 +133,75 @@ def put_data(endpoint, payload):
         logger.error(f"Network error putting to {endpoint}: {e}")
         return {"error": True, "status_code": 0, "detail": str(e)}
 
+def post_multipart(endpoint, file_bytes, filename, content_type, max_retries=3):
+    """POST multipart/form-data to Holded API (file uploads).
+
+    Used for document attachments. Sends the file as multipart/form-data
+    with field name 'file'. Does NOT set Content-Type header — requests
+    auto-detects the boundary for multipart.
+
+    Args:
+        endpoint: API path (e.g., /invoicing/v1/documents/purchase/{id}/attach)
+        file_bytes: Raw file content (bytes)
+        filename: Original filename (sanitized before sending)
+        content_type: MIME type (image/jpeg, image/png, application/pdf)
+        max_retries: Number of retries on 429/5xx (default: 3)
+
+    Returns: dict with response or {'error': True, ...}
+    """
+    if SAFE_MODE:
+        logger.info(f"[SAFE MODE] Intercepted multipart POST to {endpoint}")
+        return {"status": 1, "info": "Dry run successful (file upload)", "dry_run": True}
+
+    # Validate file size (20MB max — Holded confirmed up to 20MB)
+    max_size = 20 * 1024 * 1024
+    if len(file_bytes) > max_size:
+        return {"error": True, "status_code": 413, "detail": f"File too large ({len(file_bytes)} bytes, max {max_size})"}
+
+    url = f"{BASE_URL}{endpoint}"
+    # Only send API key header — NO Content-Type (requests sets multipart boundary)
+    headers_key_only = {"key": HEADERS.get("key", "")}
+    retry_delay = 2
+
+    for attempt in range(max_retries):
+        try:
+            files = {"file": (filename, file_bytes, content_type)}
+            response = requests.post(url, headers=headers_key_only, files=files, timeout=60)
+
+            if response.status_code in (200, 201):
+                # Holded returns HTML for unknown endpoints — verify it's JSON
+                ct = response.headers.get("content-type", "")
+                if "application/json" in ct:
+                    return response.json()
+                else:
+                    logger.error(f"Attachment upload returned non-JSON ({ct}): {response.text[:200]}")
+                    return {"error": True, "status_code": response.status_code,
+                            "detail": "Holded returned HTML instead of JSON — endpoint may not exist"}
+            elif response.status_code == 429:
+                wait = retry_delay * (attempt + 1)
+                logger.warning(f"Rate limit (429) uploading to {endpoint}, waiting {wait}s (attempt {attempt+1})")
+                time.sleep(wait)
+                continue
+            elif response.status_code >= 500:
+                wait = retry_delay * (attempt + 1)
+                logger.warning(f"Server error ({response.status_code}) uploading to {endpoint}, retry {attempt+1}")
+                time.sleep(wait)
+                continue
+            else:
+                logger.error(f"Error uploading to {endpoint}: {response.status_code} - {response.text[:200]}")
+                return {"error": True, "status_code": response.status_code, "detail": response.text[:500]}
+        except requests.exceptions.Timeout:
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+                continue
+            return {"error": True, "status_code": 0, "detail": "Request timed out (60s)"}
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error uploading to {endpoint}: {e}")
+            return {"error": True, "status_code": 0, "detail": str(e)}
+
+    return {"error": True, "status_code": 0, "detail": f"Failed after {max_retries} retries"}
+
+
 def delete_data(endpoint):
     """DELETE on Holded API. Returns dict with 'error' key on failure."""
     if SAFE_MODE:
