@@ -23,6 +23,7 @@ from app.holded.write_wrappers import (
     ALLOWED_ATTACH_TYPES, MAX_ATTACH_SIZE,
 )
 from app.holded.sync_single import sync_single_document
+from app.domain.smart_estimate import create_smart_estimate
 from write_gateway import gateway, RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -97,8 +98,86 @@ class UpdateContactBody(BaseModel):
 class ConvertEstimateBody(BaseModel):
     estimate_id: str = Field(..., min_length=24, max_length=24, pattern=r'^[a-f0-9]{24}$')
 
+class SmartEstimateProductInput(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    units: Optional[float] = 1
+    price: Optional[float] = None
+    item_type: Optional[str] = Field(None, pattern=r'^(rental|service|expense)$')
+    create_if_missing: Optional[bool] = False
+
+class SmartEstimateBody(BaseModel):
+    client_name: Optional[str] = Field(None, max_length=200)
+    client_id: Optional[str] = Field(None, max_length=24)
+    products: List[SmartEstimateProductInput] = Field(..., max_length=50)
+    shooting_date: str = Field(..., min_length=3, max_length=50)
+    notes: Optional[str] = Field("", max_length=500)
+
 
 # ── Endpoints ───────────────────────────────────────────────────────────
+
+@router.post("/api/agent/estimate/smart")
+def agent_create_estimate_smart(body: SmartEstimateBody):
+    """Create estimate with all business rules applied automatically.
+
+    Resolves contact, products, IRPF, accounts, adds tracking items.
+    Returns complete estimate with PDF, URL, and warnings.
+
+    [IMPROVED: finding #H4] — routes through audit logging like existing
+    gateway endpoints. Does NOT use the full Write Gateway because it has
+    its own orchestration (resolvers + fiscal), but logs to audit_logs table
+    for consistency with other write operations.
+    """
+    if not body.client_name and not body.client_id:
+        return JSONResponse(
+            {"success": False, "error_type": "validation_failed",
+             "error": "Either client_name or client_id is required"},
+            status_code=422)
+
+    input_data = {
+        "client_name": body.client_name,
+        "client_id": body.client_id,
+        "products": [p.model_dump() for p in body.products],
+        "shooting_date": body.shooting_date,
+        "notes": body.notes or "",
+    }
+
+    # [IMPROVED: finding #H4] — audit log for write operation (pre-execution)
+    audit_id = None
+    try:
+        audit_id = connector.insert_audit_log(
+            source="rest_api",
+            operation="create_estimate_smart",
+            entity_type="estimate",
+            payload_sent=input_data,
+        )
+    except Exception as e:
+        logger.warning(f"Audit log insert failed: {e}")
+
+    result = create_smart_estimate(input_data)
+
+    # [IMPROVED: finding #H4] — audit log update (post-execution)
+    if audit_id:
+        try:
+            if result.get("success"):
+                connector.update_audit_log(
+                    audit_id, status="success",
+                    entity_id=result.get("id", ""),
+                    response_received={"id": result.get("id"), "project_code": result.get("project_code")},
+                )
+            else:
+                connector.update_audit_log(
+                    audit_id, status="failed",
+                    error_detail=result.get("error", "Unknown error"),
+                )
+        except Exception as e:
+            logger.warning(f"Audit log update failed: {e}")
+
+    if not result.get("success"):
+        status = 422 if result.get("error_type") != "holded_api_error" else 502
+        return JSONResponse(result, status_code=status)
+
+    return result
+
 
 @router.post("/api/agent/invoice")
 def agent_create_invoice(body: CreateDocumentBody):
@@ -267,7 +346,7 @@ def agent_get_contact(contact_id: str):
     missing = []
     if not contact.get("code"): missing.append("NIF/CIF (code)")
     if not contact.get("email"): missing.append("email")
-    if not contact.get("country"): missing.append("country (pais)")
+    if not (contact.get("country") or "").strip(): missing.append("country (pais)")
     if not contact.get("address"): missing.append("address (direccion)")
 
     # Determine tax regime

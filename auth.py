@@ -340,6 +340,8 @@ PERMISSION_MATRIX = [
 
     # Estimates — read
     ("GET", r"^/api/entities/estimates", {"admin", "accountant"}),
+    # Smart estimates — write (includes contact resolution + product creation)
+    ("POST", r"^/api/agent/estimate/smart", {"admin"}),
     # Estimates — write
     ("POST", r"^/api/agent/estimate", {"admin"}),
 
