@@ -86,20 +86,20 @@ def _build_contact_result(raw: dict) -> dict:
     id, name, trading name, VAT, address, city, postal code, country,
     contact type, and email.
     """
-    # Holded stores the primary billing address inside the 'billing' block;
-    # fall back to top-level fields when the sub-block is absent.
-    billing = raw.get("billing") or {}
+    # Holded stores billing address in 'billAddress' (not 'billing').
+    # Fall back to top-level fields when sub-block is absent.
+    bill = raw.get("billAddress") or raw.get("billing") or {}
 
     return {
         "id":         raw.get("id", ""),
         "name":       (raw.get("name") or "").strip(),
         "tradeName":  (raw.get("tradeName") or "").strip(),
-        "vatnumber":  (raw.get("vatnumber") or "").strip(),
-        "address":    billing.get("address") or raw.get("address", ""),
-        "city":       billing.get("city") or raw.get("city", ""),
-        "postalCode": billing.get("postalCode") or raw.get("postalCode", ""),
-        "country":    billing.get("country") or raw.get("country", ""),
-        "type":       raw.get("type", ""),       # 'client' | 'supplier' | 'both'
+        "vatnumber":  (raw.get("vatnumber") or raw.get("code") or "").strip(),
+        "address":    (bill.get("address") or raw.get("address") or "").strip(),
+        "city":       (bill.get("city") or raw.get("city") or "").strip(),
+        "postalCode": (bill.get("postalCode") or raw.get("postalCode") or "").strip(),
+        "country":    (bill.get("countryCode") or bill.get("country") or raw.get("country") or "").strip().upper(),
+        "type":       raw.get("type", ""),
         "email":      raw.get("email", ""),
     }
 

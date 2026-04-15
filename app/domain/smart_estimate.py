@@ -64,9 +64,9 @@ def create_smart_estimate(input_data: dict) -> dict:
     else:
         contact_result = resolve_contact(client_name)
 
-    if not contact_result["ok"]:
+    if not contact_result.get("ok"):
         return _error(contact_result.get("error_type", "contact_not_found"),
-                      contact_result["error"],
+                      contact_result.get("error", "Contact resolution failed"),
                       contact_result.get("matches"))
 
     contact = contact_result["contact"]
@@ -81,15 +81,15 @@ def create_smart_estimate(input_data: dict) -> dict:
     # ── Step 2: Resolve products ─────────────────────────────────────
     products_result = resolve_products(input_data.get("products", []))
 
-    if not products_result["ok"]:
+    if not products_result.get("ok"):
         return _error(products_result.get("error_type", "product_not_found"),
-                      products_result["error"],
+                      products_result.get("error", products_result.get("message", "Product resolution failed")),
                       products_result.get("details"))
 
-    resolved_items = products_result["items"]
+    resolved_items = products_result.get("items", [])
 
     # ── Step 3: Compute fiscality per item ───────────────────────────
-    tax_regime = determine_tax_regime(contact["country"])
+    tax_regime = determine_tax_regime(contact.get("country", ""))
     items_for_holded = []
 
     # [IMPROVED: finding #M1] — compute fiscality once per item, store result
@@ -98,9 +98,9 @@ def create_smart_estimate(input_data: dict) -> dict:
         fiscal = compute_item_fiscality(item["item_type"], tax_regime)
         item_fiscalities.append(fiscal)
         holded_item = {
-            "name": item["name"],
-            "units": item["units"],
-            "price": item["price"],
+            "name": item.get("name", ""),
+            "units": item.get("units", 1),
+            "price": item.get("price", 0),
             "tax": fiscal["tax"],
             "retention": fiscal["retention"],
         }
@@ -194,13 +194,13 @@ def create_smart_estimate(input_data: dict) -> dict:
     holded_url = f"https://app.holded.com/sales/estimates#open:estimate-{estimate_id}"
 
     # [IMPROVED: finding #M1] — reuse pre-computed fiscalities instead of calling 4x per item
-    subtotal = sum(item["price"] * item["units"] for item in resolved_items)
+    subtotal = sum(item.get("price", 0) * item.get("units", 1) for item in resolved_items)
     iva_total = sum(
-        item["price"] * item["units"] * fiscal["tax"] / 100
+        item.get("price", 0) * item.get("units", 1) * fiscal["tax"] / 100
         for item, fiscal in zip(resolved_items, item_fiscalities)
     )
     irpf_total = sum(
-        item["price"] * item["units"] * fiscal["retention"] / 100
+        item.get("price", 0) * item.get("units", 1) * fiscal["retention"] / 100
         for item, fiscal in zip(resolved_items, item_fiscalities)
     )
 
@@ -211,12 +211,12 @@ def create_smart_estimate(input_data: dict) -> dict:
         "pdf_base64": pdf_base64,
         "project_code": project_code,
         "contact": {
-            "name": contact["name"],
-            "country": contact["country"],
+            "name": contact.get("name", ""),
+            "country": contact.get("country", ""),
             "tax_regime": tax_regime,
         },
         "items_summary": [
-            {"name": item["name"], "units": item["units"], "price": item["price"],
+            {"name": item.get("name", ""), "units": item.get("units", 1), "price": item.get("price", 0),
              "tax": fiscal["tax"], "retention": fiscal["retention"]}
             for item, fiscal in zip(resolved_items, item_fiscalities)
         ],

@@ -285,13 +285,15 @@ def _resolve_single(item: dict, products: list) -> dict:
     create_if_missing = item.get("create_if_missing", False)
 
     # ── Scenario B: Loose line item ──────────────────────────────────────────
-    # Condition: explicit price + item_type is "expense" (or similar non-catalog type).
-    # These are pass-through lines (taxi, mileage, misc expenses).
-    if price is not None and item_type in ("expense", "passthrough"):
+    # Condition: explicit price + item_type specified.
+    # Any item with both price AND item_type is a loose line — no catalog lookup.
+    # Covers: expense (taxi), service (fee), rental (equipment not in catalog), passthrough.
+    if price is not None and item_type in ("expense", "passthrough", "service", "rental"):
         logger.debug("product_resolver: loose line item '%s' (type=%s)", name, item_type)
         return {
             "ok":        True,
             "name":      name,
+            "units":     item.get("units", 1),
             "price":     price,
             "item_type": item_type,
             "_scenario": "loose",
@@ -308,7 +310,9 @@ def _resolve_single(item: dict, products: list) -> dict:
         return {
             "ok":         True,
             "name":       best_product.get("name", name),
+            "units":      item.get("units", 1),
             "price":      best_product.get("price", price or 0),
+            "item_type":  "rental",  # catalog products are rental equipment
             "product_id": best_product.get("id", ""),
             "sku":        best_product.get("sku", ""),
             "_score":     round(best_score, 3),
@@ -326,7 +330,9 @@ def _resolve_single(item: dict, products: list) -> dict:
             return {
                 "ok":         True,
                 "name":       name,
+                "units":      item.get("units", 1),
                 "price":      price or 0,
+                "item_type":  "rental",
                 "product_id": create_result["product_id"],
                 "_scenario":  "created",
             }
