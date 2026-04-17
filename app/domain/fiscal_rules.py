@@ -109,9 +109,10 @@ def compute_item_fiscality(item_type: str, tax_regime: str) -> dict:
     retention = IRPF_RATES.get(item_type, 0)
     tax = IVA_RATES.get(tax_regime, 21)
 
-    # Account ID: expenses have no retention account (price may be 0)
+    # Account ID by retention rate, with expense override
+    # Expenses (taxi, hotel, SSD) repercutidos al cliente = prestación de servicios (75900000)
     if item_type == "expense":
-        account_id = None
+        account_id = ACCOUNT_BY_IRPF.get(15)  # 75900000 — Prestación de servicios
     else:
         account_id = ACCOUNT_BY_IRPF.get(retention)
 
