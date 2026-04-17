@@ -151,6 +151,18 @@ def _score_product(query: str, product: dict) -> float:
     if len(name) >= 4 and name in query:
         return 0.88
 
+    # Token overlap — all query words appear in product name
+    # Handles "Sigma 24-70" matching "Sigma Art 24-70mm f2.8"
+    query_tokens = set(query.split())
+    name_tokens = set(name.split())
+    if len(query_tokens) >= 2 and query_tokens.issubset(name_tokens):
+        return 0.90
+
+    # Partial token overlap — check if key tokens match (ignoring suffixes like "mm", "f2.8")
+    matched = sum(1 for qt in query_tokens if any(qt in nt or nt.startswith(qt) for nt in name_tokens))
+    if len(query_tokens) >= 2 and matched == len(query_tokens):
+        return 0.85
+
     return SequenceMatcher(None, query, name).ratio()
 
 
