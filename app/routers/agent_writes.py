@@ -224,6 +224,20 @@ def agent_update_estimate(estimate_id: str, body: CreateDocumentBody):
     """Update an estimate's products in Holded. Used by job-automation after YES confirmation."""
     if not _re_mod.match(r'^[a-f0-9]{24}$', estimate_id):
         return JSONResponse({"error": "Invalid estimate ID"}, status_code=400)
+
+    # Validate IRPF retention on updated items (same rules as create)
+    from write_validators import _validate_retention, _fetch_contact, _fetch_products_batch
+    if body.contact_id:
+        contact = _fetch_contact(body.contact_id)
+        if contact:
+            product_ids = [i.get("product_id") for i in body.items if i.get("product_id")]
+            products_map = _fetch_products_batch(product_ids) if product_ids else {}
+            ret_errors = _validate_retention(body.items, contact, products_map)
+            if ret_errors:
+                return JSONResponse(
+                    {"success": False, "error": ret_errors[0]["msg"], "errors": ret_errors},
+                    status_code=422)
+
     if not _USE_GATEWAY:
         items_list = build_holded_items_with_accounts(body.items, sanitize=False)
         payload = {"items": items_list}
