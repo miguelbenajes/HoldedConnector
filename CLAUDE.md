@@ -1,7 +1,7 @@
 # HoldedConnector - Claude Development Notes
 
 ## Project Overview
-FastAPI + Vanilla JS financial dashboard that syncs data from Holded API to PostgreSQL (Supabase) and includes an AI-powered virtual assistant built with Claude tool_use.
+FastAPI + Vanilla JS financial dashboard syncing Holded API data to PostgreSQL (Supabase), with an AI virtual assistant built on Claude tool_use.
 
 **Repo:** https://github.com/miguelbenajes/HoldedConnector (private)
 
@@ -9,23 +9,10 @@ FastAPI + Vanilla JS financial dashboard that syncs data from Holded API to Post
 
 ## Architecture Highlights
 
-### Backend Stack
-- **FastAPI** (Python 3.9+) — API server on port 8000
-- **PostgreSQL (Supabase)** — Primary cloud database (production)
-- **SQLite** (holded.db) — Local dev fallback (when `DATABASE_URL` is not set)
-- **Anthropic Claude API** — AI agent (claude-sonnet-4-20250514)
-- **Holded API** — Sync invoices, purchases, estimates, contacts, products
-
-### Frontend Stack
-- **Vanilla JavaScript** — No frameworks
-- **Chart.js v4** — Inline charts in chat
-- **Dark/Light theme** — Glassmorphic UI with theme toggle
-
-### AI Agent
-- **Tool use (function calling)** — 19 tools total
-- **Streaming responses** — SSE (`text/event-stream`)
-- **Write confirmation** — User approval for write operations
-- **Safe Mode** — Dry-run write operations (env: `HOLDED_SAFE_MODE=true`)
+### Stack
+- **Backend:** FastAPI (Python 3.9+, port 8000) · PostgreSQL/Supabase (production) · SQLite `holded.db` (dev fallback when `DATABASE_URL` unset) · Anthropic Claude API (claude-sonnet-4-20250514) · Holded API sync
+- **Frontend:** Vanilla JS (no frameworks) · Chart.js v4 inline charts · glassmorphic UI with dark/light theme toggle
+- **AI agent:** tool use (19 tools) · SSE streaming (`text/event-stream`) · write confirmation · Safe Mode dry-run writes
 
 ### Database Abstraction Layer
 All DB access goes through `connector.py` helpers — **never use raw `sqlite3.connect()` or `psycopg2.connect()`** in other files.
@@ -60,8 +47,6 @@ _fetch_one_val(c,k) # Fetches single scalar from either cursor type
 
 ## Database Schema
 
-**Backend:** Dual-mode — PostgreSQL (Supabase) when `DATABASE_URL` is set, SQLite otherwise.
-
 ### Core Tables
 - `invoices` — Sales invoices (status: 0=draft, 1=pending, 3=paid, 4=overdue, 5=cancelled — derived from Holded API fields, not raw status)
 - `purchase_invoices` — Expenses/purchases (same status codes)
@@ -70,11 +55,10 @@ _fetch_one_val(c,k) # Fetches single scalar from either cursor type
 - `products` — Inventory (price, stock, sku, kind: 'simple'|'pack', web_include: 0|1 default 1)
 - `pack_components` — Pack composition (pack_id, component_id, quantity) — refreshed on sync
 - `payments` — Payment records
-- `projects` — Project tracking
+- `projects` — Project tracking (synced from Holded; line items reference via `project_id`)
 - `ledger_accounts` — Chart of accounts
 - `invoice_items` / `purchase_items` / `estimate_items` — Line items (SERIAL PK, include `project_id` + `kind`)
-- `invoices` / `purchase_invoices` / `estimates` — include `tags` (JSON array as TEXT) + `notes`
-- `projects` — Synced from Holded; line items reference projects via `project_id`
+- Doc tables (`invoices`/`purchase_invoices`/`estimates`) also include `tags` (JSON array as TEXT) + `notes`
 
 ### AI-Related Tables
 - `ai_history` — Conversation messages (id, role, content, timestamp, conversation_id, tool_calls)
@@ -185,36 +169,13 @@ _fetch_one_val(c,k) # Fetches single scalar from either cursor type
 
 ## Frontend Features
 
-### Chat Panel (Floating FAB)
-- **Location:** Bottom-right corner, FAB opens slide-in panel
-- **Width:** 420px (desktop), 100% (mobile)
-- **Features:**
-  - Streaming text display (token by token)
-  - Inline Chart.js charts (bar, line, doughnut, pie)
-  - Tool use visualization ("Using query_database...")
-  - Write confirmation dialog
-  - Favorite button on responses
-  - Download links for PDF reports
-  - File upload for CSV/Excel analysis
-
-### History & Favorites Drawer
-- **Trigger:** Button in chat header
-- **Tabs:** History (past conversations) / Favorites (saved queries)
-- **Data:** Fetched on drawer open, cached in JS
-
-### Dashboard Features
-- Live search across entity tables
-- Invoice subtabs (all/unpaid/overdue)
-- Aging widget for receivables
-- Column resizer on data tables
-- Dark/light theme toggle
+### Chat Panel & Dashboard (UI)
+- FAB chat (bottom-right, 420px desktop / 100% mobile): streaming, inline Chart.js, tool-use visualization, write confirmation dialog, favorites, PDF links, CSV/Excel upload
+- History & Favorites drawer (chat header button, fetched on open + cached in JS)
+- Dashboard: live search, invoice subtabs (all/unpaid/overdue), aging widget, column resizer, theme toggle
 
 ### Entity Table Action Buttons
-Each entity view has a header "New" button linking to Holded web (e.g., "+ Nueva Factura").
-Row-level action buttons per entity:
-- **All documents:** PDF viewer, Holded edit link
-- **Estimates (status != 4):** "Facturar" — converts to draft invoice via gateway (`POST /api/agent/convert-estimate`)
-- **Invoices (status 1/2/4):** "Pagar" — opens payment modal with bank account selector (from `GET /api/treasury`), date, amount (pre-filled from `payments_pending`), description
+Header "New" button per entity view links to Holded web. Row-level: PDF viewer + Holded edit link (all docs); "Facturar" on estimates (status != 4) → `POST /api/agent/convert-estimate`; "Pagar" on invoices (status 1/2/4) → payment modal (bank selector, amount pre-filled)
 
 ### Hacienda / SII Safety (CRITICAL)
 - Approving an invoice (borrador→aprobada, status 0→1) submits it to Hacienda via SII — **irreversible and legally binding**
@@ -223,9 +184,7 @@ Row-level action buttons per entity:
 - `update_invoice_status` tool shows critical warning when status=1 is requested
 
 ### Frontend View Routing
-- `showView(name)` in app.js maps special views via `specialViews` dict
-- Entity views auto-route to `view-entity` + `loadEntityData()`
-- Custom views (overview, setup, amortizations) need explicit entry in `specialViews`
+`showView(name)` in app.js: entity views auto-route to `view-entity` + `loadEntityData()`; custom views (overview, setup, amortizations) need explicit entry in the `specialViews` dict
 
 ---
 
@@ -234,7 +193,7 @@ Row-level action buttons per entity:
 ### Environment Variables (.env)
 ```bash
 HOLDED_API_KEY=your_key_here            # Holded API key
-HOLDED_SAFE_MODE=false                  # Dry-run mode for writes (LIVE since 2026-03-12)
+HOLDED_SAFE_MODE=false                  # Dry-run mode for writes (currently live)
 ANTHROPIC_API_KEY=sk-ant-...            # Claude API key (optional, can set in UI)
 
 # PostgreSQL (Supabase) — leave blank for SQLite dev mode
@@ -252,23 +211,14 @@ SUPABASE_SERVICE_KEY=sb_secret_...      # Service role key
 ```
 
 ### Settings Table (runtime config)
-- `claude_api_key` — Saved Claude key
-- `ai_model` — Default: claude-sonnet-4-20250514
-- `holded_api_key` — Saved Holded key
-- `uploads_dir` / `reports_dir` — Custom file paths
+Keys: `claude_api_key`, `ai_model` (default claude-sonnet-4-20250514), `holded_api_key`, `uploads_dir` / `reports_dir`.
 
 ---
 
 ## Key Implementation Details
 
 ### Streaming Architecture
-```python
-def chat_stream(user_message, conversation_id):
-    # Generator yielding SSE events:
-    # "tool_start", "tools_used", "charts", "text_delta", "done",
-    # "confirmation_needed", "error"
-```
-Frontend consumes via `ReadableStream` + SSE parsing.
+`chat_stream()` yields SSE events (`tool_start`, `tools_used`, `charts`, `text_delta`, `done`, `confirmation_needed`, `error`); frontend consumes via `ReadableStream`.
 
 ### Write Confirmation Flow
 1. Agent calls write tool → generates state_id, stores in `pending_actions` (5 min TTL)
@@ -283,114 +233,26 @@ Frontend consumes via `ReadableStream` + SSE parsing.
 - All tables use `CREATE TABLE IF NOT EXISTS`
 - **Never** add a table without adding it to `init_db()` in connector.py
 
-### Holded API Field Reference (discovered from live responses)
-- Invoice/estimate/purchase top-level: `tags` (array), `notes`, `customFields` (array), `docNumber`
-- Line item fields: `projectid` (lowercase — not camelCase `projectId`), `kind`, `costPrice`, `desc`
-- Store tags as: `json.dumps(item.get('tags') or [])` — requires `import json` in connector.py
-- Holded purchases API times out on page 2 consistently — not a code bug, all records are on page 1
-- To inspect all available API fields: fetch a tiny time window → `params={'starttmp': X, 'endtmp': X+100000}`
-- **Holded API status bug (discovered 2026-03-13):** The API `status` field is unreliable — it returns `0` for approved invoices and doesn't distinguish paid/unpaid/overdue. `sync_documents()` now derives the real status from multiple fields: `approvedAt` (approval), `paymentsPending` (paid vs unpaid), `dueDate` (overdue), API `status==3` (cancelled). Maps to: 0=draft, 1=pending, 3=paid, 4=overdue, 5=cancelled.
+### Project Tracking
+- **Tags** on documents (whole-doc job code) or **`project_id`** on line items (finer control). Workflow: create project in Holded → tag/assign → sync → query
+- Query by tag: `WHERE tags LIKE '%"CODE"%'`; by project: `JOIN projects p ON ii.project_id = p.id`
 
-### Project Tracking (added 2026-03-03)
-- **Tags** on documents (`invoices.tags`, etc.) — easiest: tag whole document in Holded with job code
-- **`project_id`** on line items — finer control, assign per line in Holded
-- Query by tag: `WHERE tags LIKE '%"CODE"%'` or parse JSON in Python
-- Query by project: `JOIN projects p ON ii.project_id = p.id`
-- Workflow: create project in Holded → assign to line items or tag document → sync → query
-
-### Project Code System (added 2026-03-12)
-- **Product "Proyect REF:"** (ID: `69b2b35f75ae381d8f05c133`) — a €0 product in Holded
-- Add it as a line item on any quote/invoice; the **description field** carries the project code
-- **Format convention:** `CLIENT-DDMMYYYY` (e.g. `MEDIASET-15032026`)
-- During sync, `_extract_project_code()` detects the item by productId or name (case-insensitive fallback)
-- Extracted code stored in `project_code` column on `invoices`, `estimates`, `purchase_invoices`
-- Line item descriptions (`desc`) are synced on all 3 items tables
-- Query: `SELECT * FROM invoices WHERE project_code = 'NETFLIX-15032026'`
-- If the "Proyect REF:" item is removed, `project_code` is cleared to NULL on next sync
+### Project Code System
+- €0 product **"Proyect REF:"** (ID `69b2b35f75ae381d8f05c133`) as line item; its **description** carries the code, format `CLIENT-DDMMYYYY` (e.g. `MEDIASET-15032026`)
+- On sync, `_extract_project_code()` detects it (productId or name, case-insensitive) → `project_code` column on `invoices` / `estimates` / `purchase_invoices` (NULL if item removed). Line-item `desc` synced on all 3 items tables. Query: `WHERE project_code = 'NETFLIX-15032026'`
 
 ### Sync Functions Pattern
-```python
-# SQLite path:
-cursor.execute("INSERT OR REPLACE INTO contacts (...) VALUES (?, ?)", (a, b))
-
-# PostgreSQL path:
-cursor.execute("""INSERT INTO contacts (...) VALUES (%s, %s)
-    ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, ...""", (a, b))
-```
-Items tables (invoice_items, etc.) use DELETE + INSERT pattern.
+Upserts follow the PG gotchas mapping above (`INSERT OR REPLACE` → `ON CONFLICT ... DO UPDATE`). Items tables (invoice_items, etc.) use DELETE + INSERT pattern.
 
 ---
 
 ## Data Cleaning & Linking Tools
 
-**Purpose:** Clean up invoice_items without product_id, link them to actual products, enable ROI tracking.
-
-### 1. `inventory_matcher.py` — Fuzzy Match Invoice Concepts to Products
-- Reads invoice_items where product_id IS NULL
-- Fuzzy matches against products table (≥60% similarity threshold)
-- Outputs Excel with two sheets: MATCHED (for reference) + NOT_MATCHED (candidates for creation)
-- Uses `openpyxl` for formatted output with checkboxes and editable fields
-- **Usage:** `/usr/bin/python3 inventory_matcher.py` → generates `products_to_import.xlsx`
-
-### 2. `link_matched_products.py` — Link Items + Auto-Create Amortizations
-- Reads Excel MATCHED sheet (openpyxl)
-- Bulk updates invoice_items.product_id in single transaction
-- Creates amortizations for linked products (ON CONFLICT safe)
-- **Gotcha:** String trimming matters — `'California sun bounce '` ≠ `'California sun bounce'` (trailing spaces)
-- **Usage:** `/usr/bin/python3 link_matched_products.py`
-- **Impact:** 204 items linked, revenue visibility increased 7x (€16k → €114k)
-
-### 3. `migrate_amortizations.py` — SQLite → Supabase Migration
-- One-time migration of manually-curated amortizations from holded.db
-- Maps old SQLite AUTOINCREMENT IDs → new PostgreSQL SERIAL IDs
-- Sets purchase_item_id=NULL (SERIAL IDs don't port between databases)
-- Safe: Handles duplicates gracefully (ON CONFLICT DO NOTHING)
-- **Usage:** `/usr/bin/python3 migrate_amortizations.py` (ran once on 2026-03-02)
-
-### 4-7. Product Management Suite (`product-management/` folder)
-Self-contained toolset for classification, linking, and import workflows:
-
-**4. `classify_products.py` — Classify Unmatched Products (Phase 2)**
-- Reads 307 NOT_MATCHED products from `products_to_import.xlsx`
-- Categorizes into 4 types: Real Products (177), Services (46), Expenses (64), Administrative (20)
-- Uses keyword-based classification with configurable thresholds
-- Outputs `products_classified.xlsx` with separate sheets per category
-- **Usage:** `cd product-management && python3 classify_products.py`
-
-**5. `generate_products_for_import.py` — Master Import File Generator (Phase 3)**
-- Reads classified products and generates comprehensive Excel for data entry
-- Creates 5 sheets: Real Products, Expenses (with project_id), Services-Fees, Administrative, Reference
-- Includes OT (overtime) detection for service entries (pattern: "OT xx hours on xx day")
-- Outputs `products_for_import.xlsx` ready for user review and manual data entry
-- **Usage:** `cd product-management && python3 generate_products_for_import.py`
-
-**6. `apply_product_corrections.py` — Apply User Decisions & Link to Inventory (Phase 4)**
-- Reads user corrections from `products_for_import.xlsx`
-- Applies reclassifications (e.g., Real Product ↔ Service ↔ Expense)
-- Links products to existing inventory when appropriate
-- Creates amortizations for linked products (e.g., ALQ MACBOOK → Macbook Pro Max M3)
-- Regenerates `products_for_import.xlsx` with corrected classifications
-- **Usage:** `cd product-management && python3 apply_product_corrections.py`
-
-**7. `product_mappings.yaml` — Learning File for Classification Patterns**
-- Documents classification rules, keywords, and patterns learned from user decisions
-- Stores product linking rules (e.g., ALQ prefix → equipment rental)
-- Records all reclassifications and rationale for future automation
-- Enables scripts to apply learned patterns to new unmatched products
-- **Purpose:** Improve automation accuracy over time; reference for similar classification tasks
-- **Format:** YAML with sections for rules, examples, automations, reference data
-
-**See `product-management/README.md` for full workflow documentation.**
-
-### 8. `link_holded_to_knowledge.py` — Map Holded Products → Knowledge DB
-- Interactive CLI tool to create 1:1 mappings between Holded products and `knowledge.product_models`
-- Fuzzy matches product names, shows top 8 candidates with similarity scores
-- Stores mappings in `knowledge.holded_product_links` table (Supabase)
-- Supports auto-link mode (`a`) for ≥80% matches, skip (`s`), quit (`q`)
-- Re-runnable: skips already-linked products on each run
-- **Requires:** `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` in `.env`, `pip install supabase`
-- **Usage:** `/usr/bin/python3 link_holded_to_knowledge.py`
-- **Impact:** 71 products linked (2026-03-09), enables merged catalog in `apps/web`
+Maintenance/one-off scripts — details in each script's docstring:
+- `inventory_matcher.py` — fuzzy-match unlinked invoice_items → Excel · `link_matched_products.py` — bulk-link + create amortizations
+- `migrate_amortizations.py` / `backfill_packs.py` — one-time migrations, already run
+- `link_holded_to_knowledge.py` — interactive map to `knowledge.product_models`
+- `product-management/` — classification & import suite (rules in `product_mappings.yaml`; see its `README.md`)
 
 ---
 
@@ -401,43 +263,12 @@ holded-connector/
 ├── api.py              # FastAPI server, all HTTP endpoints
 ├── connector.py        # DB abstraction, Holded API sync, all data access
 ├── ai_agent.py         # Claude tool_use agent, 19 tools, streaming
-├── write_gateway.py    # Safe Write Gateway — 6-stage pipeline for all Holded writes
-├── write_validators.py # Input validation, sanitization, status transitions
-├── write_preview.py    # Rich previews, warnings, reversibility assessment
+├── write_gateway.py / write_validators.py / write_preview.py  # Safe Write Gateway: 6-stage pipeline · validation · previews
 ├── auth.py             # Triple-auth middleware (Supabase cookie + JWT + legacy token)
 ├── reports.py          # PDF/Excel report generation
-├── inventory_matcher.py         # Generate Excel with fuzzy-matched products (phase 1)
-├── link_matched_products.py     # Bulk link invoice_items to products + create amortizations
-├── migrate_amortizations.py     # SQLite→Supabase migration for amortizations (40 items)
-├── backfill_packs.py            # One-time: populate pack_components + migrate pack amortizations
-├── link_holded_to_knowledge.py  # Interactive: map Holded products → knowledge.product_models
-├── requirements.txt    # Python dependencies
-├── .env                # Local config (not in git)
-├── .env.example        # Config template
-├── CLAUDE.md           # This file
-├── README.md           # Project readme
-├── product-management/ # Product classification & import suite
-│   ├── README.md       # Product management workflow documentation
-│   ├── classify_products.py         # Phase 2: Classify 307 NOT_MATCHED products
-│   ├── match_expenses_to_inventory.py # Phase 2: Fuzzy match expenses to inventory
-│   ├── generate_products_for_import.py # Phase 3: Generate master import file
-│   ├── apply_product_corrections.py    # Phase 4: Apply user corrections & link to inventory
-│   ├── product_mappings.yaml           # Learned classification rules & patterns
-│   ├── products_classified.xlsx        # Output: Classification by category
-│   ├── products_final_review.xlsx      # Output: Expenses matched to inventory
-│   └── products_for_import.xlsx        # Output: Master file ready for import
-├── docs/plans/         # Migration/design documents
-├── skills/
-│   ├── __init__.py
-│   └── job_tracker.py           # Job dossier system: date parser, note renderer, Obsidian sync
-└── static/
-    ├── index.html      # Main HTML (single-page app)
-    ├── app.js          # All frontend logic (~2400 lines)
-    ├── style.css       # All styles (~1600 lines)
-    ├── hdate.js        # Calendar/date picker component
-    ├── manifest.json   # PWA manifest
-    ├── sw.js           # Service worker
-    └── icons/          # PWA icons
+├── *.py + product-management/  # Data cleaning scripts — see "Data Cleaning & Linking Tools"
+├── skills/job_tracker.py  # Job dossier system: date parser, note renderer, Obsidian sync
+└── static/             # SPA: index.html, app.js (~2400 lines), style.css (~1600 lines), hdate.js, PWA assets
 ```
 
 ---
@@ -474,57 +305,19 @@ conn.close()
 
 ---
 
-## Migration Status
-
-### Completed
-- [x] `connector.py` — Full dual-backend (SQLite/PostgreSQL) with all helpers
-- [x] `reports.py` — Migrated to `connector.get_db()`
-- [x] Supabase — 20 tables created, full data sync verified
-- [x] PWA — Installable on desktop and mobile
-- [x] Dark/light theme toggle
-- [x] Amortizations migration — 40 items SQLite → Supabase (`migrate_amortizations.py`)
-- [x] Invoice linking — 207 items linked (`inventory_matcher.py` + `link_matched_products.py`)
-- [x] Data cleaning — Revenue impact: €16k → €114k (7x increase from proper product linking)
-- [x] Project tracking — `tags` + `project_id` + `notes` added to all doc/item tables (2026-03-03)
-- [x] 307 NOT_MATCHED products classified + reviewed (`product-management/` suite complete)
-- [x] `process_reviewed_items.py` — reads user-reviewed CSV, creates amortizations with revenue data
-- [x] Website integration — `web_include` field on products + `/api/products/web` endpoint (2026-03-09)
-- [x] Knowledge DB linking — 71 products mapped via `link_holded_to_knowledge.py` → `knowledge.holded_product_links` (2026-03-09)
-- [x] Merged catalog endpoint in `apps/web` — `GET /api/products/catalog` joins knowledge specs + Holded pricing (2026-03-09)
-- [x] Safe Write Gateway — 6-stage write pipeline (validate→preview→confirm→execute→sync→audit) with HMAC audit trail (2026-03-12)
-- [x] Convert estimate to invoice — gateway operation + AI tool + REST endpoint + UI button (2026-03-12)
-- [x] Hacienda/SII safety — critical warnings on invoice approval, never auto-approveDoc (2026-03-12)
-- [x] UI action buttons — pay invoice modal (treasury API), convert estimate, new document links to Holded web (2026-03-12)
-- [x] SAFE_MODE disabled — live writes to Holded API enabled (2026-03-12)
-- [x] Triple-auth middleware — Supabase cookie + JWT Bearer + legacy token (2026-03-12)
-- [x] Job tracker — Obsidian dossier per project with PDF, expenses, checklist (2026-03-12)
-
-### Pending (Tasks 8+)
-- [ ] Create 34 new real products + fill cost prices (`products_processed.xlsx` Sheets 1 & 2)
-- [ ] Create 40 services (fee type) + 61 expenses in Holded (`products_processed.xlsx` Sheets 3 & 4)
-- [ ] `api.py` — Still has ~3 raw `sqlite3.connect()` calls (lines ~211, ~622, ~1120, ~1191)
-- [ ] `ai_agent.py` — Still has ~22 raw `sqlite3.connect()` calls (all exec_* functions)
-- [ ] Docker deployment (Dockerfile, docker-compose.yml)
-- [ ] n8n integration workflows
-
----
-
 ## Known Limitations
 
-1. **Raw sqlite3 in api.py/ai_agent.py** — These files bypass the abstraction layer (migration pending)
-2. **No Real Streaming in Agent Loop** — Tool calls are non-streaming (full response before text)
-3. **Simple SQL Validation** — Regex-based, not foolproof
-4. **Rate Limiting** — 10 requests/min per IP (basic) + gateway rate limits per source
-6. **SAFE_MODE Simulation** — Doesn't actually call Holded, returns fake ID
+- Raw sqlite3 in api.py/ai_agent.py bypasses the abstraction layer (migration pending)
+- Agent loop tool calls are non-streaming (full response before text)
+- SQL validation is regex-based, not foolproof
+- Rate limiting: 10 req/min per IP (basic) + gateway limits per source
+- SAFE_MODE doesn't actually call Holded, returns fake ID
 
 ---
 
 ## PWA & Deployment
 
-### PWA (Progressive Web App)
-- `static/manifest.json` — App name, icons, theme, display mode
-- `static/sw.js` — Service worker (cache-first for static, network-first for API)
-- `static/icons/icon-192.png`, `icon-512.png` — App icons
+PWA: `static/manifest.json` + `static/sw.js` (cache-first static, network-first API) + `static/icons/`.
 
 ### Quick Deploy
 ```bash
@@ -564,8 +357,3 @@ python3 api.py
 ## Obsidian Vault Sync (MANDATORY)
 
 See global `~/.claude/CLAUDE.md` for full rules. Document Holded connector changes (API, sync, tools, schema) in `Coyote AI/` via `mcp__obsidian__*` tools.
-
----
-
-**Last Updated:** 2026-03-12
-**Latest Milestone:** Safe Write Gateway (6-stage pipeline for all Holded writes) + UI action buttons (pay invoice, convert estimate, new document links) + Hacienda/SII safety controls + SAFE_MODE disabled (live writes)
